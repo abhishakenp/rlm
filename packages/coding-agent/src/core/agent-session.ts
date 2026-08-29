@@ -1572,6 +1572,86 @@ export class AgentSession {
 		return absPath;
 	}
 
+	/** Message counter for variable naming. */
+	private _messageVarCounter: number = 0;
+
+	/**
+	 * Capture EVERY message as a context variable. The entire conversation
+	 * is variables — user messages, assistant responses, tool calls, tool
+	 * results. The LLM can mutate them via context.update(), and the
+	 * mutated version is what goes to the next LLM call. The TUI shows
+	 * all message variables live.
+	 */
+	private _captureMessageAsContext(message: AgentMessage): void {
+		const ctx = (globalThis as any).__rlmContextProxy;
+		if (!ctx) return;
+		try {
+			const idx = this._messageVarCounter++;
+			let varName: string;
+			let value: string;
+			let description: string;
+
+			if (message.role === "user") {
+				varName = `message.user-${idx}`;
+				const text = typeof (message as any).content === "string"
+					? (message as any).content
+					: JSON.stringify((message as any).content ?? "").slice(0, 500);
+				value = text.slice(0, 1000);
+				description = `User message ${idx}`;
+			} else if (message.role === "assistant") {
+				varName = `message.assistant-${idx}`;
+				const assistant = message as AssistantMessage;
+				// Extract text + tool call summaries.
+				const parts: string[] = [];
+				for (const block of assistant.content) {
+					if (block.type === "text" && typeof (block as any).text === "string") {
+						parts.push((block as any).text);
+					} else if (block.type === "toolCall") {
+						parts.push(`[tool: ${(block as any).name}]`);
+					} else if (block.type === "thinking") {
+						parts.push(`[thinking]`);
+					}
+				}
+				value = parts.join("\n").slice(0, 1000);
+				description = `Assistant response ${idx}`;
+			} else if (message.role === "toolResult") {
+				varName = `message.tool-result-${idx}`;
+				const toolName = (message as any).toolName ?? "unknown";
+				// Extract text from tool result content.
+				const parts: string[] = [];
+				const content = (message as any).content;
+				if (Array.isArray(content)) {
+					for (const part of content) {
+						if (typeof part === "string") parts.push(part);
+						else if (part?.type === "text" && typeof part.text === "string") parts.push(part.text);
+					}
+				} else if (typeof content === "string") {
+					parts.push(content);
+				}
+				value = `[${toolName}] ${parts.join("\n")}`.slice(0, 1000);
+				description = `Tool result ${idx}: ${toolName}`;
+			} else {
+				return; // Skip custom/other message types.
+			}
+
+			if (value.length < 2) return;
+
+			// All message variables are mutable — the LLM can update them.
+			// The mutated version is what gets reconstructed for the next call.
+			if (ctx.get(varName) === undefined) {
+				ctx.set(varName, value, {
+					type: "string",
+					mutable: true,
+					description,
+					scope: "session",
+					source: message.role,
+				});
+			} else {
+				ctx.update(varName, value);
+			}
+		} catch { /* best effort */ }
+	}
+
 	/**
 	 * Capture thinking traces and assistant text as context variables.
 	 * Everything the LLM emits is a variable — visible in TUI, copyable to
@@ -3901,6 +3981,11 @@ export class AgentSession {
 				event.message.role === "toolResult"
 			) {
 				this.sessionManager.appendMessage(event.message);
+				// EVERY message is a variable. The entire conversation is
+				// variables — user messages, assistant responses, tool calls,
+				// tool results. The LLM can mutate them, and the mutated
+				// version is what goes to the next LLM call.
+				this._captureMessageAsContext(event.message);
 			}
 
 			if (event.message.role === "assistant") {
