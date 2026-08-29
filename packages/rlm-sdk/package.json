@@ -1,0 +1,15 @@
+{
+  "name": "@rlm/sdk",
+  "version": "0.1.0",
+  "description": "rlm TypeScript SDK — in-process subagent spawning, goal management, workflow composition",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": {
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  }
+}

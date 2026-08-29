@@ -1,0 +1,16 @@
+{
+  "name": "@rlm/workflow",
+  "version": "0.1.0",
+  "description": "rlm workflow orchestrator — hot-swappable TS workflows using @rlm/sdk",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": {
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "chokidar": "^5.0.0"
+  }
+}

@@ -2,74 +2,13 @@
 #
 # Each entry is a plugin loaded by the Cordis host. HMR can reload any
 # plugin at runtime. Dependency order matters:
-#   1. Core services (llm, session, kernel, memory) — no deps
-#   2. Agent (depends on llm)
-#   3. Subagent, wound (depend on agent)
-#   4. Refinement, reflect (depend on agent + llm + memory)
-#   5. Extensions, skills (depend on agent)
-#   6. TUI (depends on agent + llm) — last so it observes all plugins
+#   1. SDK (wraps prime-agent runtime for in-process spawning)
+#   2. Workflow (depends on SDK)
+#   3. Learn (depends on SDK + Workflow)
 
-- id: llm
-  name: '@rlm/llm'
+- id: sdk
+  name: './packages/rlm-sdk/src/index.ts'
   config:
-    url: http://localhost:20128/v1
-    apiKey: omniroute-local
+    maxDepth: 10
     defaultModel: auto/best-free
 
-- id: session
-  name: '@rlm/session'
-  config:
-    sessionDir: ~/.rlm/sessions
-
-- id: kernel
-  name: '@rlm/kernel'
-  config:
-    pythonPath: python3
-
-- id: memory
-  name: '@rlm/memory'
-  config:
-    memoryDir: ~/.rlm/memory
-
-- id: agent
-  name: '@rlm/agent'
-  config:
-    maxIterations: 25
-    maxDepth: 10
-
-- id: subagent
-  name: '@rlm/subagent'
-  config:
-    maxDepth: 10
-
-- id: wound
-  name: '@rlm/wound'
-  config:
-    maxRefinePerPlugin: 3
-    cooldownTurns: 5
-
-- id: refinement
-  name: '@rlm/refinement'
-  config:
-    maxProposals: 5
-    autoApply: false
-
-- id: reflect
-  name: '@rlm/reflect'
-  config:
-    intervalTurns: 10
-
-- id: extensions
-  name: '@rlm/extensions'
-  config:
-    extensionsDir: ~/.rlm/extensions
-
-- id: skills
-  name: '@rlm/skills'
-  config:
-    skillsDir: ~/.rlm/skills
-
-- id: tui
-  name: '@rlm/tui'
-  config:
-    verbose: false
