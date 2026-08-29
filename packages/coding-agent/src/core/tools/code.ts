@@ -74,6 +74,8 @@ export interface CodeToolOptions {
 	shellPath?: string;
 	/** Shared provisioner owning the kernel lifecycle. */
 	provisioner?: CodeKernelProvisioner;
+	/** Context proxy from @rlm/context — injected into the VM sandbox. */
+	contextProxy?: any;
 }
 
 // ─── Host request handlers (for rlm SDK integration) ─────────────────────────
@@ -179,6 +181,9 @@ export class CodeKernelProvisioner {
 
 			// rlm SDK — resolved lazily via host handlers
 			rlm: this.createRlmProxy(),
+
+			// Context registry — persistent typed variables (agent working memory)
+			context: this.options?.contextProxy,
 
 			// Helpers
 			cwd,

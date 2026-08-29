@@ -224,6 +224,20 @@ async function main() {
 	// and the rlmCode Cordis service provides the execution backend.
 	console.error(`[rlm] code tool is native built-in`);
 
+	// Inject the context registry proxy into the agent session.
+	// The context service is a Cordis plugin — we expose it via globalThis
+	// so agent-session.ts can pass it into the code tool's VM context.
+	try {
+		const contextService = ctx.get("rlmContext");
+		if (contextService) {
+			const { createContextProxy } = await import("./packages/rlm-context/src/index.ts");
+			globalThis.__rlmContextProxy = createContextProxy(contextService);
+			console.error(`[rlm] context registry active`);
+		}
+	} catch (error) {
+		console.error(`[rlm] context registry unavailable: ${error?.message ?? error}`);
+	}
+
 	// Launch prime-agent in-process.
 	// runCli() reads process.argv and dispatches to interactive mode or print mode.
 	// The interactive mode uses InProcessAgentConnection (no daemon).

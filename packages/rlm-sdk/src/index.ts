@@ -30,6 +30,8 @@ export interface SpawnOptions {
 	thinking?: string;
 	cwd?: string;
 	depth?: number;
+	/** Context variable patterns to pass to the child (e.g. ["auth.*", "db.*"]). */
+	context?: string[];
 }
 
 export interface SubagentHandle {
@@ -153,6 +155,14 @@ export class RlmSdkService extends Service {
 			const baseToolsOverride: Record<string, any> = {};
 			if (codeService) {
 				baseToolsOverride.code = createJsCodeTool(codeService);
+			}
+
+			// Pass context variables to the child's task scope.
+			const contextService = this.ctx.get("rlmContext");
+			if (contextService && opts.context && opts.context.length > 0) {
+				const snapshot = contextService.toSnapshot(opts.context);
+				// Load the snapshot into the child's task scope via globalThis.
+				(globalThis as any).__rlmTaskContextSnapshot = snapshot;
 			}
 
 			const { session } = await this.createAgentSessionFn({

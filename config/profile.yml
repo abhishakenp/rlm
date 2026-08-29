@@ -1,17 +1,20 @@
 # rlm profile — Cordis entry-list composing all plugins.
 #
-# Four plugins, all hot-swappable via HMR:
-#   1. Code — persistent JS code execution (replaces bash + edit)
-#   2. SDK — in-process subagent spawning (wraps prime-agent runtime)
-#   3. Workflow — hot-swappable TS workflows from ~/.prime/agent/workflows/
-#   4. Learn — self-evolution (tracks outcomes, proposes modifications)
+# Five plugins, all hot-swappable via HMR:
+#   1. Context — persistent typed variable registry (agent working memory)
+#   2. Code — persistent JS code execution (replaces bash + edit)
+#   3. SDK — in-process subagent spawning (wraps coding-agent runtime)
+#   4. Workflow — hot-swappable TS workflows from ~/.prime/agent/workflows/
+#   5. Learn — self-evolution (tracks outcomes, proposes modifications)
 #
-# Order matters: Code must load before SDK so the code service is
-# available when SDK spawns subagents with baseToolsOverride.
-#
-# The prime-agent bundle provides the UI, agent loop, session management,
-# model routing (OmniRoute), and recursive subagent infrastructure.
-# These four plugins are the Cordis-managed layer on top.
+# Order matters: Context must load first so the context service is
+# available when Code injects it into the VM context. Code must load
+# before SDK so the code service is available when SDK spawns subagents.
+
+- id: context
+  name: './packages/rlm-context/src/index.ts'
+  config:
+    projectRoot: .
 
 - id: code
   name: './packages/rlm-code/src/index.ts'

@@ -8933,7 +8933,34 @@ export class AgentSession {
 				onRestore: notifyRestore ? (result) => this._onCodeStateRestored(result) : undefined,
 				commandPrefix: this.settingsManager.getShellCommandPrefix(),
 				shellPath: this.settingsManager.getShellPath(),
+				contextProxy: (globalThis as any).__rlmContextProxy,
 			});
+
+			// If a task context snapshot was passed from the parent, load it.
+			const taskSnapshot = (globalThis as any).__rlmTaskContextSnapshot;
+			if (taskSnapshot && (globalThis as any).__rlmContextProxy) {
+				try {
+					const ctxService = (globalThis as any).__rlmContextProxy;
+					// Clear existing task scope and load the snapshot.
+					if (ctxService.clear) ctxService.clear("task");
+					// The proxy doesn't expose loadTaskSnapshot directly, but
+					// the service does. Access it via the Cordis context.
+					// For now, set each variable individually.
+					for (const [name, v] of Object.entries(taskSnapshot)) {
+						ctxService.set(name, (v as any).value, {
+							mutable: (v as any).mutable,
+							type: (v as any).type,
+							description: (v as any).description,
+							source: (v as any).source,
+							scope: "task",
+						});
+					}
+					// Clear the global so it doesn't leak to the next child.
+					delete (globalThis as any).__rlmTaskContextSnapshot;
+				} catch {
+					// Best effort — context passing is optional.
+				}
+			}
 			configuredBaseToolDefinitions = createAllToolDefinitions(this._cwd, {
 				code: {
 					provisioner: this._codeKernelProvisioner,
