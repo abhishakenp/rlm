@@ -1202,6 +1202,8 @@ export class AgentSession {
 	private _baseSystemPrompt = "";
 	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
 	private _assistantTurnsSinceAutoRefine = 0;
+	/** Track tool errors for auto-refine — repeated errors trigger refinement. */
+	private _toolErrorPatterns: Map<string, number> = new Map();
 	private _lastAutoRefineReviewAt = 0;
 	private _autoRefineInProgress = false;
 	private readonly _autoRefineOperations = new Set<Promise<void>>();
@@ -1410,6 +1412,13 @@ export class AgentSession {
 		};
 
 		this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
+			// Track tool errors for auto-refine. When the LLM makes a repeated
+			// mistake (e.g. running `ls` as JS instead of `!ls`), detect the
+			// pattern and trigger refinement so it learns and never repeats.
+			if (isError && toolCall.name === "code") {
+				this._trackToolError(args as Record<string, unknown>, result);
+			}
+
 			const runner = this._extensionRunner;
 			if (!runner.hasHandlers("tool_result")) {
 				return undefined;
@@ -1435,6 +1444,77 @@ export class AgentSession {
 				isError: hookResult.isError ?? isError,
 			};
 		};
+	}
+
+	/**
+	 * Track tool errors and trigger auto-refine on repeated patterns.
+	 * When the LLM makes the same mistake twice (e.g. running `ls` as JS
+	 * instead of `!ls`), the system learns via refinement and never repeats.
+	 */
+	private _trackToolError(args: Record<string, unknown>, result: { content: any[] }): void {
+		try {
+			const code = String(args?.code ?? "");
+			const errorText = result.content
+				?.map((c: any) => (typeof c === "string" ? c : c?.text ?? ""))
+				.join(" ")
+				.slice(0, 500) ?? "";
+
+			// Detect common mistake patterns.
+			const patterns: Array<{ key: string; test: RegExp; description: string }> = [
+				{
+					key: "shell-as-js",
+					test: /^(ls|cd|cat|grep|find|rm|cp|mv|mkdir|touch|chmod|echo|pwd|whoami|uname|df|du|ps|kill|head|tail|wc|sort|uniq|diff|tar|gzip|gunzip|ssh|scp|curl|wget|git|npm|yarn|pnpm|bun|node|python|pip|cargo|rustc|make|cmake|docker|kubectl|helm)\b/,
+					description: "Shell command used as bare JS — must use ! or %%bash prefix",
+				},
+				{
+					key: "top-level-return",
+					test: /^return\s/,
+					description: "Top-level return in code tool — assign to result and console.log instead",
+				},
+			];
+
+			for (const pattern of patterns) {
+				if (pattern.test.test(code.trim())) {
+					const count = (this._toolErrorPatterns.get(pattern.key) ?? 0) + 1;
+					this._toolErrorPatterns.set(pattern.key, count);
+					console.error(`[rlm] tool error pattern detected: ${pattern.key} (count=${count})`);
+
+					// On first occurrence, immediately schedule auto-refine.
+					// The refinement will add a prompt note so this never repeats.
+					if (count === 1) {
+						this._scheduleAutoRefineForToolError(pattern.key, pattern.description, code, errorText);
+					}
+					break;
+				}
+			}
+		} catch { /* best effort */ }
+	}
+
+	/**
+	 * Schedule auto-refine for a tool error pattern. This creates a refinement
+	 * that adds a prompt note, so the LLM learns from the mistake and never
+	 * repeats it in future turns.
+	 */
+	private _scheduleAutoRefineForToolError(
+		patternKey: string,
+		description: string,
+		failedCode: string,
+		errorText: string,
+	): void {
+		// Build a refinement review directly — we know the fix.
+		const review: AutoRefineReview = {
+			shouldRefine: true,
+			rationale: `Tool error pattern detected: ${description}. The LLM ran "${failedCode.slice(0, 60)}" which failed with: ${errorText.slice(0, 100)}. This must never repeat.`,
+			instructions: `Create a prompt note: "CRITICAL — Shell commands (ls, cat, grep, git, etc.) MUST be prefixed with ! or use %%bash in the code tool. Never run bare shell commands as JS — they cause ReferenceError. Example: use !ls not ls. Use !git status not git status." Also create a memory: "LLM attempted to run bare shell command as JS, causing ReferenceError. Always use ! prefix for shell commands."`,
+		};
+
+		// Schedule the refinement to run after the current turn.
+		this._pendingAutoRefineReview = {
+			reason: "turn_interval" as AutoRefineReason,
+			review,
+		};
+
+		console.error(`[rlm] auto-refine scheduled for tool error: ${patternKey}`);
 	}
 
 	private _installAgentContinuationHook(): void {
@@ -4396,8 +4476,8 @@ export class AgentSession {
 				}
 			}
 			// System prompt — mutable (HMR can update it).
-			const promptSummary = systemPrompt.length > 500
-				? systemPrompt.slice(0, 500) + `... (${systemPrompt.length} chars)`
+			const promptSummary = systemPrompt.length > 5000
+				? systemPrompt.slice(0, 5000) + `... (${systemPrompt.length} chars)`
 				: systemPrompt;
 			if (ctx.get("runtime.systemPrompt") === undefined) {
 				ctx.set("runtime.systemPrompt", promptSummary, {
