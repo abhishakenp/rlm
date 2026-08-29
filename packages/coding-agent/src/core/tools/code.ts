@@ -28,6 +28,29 @@ import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 
 const require = createRequire(import.meta.url);
 
+/**
+ * Detect Python syntax in a failed JS code execution and return a hint
+ * that teaches the LLM to write Python to a file instead of pasting it
+ * into the JS code tool. This provides within-turn feedback so the LLM
+ * corrects itself immediately, not just via auto-refine on the next turn.
+ */
+function detectPythonInJsError(code: string, ename: string, evalue: string): string | undefined {
+	const lines = code.split("\n").map((l) => l.trim()).filter(Boolean);
+	let pythonLines = 0;
+	for (const line of lines) {
+		if (/^(def |class |import |from |print\(|elif |#.*print\(|f["']|self\.|__init__|__name__|None\b|True\b|False\b)/.test(line)) {
+			pythonLines++;
+		}
+	}
+	// If at least 30% of non-empty lines look like Python, it's Python.
+	if (pythonLines === 0 || pythonLines / lines.length < 0.3) return undefined;
+
+	return `[HINT] This looks like Python code, but the code tool ONLY runs JavaScript. To run Python:
+1. Write the code to a file: fs.writeFileSync("solution.py", \`...your python code...\`)
+2. Run it: !python solution.py
+Never paste Python syntax (def, print(), import, f-strings) directly into the code tool.`;
+}
+
 // ─── Schema ──────────────────────────────────────────────────────────────────
 
 const codeSchema = Type.Object({
@@ -333,14 +356,25 @@ export class CodeKernelProvisioner {
 			let stdout = this.outputCapture.stdout.join("");
 			let stderr = this.outputCapture.stderr.join("");
 
+			const ename = error instanceof Error ? error.name : "Error";
+			let evalue = error instanceof Error ? error.message : String(error);
+			const traceback = error instanceof Error ? (error.stack ?? "").split("\n") : [String(error)];
+
+			// Detect Python syntax in JS errors and add a helpful hint.
+			// This teaches the LLM within-turn (not just via auto-refine).
+			const pythonHint = detectPythonInJsError(code, ename, evalue);
+			if (pythonHint) {
+				evalue = `${evalue}\n\n${pythonHint}`;
+			}
+
 			return {
 				stdout,
 				stderr,
 				status: "error",
 				error: {
-					ename: error instanceof Error ? error.name : "Error",
-					evalue: error instanceof Error ? error.message : String(error),
-					traceback: error instanceof Error ? (error.stack ?? "").split("\n") : [String(error)],
+					ename,
+					evalue,
+					traceback,
 				},
 				durationMs: Date.now() - started,
 			};

@@ -28,9 +28,9 @@ const SIMPLIFIED_TECHNICAL_ENGLISH_PROMPT = [
 const CODE_CONTROL_PROMPT = [
 	"The `code` tool is the agent's long-lived notebook: a persistent JavaScript execution environment for reasoning, context management, state, tool orchestration, and recursive subcalls. Use it to keep intermediate variables, inspect and transform outputs, and write small helper functions. The code tool ONLY executes JavaScript — it does not run Python, Ruby, or any other language directly.",
 	"",
-	"When the user asks for code in a non-JavaScript language (e.g. 'write binary search in Python'), write the code to a file using `fs.writeFileSync('solution.py', code)` then run it with `!python solution.py` or `%%bash\\npython solution.py`. Never paste Python/Ruby/etc syntax directly into the code tool — it will fail with a syntax error.",
+	"When the user asks for code in a non-JavaScript language (e.g. 'write binary search in Python'), you MUST use the code tool to write the code to a file using `fs.writeFileSync('solution.py', code)` then run it with `!python solution.py` to verify it works. Never paste Python/Ruby/etc syntax directly into the code tool — it will fail with a syntax error. Never just output code as text — always write it to a file and run it.",
 	"",
-	"MANDATORY: Use the code tool for ANY task that involves computation, file inspection, shell commands, variable inspection, context operations, or subagent spawning. Do not answer from memory when you can verify by running code. Do not describe what you would do — do it in the code tool and report the result.",
+	"MANDATORY: Use the code tool for ANY task — including writing code, computation, file inspection, shell commands, variable inspection, context operations, or subagent spawning. When the user asks you to 'write' code in any language, you MUST use the code tool to write it to a file and run it — never just output code as text. Do not answer from memory when you can verify by running code. Do not describe what you would do — do it in the code tool and report the result.",
 	"",
 	"Do not assume JavaScript is the native runtime of the external thing being investigated. A repository, package, service, dataset, paper, website, benchmark, or API may have its own environment and normal interface. Evaluate external systems through their own interface, then use the code tool to coordinate the process and analyze what comes back.",
 	"",
@@ -166,7 +166,7 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 	const parts = [
 		"You are a general purpose agent that uses code to solve tasks.",
 		"You solve tasks by breaking down problems into sub-tasks, writing and executing code in the code tool, observing results, and iterating one step at a time.",
-		"MANDATORY: Use the code tool for any task involving computation, file operations, shell commands, context variables, or subagent spawning. Never answer from memory when you can verify by running code. Never describe what you would do — execute it and report the result.",
+		"MANDATORY: Use the code tool for ANY task — including writing code in any language, computation, file operations, shell commands, context variables, or subagent spawning. When the user asks you to 'write' code, you MUST use the code tool to write it to a file and run it — never just output code as text. Never answer from memory when you can verify by running code. Never describe what you would do — execute it and report the result.",
 	"ALWAYS use relative paths (./) or ~/ paths. NEVER use absolute paths like /Users/... or /home/... — they waste output tokens and break across environments (VPS, CI, other machines).",
 		"When you are done, stop calling tools and state your final answer.",
 		"",
