@@ -1313,27 +1313,8 @@ export class InteractiveMode {
 			}
 		}
 
-		// Merge plugin-registered slash commands from @rlm/tui service.
-		// These are dynamically registered by other plugins (e.g. @rlm/context
-		// registers /vars). When a plugin is hot-swapped, its commands are
-		// automatically unregistered and disappear from autocomplete.
-		const tuiService = (globalThis as any).__rlmTui;
-		const pluginCommands: SlashCommand[] = [];
-		if (tuiService) {
-			for (const ext of tuiService.getSlashCommands()) {
-				if (!slashCommands.some((c) => c.name === ext.name)) {
-					pluginCommands.push({
-						name: ext.name,
-						description: ext.description,
-						argumentHint: ext.argumentHint,
-						takesArgument: ext.takesArgument,
-					});
-				}
-			}
-		}
-
 		return new CombinedAutocompleteProvider(
-			[...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList, ...pluginCommands],
+			[...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList],
 			this.getCurrentCwd(),
 			this.fdPath,
 		);
@@ -3604,6 +3585,41 @@ export class InteractiveMode {
 		if (recap) {
 			this.recapContainer.addChild(new TruncatedText(theme.fg("dim", `Recap: ${recap}`), 1, 0));
 		}
+
+		// Render plugin-registered TUI components (context panel, etc).
+		// These are registered by plugins via @rlm/tui service.
+		// Ultra-lightweight: each component returns a few lines of text.
+		// When a plugin is hot-swapped, its components disappear automatically.
+		const tuiService = (globalThis as any).__rlmTui;
+		if (tuiService) {
+			// Render inline components (context panel).
+			const components = tuiService.getComponents();
+			for (const comp of components) {
+				try {
+					const lines = comp.renderer({ width: this.ui.terminal.columns, cwd: this.getCurrentCwd() });
+					if (lines && lines.length > 0) {
+						this.recapContainer.addChild(new Spacer(1));
+						this.recapContainer.addChild(new Text(theme.fg("dim", "Context:"), 1, 0));
+						for (const line of lines) {
+							this.recapContainer.addChild(new Text(theme.fg("dim", line), 1, 0));
+						}
+					}
+				} catch {}
+			}
+			// Update status bar items (ultra-compact, single line).
+			const statusItems = tuiService.getStatusBarItems();
+			for (const item of statusItems) {
+				try {
+					const text = item.renderer({ width: this.ui.terminal.columns, cwd: this.getCurrentCwd() });
+					if (text) {
+						this.footerDataProvider.setExtensionStatus(`tui:${item.id}`, text);
+					} else {
+						this.footerDataProvider.setExtensionStatus(`tui:${item.id}`, undefined);
+					}
+				} catch {}
+			}
+		}
+
 		if ((recap || showChanges) && !this.featureHintComponent) {
 			this.recapContainer.addChild(new Spacer(1));
 		}
@@ -4753,28 +4769,6 @@ export class InteractiveMode {
 					await this.handleContextCommand();
 					this.editor.setText("");
 					return;
-				}
-				// /vars is now registered by the @rlm/context plugin via @rlm/tui.
-				// Check if any plugin has registered this command.
-				const tuiService = (globalThis as any).__rlmTui;
-				if (tuiService) {
-					const extCommand = tuiService.getSlashCommand(commandName);
-					if (extCommand) {
-						this.echoLocalCommand(text);
-						const tuiCtx = {
-							showMessage: (msg: string) => {
-								this.chatContainer.addChild(new Spacer(1));
-								this.chatContainer.addChild(new Text(msg, 1, 0));
-								this.ui.requestRender();
-							},
-							showError: (msg: string) => this.showError(msg),
-							requestRender: () => this.ui.requestRender(),
-							width: this.ui.terminal.columns,
-						};
-						await extCommand.handler(commandArgs, tuiCtx);
-						this.editor.setText("");
-						return;
-					}
 				}
 				if (commandName === "logs" && !commandArgs) {
 					this.echoLocalCommand(text);

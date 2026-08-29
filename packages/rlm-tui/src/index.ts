@@ -216,10 +216,12 @@ export class RlmTuiService extends Service {
 	disposePlugin(pluginId: string): void {
 		const handles = this.handlesByPlugin.get(pluginId);
 		if (!handles) return;
-		for (const handle of handles) {
-			handle.dispose();
-		}
+		// Copy the array before disposing — dispose() modifies the original array.
+		const toDispose = [...handles];
 		this.handlesByPlugin.delete(pluginId);
+		for (const handle of toDispose) {
+			try { handle.dispose(); } catch {}
+		}
 		this.ctx.emit("rlm/tui-dispose-plugin", { pluginId });
 	}
 

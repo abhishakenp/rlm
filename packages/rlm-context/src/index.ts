@@ -117,44 +117,39 @@ export class RlmContextService extends Service {
 			`rlm-context: ready (${this.projectVars.size} project vars loaded)`,
 		);
 
-		// Register TUI extensions — /vars slash command.
-		// When this plugin is hot-swapped, the TUI service disposes these
-		// extensions automatically, rolling back the TUI to its core state.
+		// Register TUI component — context variables rendered inline.
+		// No slash command. The TUI renderer itself shows context as part
+		// of its normal display. When this plugin is hot-swapped, the TUI
+		// service disposes this component automatically.
 		this.registerTuiExtensions();
 	}
 
-	/** Register TUI extensions via the @rlm/tui service. */
+	/** TUI extension handles — disposed on hot-swap. */
 	private tuiHandles: any[] = [];
 
 	private registerTuiExtensions(): void {
 		const tui = (globalThis as any).__rlmTui;
 		if (!tui) return;
 
-		// Register /vars slash command.
-		const handle = tui.registerSlashCommand("rlm-context", {
-			name: "vars",
-			description: "Show context registry variables (agent working memory)",
-			argumentHint: "[pattern]",
-			takesArgument: true,
-			handler: (args: string, ctx: any) => {
-				const proxy = createContextProxy(this);
-				try {
-					const pattern = args.trim() || undefined;
-					const names = proxy.list(pattern);
-					if (names.length === 0) {
-						ctx.showMessage("No context variables set" + (pattern ? ` matching "${pattern}"` : ""));
-						return;
-					}
-					const summary = proxy.summarize();
-					ctx.showMessage(`# Context Variables (${names.length})\n\n${summary}`);
-				} catch (error) {
-					ctx.showError(error instanceof Error ? error.message : String(error));
+		// Register a context panel component — renders inline in the TUI.
+		// This is the agent's working memory, always visible.
+		const componentHandle = tui.registerComponent("rlm-context", {
+			id: "context-panel",
+			renderer: () => {
+				const all = this.getAll();
+				if (all.length === 0) return null;
+				const lines: string[] = [];
+				for (const v of all.sort((a, b) => a.name.localeCompare(b.name))) {
+					const kind = v.mutable ? "let" : "const";
+					const valStr = formatValueCompact(v.value);
+					lines.push(`  ${kind} ${v.name} = ${valStr}`);
 				}
+				return lines;
 			},
 		});
-		if (handle) this.tuiHandles.push(handle);
+		if (componentHandle) this.tuiHandles.push(componentHandle);
 
-		// Register a status bar item showing context var count.
+		// Register a status bar item — context var count (ultra-compact).
 		const statusHandle = tui.registerStatusBarItem("rlm-context", {
 			id: "context-vars-count",
 			renderer: () => {
@@ -164,7 +159,7 @@ export class RlmContextService extends Service {
 		});
 		if (statusHandle) this.tuiHandles.push(statusHandle);
 
-		this.ctx.logger?.info("rlm-context: registered /vars command + status bar item");
+		this.ctx.logger?.info("rlm-context: registered TUI context panel");
 	}
 
 	/** Dispose TUI extensions — called on hot-swap. */
@@ -669,6 +664,27 @@ function formatValue(value: any): string {
 		const keys = Object.keys(value);
 		if (keys.length <= 3) return JSON.stringify(value);
 		return `{${keys.slice(0, 3).join(", ")}, ...${keys.length} keys}`;
+	}
+	return String(value);
+}
+
+/** Ultra-compact value formatter for TUI rendering — minimal width. */
+function formatValueCompact(value: any): string {
+	if (typeof value === "string") {
+		if (value.length > 40) return `"${value.slice(0, 37)}..."`;
+		return `"${value}"`;
+	}
+	if (typeof value === "number" || typeof value === "boolean") return String(value);
+	if (Array.isArray(value)) {
+		if (value.length === 0) return "[]";
+		if (value.length <= 2) return `[${value.map(formatValueCompact).join(", ")}]`;
+		return `[${value.length} items]`;
+	}
+	if (typeof value === "object" && value !== null) {
+		const keys = Object.keys(value);
+		if (keys.length === 0) return "{}";
+		if (keys.length <= 2) return `{${keys.join(", ")}}`;
+		return `{${keys.length} keys}`;
 	}
 	return String(value);
 }
