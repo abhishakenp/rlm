@@ -4366,7 +4366,63 @@ export class AgentSession {
 			contextSummary: this._getContextSummary(),
 		};
 		const systemPrompt = buildSystemPrompt(this._baseSystemPromptOptions);
+		// Register infrastructure vars (runtime + skills) — these are system
+		// state, not LLM thinking. The LLM creates all other vars itself.
+		this._registerInfrastructureVars(loadedSkills, validToolNames, systemPrompt);
 		return systemPrompt;
+	}
+
+	/**
+	 * Register infrastructure context variables — runtime state and skills.
+	 * These are system-generated (not LLM-created) because they describe
+	 * the runtime environment itself. Everything else is LLM-created.
+	 */
+	private _registerInfrastructureVars(skills: Skill[], tools: string[], systemPrompt: string): void {
+		const ctx = (globalThis as any).__rlmContextProxy;
+		if (!ctx) return;
+		try {
+			// Runtime state — immutable facts about the environment.
+			const skillNames = skills.map((s) => s.name);
+			const runtimeVars: Array<[string, any, any]> = [
+				["runtime.model", this.model ? `${this.model.provider}/${this.model.id}` : "unknown", { type: "string", mutable: false, description: "Current model" }],
+				["runtime.tools", tools, { type: "array", mutable: false, description: "Available tools" }],
+				["runtime.skills", skillNames, { type: "array", mutable: false, description: "Installed skills" }],
+				["runtime.depth", this._rlmDepth, { type: "number", mutable: false, description: "Recursion depth (0 = root)" }],
+				["runtime.maxDepth", this._rlmMaxDepth, { type: "number", mutable: false, description: "Max recursion depth" }],
+			];
+			for (const [name, value, opts] of runtimeVars) {
+				if (ctx.get(name) === undefined) {
+					ctx.set(name, value, { scope: "session", source: "system", ...opts });
+				}
+			}
+			// System prompt — mutable (HMR can update it).
+			const promptSummary = systemPrompt.length > 500
+				? systemPrompt.slice(0, 500) + `... (${systemPrompt.length} chars)`
+				: systemPrompt;
+			if (ctx.get("runtime.systemPrompt") === undefined) {
+				ctx.set("runtime.systemPrompt", promptSummary, {
+					type: "prompt", mutable: true, description: "Active system prompt (hot-reloadable)",
+					scope: "session", source: "system",
+				});
+			} else {
+				ctx.update("runtime.systemPrompt", promptSummary);
+			}
+			// Each skill as a variable.
+			for (const skill of skills) {
+				const varName = `skill.${skill.name}`;
+				const skillJson = JSON.stringify({
+					name: skill.name,
+					description: skill.description,
+				});
+				if (ctx.get(varName) === undefined) {
+					ctx.set(varName, skillJson, {
+						type: "prompt", mutable: true,
+						description: `Skill: ${skill.name} (hot-reloadable)`,
+						scope: "session", source: "system",
+					});
+				}
+			}
+		} catch { /* best effort */ }
 	}
 
 	private _getContextSummary(): string | undefined {

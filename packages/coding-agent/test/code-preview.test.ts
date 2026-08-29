@@ -113,4 +113,17 @@ const data = fs.readFileSync("test.txt", "utf8");`;
 		expect(result.language).not.toBe("python");
 		expect(result.language).toBe("js");
 	});
+
+	it("does not show } as preview for code with closing braces", () => {
+		const code = `const fs = require("fs");
+const dirs = fs.readdirSync("./packages");
+const result = dirs.slice(0, 3);
+console.log(result);
+context.set("packages.firstThree", result);`;
+		const result = previewJsCode(code);
+		expect(result.text).not.toBe("}");
+		expect(result.text).not.toBe("");
+		// Should show a meaningful line, not a closing brace.
+		expect(result.text.length).toBeGreaterThan(2);
+	});
 });

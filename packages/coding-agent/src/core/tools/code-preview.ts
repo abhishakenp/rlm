@@ -255,7 +255,10 @@ export function previewBashCommand(command: string): CodePreview {
 
 function isSkippableJsLine(line: string): boolean {
 	const trimmed = line.trim();
-	return !trimmed || JS_COMMENT_PATTERN.test(trimmed);
+	if (!trimmed || JS_COMMENT_PATTERN.test(trimmed)) return true;
+	// Skip lines that are just braces/brackets/semicolons.
+	if (/^[}\])`;]+$/.test(trimmed)) return true;
+	return false;
 }
 
 function simplifyJsPreviewLine(line: string): string {

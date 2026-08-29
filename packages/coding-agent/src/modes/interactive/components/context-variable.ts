@@ -105,17 +105,18 @@ export class ContextVariableComponent implements Component {
 		const kindStr = theme.fg("dim", kind);
 
 		if (!this._expanded) {
-			// Collapsed: 1 line, compact value preview + expand hint.
-			const nameWidth = this.name.length;
-			const prefixWidth = 2 + nameWidth + kind.length + 3; // $ name let =
-			const previewWidth = Math.max(10, width - prefixWidth - 25);
+			// Collapsed: const name = value (Ctrl+O)
+			const kindStr2 = theme.fg("dim", kind);
+			const nameStr2 = theme.fg("thinkingText", this.name);
+			const prefixWidth = kind.length + 1 + this.name.length + 3; // const name = 
+			const previewWidth = Math.max(10, width - prefixWidth - 12);
 			const valuePreview = truncateToWidth(valueStr.replace(/\n/g, " ").trim(), previewWidth);
-			return [`${prefix} ${nameStr} ${kindStr} ${theme.fg("dim", "=")} ${theme.fg("muted", valuePreview)} ${theme.fg("dim", "(Ctrl+O)")}`];
+			return [`${kindStr2} ${nameStr2} ${theme.fg("dim", "=")} ${theme.fg("muted", valuePreview)} ${theme.fg("dim", "(Ctrl+O)")}`];
 		}
 
 		// Expanded: header line + value lines + collapse hint.
 		const lines: string[] = [];
-		const header = `${prefix} ${nameStr} ${kindStr} ${theme.fg("dim", `[${type}]`)} ${theme.fg("dim", scope)}`;
+		const header = `${kindStr} ${nameStr} ${theme.fg("dim", `[${type}]`)} ${theme.fg("dim", scope)}`;
 		lines.push(header);
 
 		// Value lines with indent.
