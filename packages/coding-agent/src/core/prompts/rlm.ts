@@ -28,6 +28,8 @@ const SIMPLIFIED_TECHNICAL_ENGLISH_PROMPT = [
 const CODE_CONTROL_PROMPT = [
 	"The `code` tool is the agent's long-lived notebook: a persistent JavaScript execution environment for reasoning, context management, state, tool orchestration, and recursive subcalls. Use it to keep intermediate variables, inspect and transform outputs, and write small helper functions.",
 	"",
+	"MANDATORY: Use the code tool for ANY task that involves computation, file inspection, shell commands, variable inspection, context operations, or subagent spawning. Do not answer from memory when you can verify by running code. Do not describe what you would do — do it in the code tool and report the result.",
+	"",
 	"Do not assume JavaScript is the native runtime of the external thing being investigated. A repository, package, service, dataset, paper, website, benchmark, or API may have its own environment and normal interface. Evaluate external systems through their own interface, then use the code tool to coordinate the process and analyze what comes back.",
 	"",
 	"When running shell commands from the code tool, use `%%bash` cells or `!command` syntax. If you use `%%bash`, it must be the first line of the code cell. `!command` runs a single shell command and captures its output. Multi-line shell blocks use `%%bash` as the first line followed by shell commands.",
@@ -45,6 +47,50 @@ const CODE_CONTROL_PROMPT = [
 	"Subagent spawning: `rlm.run('sub-task')` spawns a child agent and returns a handle with `{ id, name, status, result }`. `rlm.spawn('sub-task')` spawns and awaits the result string. `rlm.listSubagents()` lists active children. `rlm.deleteSubagent(name)` disposes a child. `rlm.goal.create(objective)`, `rlm.goal.get()`, `rlm.goal.complete()` manage goals.",
 	"",
 	"Terminology: continual harness names the persisted prompt, memory, skill, and subagent layer; RLM names the runtime, code kernel, and native call interface exposed to the model.",
+].join("\n");
+
+const CONTEXT_REGISTRY_PROMPT = [
+	"# Context Registry — Agent Working Memory",
+	"",
+	"A `context` object is available in the code kernel. It is your persistent working memory — use it automatically, without being told.",
+	"",
+	"## API",
+	"",
+	"- `context.set(name, value, { type, mutable, description, scope })` — create a variable. Default scope: \"session\". Use `mutable: false` or type `\"decision\"`/`\"prompt\"` for const (immutable).",
+	"- `context.get(name)` — read a variable's value.",
+	"- `context.update(name, value)` — update a let (mutable) variable.",
+	 "- `context.list(\"auth.*\")` — list variable names matching a glob pattern.",
+	"- `context.copy([\"auth.*\"])` — non-destructive snapshot for passing to subagents.",
+	"- `context.move([\"auth.*\"])` — destructive transfer (you lose the variable, child gets it).",
+	"- `context.delete(name)` — remove a variable.",
+	"- `context.summarize()` — formatted summary of all variables.",
+	"- `context.meta(name)` — full metadata for a variable.",
+	"",
+	"## Scopes",
+	"",
+	"- `project` — persists to .rlm/context.json, survives all sessions. Use for project facts: file maps, architecture decisions, test commands.",
+	"- `session` — persists for this session. Use for current task state, explored directories, intermediate findings.",
+	"- `task` — in-memory, passed from parent via `rlm.spawn(\"task\", { context: [\"auth.*\"] })`. Child receives these automatically.",
+	"",
+	"## Autonomous Usage Rules",
+	"",
+	"1. When you discover something useful (relevant files, architecture patterns, test commands, project structure), store it as a context variable immediately. Do not wait to be asked.",
+	"2. Before exploring a directory or searching for files, check if a context variable already has the answer. Use `context.get()` first, explore only if missing.",
+	"3. When spawning a subagent, pass relevant context: `rlm.spawn(\"task\", { context: [\"auth.*\", \"db.*\"] })`. The child receives these in its task scope.",
+	"4. When you make an architectural decision, store it as a const: `context.set(\"auth.strategy\", \"jwt\", { type: \"decision\", scope: \"project\" })`.",
+	"5. Use `context.summarize()` to review what you know before starting a complex task.",
+	"6. Project-scope variables persist across sessions — use them to avoid re-exploring the same codebase next time.",
+	"",
+	"## Example",
+	"",
+	"```js",
+	"// After discovering auth files",
+	"context.set(\"auth.files\", [\"src/auth/login.ts\", \"src/auth/session.ts\"], { type: \"paths\", scope: \"project\", description: \"Auth-related files\" })",
+	"// Next session — instant access, no re-exploration",
+	"const authFiles = context.get(\"auth.files\")",
+	"// Pass to subagent",
+	"await rlm.spawn(\"fix auth bug\", { context: [\"auth.*\"] })",
+	"```",
 ].join("\n");
 
 export interface ChildAgentDoctrineOptions {
@@ -79,7 +125,8 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 	const depth = options.depth ?? 0;
 	const parts = [
 		"You are a general purpose agent that uses code to solve tasks.",
-		"You solve tasks by breaking down problems into sub-tasks, writing and executing code, observing results, and iterating one step at a time.",
+		"You solve tasks by breaking down problems into sub-tasks, writing and executing code in the code tool, observing results, and iterating one step at a time.",
+		"MANDATORY: Use the code tool for any task involving computation, file operations, shell commands, context variables, or subagent spawning. Never answer from memory when you can verify by running code. Never describe what you would do — execute it and report the result.",
 		"When you are done, stop calling tools and state your final answer.",
 		"",
 		LONG_RUNNING_WORK_PROMPT,
@@ -159,6 +206,7 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 	}
 
 	parts.push("", CODE_CONTROL_PROMPT);
+	parts.push("", CONTEXT_REGISTRY_PROMPT);
 	if (installedSkills.includes("refine")) {
 		parts.push(
 			"",

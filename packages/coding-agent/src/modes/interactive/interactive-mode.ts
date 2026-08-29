@@ -4735,6 +4735,12 @@ export class InteractiveMode {
 					this.editor.setText("");
 					return;
 				}
+				if (commandName === "vars") {
+					this.echoLocalCommand(text);
+					await this.handleVarsCommand(commandArgs);
+					this.editor.setText("");
+					return;
+				}
 				if (commandName === "logs" && !commandArgs) {
 					this.echoLocalCommand(text);
 					this.handleLogsCommand();
@@ -9468,6 +9474,30 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(info, 1, 0));
 		this.ui.requestRender();
+	}
+
+	private async handleVarsCommand(args: string): Promise<void> {
+		const proxy = (globalThis as any).__rlmContextProxy;
+		if (!proxy) {
+			this.showError("Context registry not active");
+			return;
+		}
+		try {
+			const pattern = args.trim() || undefined;
+			const names = proxy.list(pattern);
+			if (names.length === 0) {
+				this.chatContainer.addChild(new Spacer(1));
+				this.chatContainer.addChild(new Text("No context variables set" + (pattern ? ` matching "${pattern}"` : ""), 1, 0));
+				this.ui.requestRender();
+				return;
+			}
+			const summary = proxy.summarize();
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(`# Context Variables (${names.length})\n\n${summary}`, 1, 0));
+			this.ui.requestRender();
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
 	}
 
 	private async handleHeartbeatCommand(text: string): Promise<void> {
