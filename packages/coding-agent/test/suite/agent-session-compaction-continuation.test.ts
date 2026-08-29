@@ -55,11 +55,11 @@ function createAssistant(
 	};
 }
 
-/** Faux ipython tool that services goal.* host requests like the real kernel bridge. */
-function createFauxIpythonTool(sessionRef: { current?: AgentSession }) {
+/** Faux code tool that services goal.* host requests like the real kernel bridge. */
+function createFauxCodeTool(sessionRef: { current?: AgentSession }) {
 	return {
-		name: "ipython",
-		label: "ipython",
+		name: "code",
+		label: "code",
 		description: "Execute Python code in the agent kernel.",
 		parameters: Type.Object({ code: Type.String() }),
 		execute: async (_toolCallId: string, params: unknown) => {
@@ -275,7 +275,7 @@ describe("compaction continuation", () => {
 	it("e2e: an active goal keeps continuing after a successful threshold compaction", async () => {
 		const sessionRef: { current?: AgentSession } = {};
 		const harness = await createHarness({
-			tools: [createFauxIpythonTool(sessionRef)],
+			tools: [createFauxCodeTool(sessionRef)],
 			// Let a running goal continuation cross the threshold while remaining well below overflow.
 			settings: { compaction: { enabled: true, reserveTokens: 8_000, keepRecentTokens: 1 } },
 			models: [{ id: "faux-1", contextWindow: 10_000 }],
@@ -300,7 +300,7 @@ describe("compaction continuation", () => {
 			fauxAssistantMessage(`step one done, more to do ${largeStep}`),
 			fauxAssistantMessage(`step two done, still more to do ${largeStep}`),
 			fauxAssistantMessage(`step three done, still not finished ${largeStep}`),
-			fauxAssistantMessage(fauxToolCall("ipython", { code: "goal.complete" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("code", { code: "goal.complete" }), { stopReason: "toolUse" }),
 			fauxAssistantMessage("Goal complete."),
 		]);
 
@@ -322,7 +322,7 @@ describe("compaction continuation", () => {
 	it("queues only the goal continuation when a goal and autonomous mode are both active", async () => {
 		const sessionRef: { current?: AgentSession } = {};
 		const harness = await createHarness({
-			tools: [createFauxIpythonTool(sessionRef)],
+			tools: [createFauxCodeTool(sessionRef)],
 			autonomous: { enabled: true, maxContinuations: 5 },
 			settings: { compaction: { enabled: true, reserveTokens: 1000 } },
 			models: [{ id: "faux-1", contextWindow: 200_000 }],
@@ -346,7 +346,7 @@ describe("compaction continuation", () => {
 	it("withdraws the queued goal continuation when the threshold compaction is cancelled", async () => {
 		const sessionRef: { current?: AgentSession } = {};
 		const harness = await createHarness({
-			tools: [createFauxIpythonTool(sessionRef)],
+			tools: [createFauxCodeTool(sessionRef)],
 			settings: { compaction: { enabled: true, reserveTokens: 1000 } },
 			models: [{ id: "faux-1", contextWindow: 200_000 }],
 		});
@@ -381,7 +381,7 @@ describe("compaction continuation", () => {
 	it("keeps completed-goal bookkeeping when a later threshold compaction is cancelled", async () => {
 		const sessionRef: { current?: AgentSession } = {};
 		const harness = await createHarness({
-			tools: [createFauxIpythonTool(sessionRef)],
+			tools: [createFauxCodeTool(sessionRef)],
 			settings: { compaction: { enabled: true, reserveTokens: 1000 } },
 			models: [{ id: "faux-1", contextWindow: 200_000 }],
 		});

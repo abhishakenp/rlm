@@ -1,4 +1,4 @@
-import { parseIpythonBashCell } from "./ipython-cell-code.js";
+import { parseCodeBashCell } from "./code-cell-code.js";
 
 const DESCRIPTOR_MAX_WIDTH = 64;
 
@@ -433,9 +433,9 @@ export function previewPythonCode(code: string): CodePreview {
 	return { language: "python", text: "" };
 }
 
-export function previewIpythonCode(code: string): CodePreview {
+export function previewCodeCode(code: string): CodePreview {
 	const trimmedCode = code.trimEnd();
-	const bashCell = parseIpythonBashCell(trimmedCode);
+	const bashCell = parseCodeBashCell(trimmedCode);
 	if (bashCell) {
 		return previewBashCommand(bashCell.body);
 	}

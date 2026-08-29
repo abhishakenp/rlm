@@ -6,7 +6,7 @@
  *
  * - Has its own identity (UUID, host, hardware ID)
  * - Runs in its own working directory (~/<session-dir>)
- * - Has its own IPython kernel and RLM loop
+ * - Has its own Code kernel and RLM loop
  * - Can request files from other fleet members
  * - Can recursively spawn sub-agents on other hosts
  * - Communicates back through the gateway

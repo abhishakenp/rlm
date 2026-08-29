@@ -19,13 +19,13 @@ export {
 } from "./edit.js";
 export { withFileMutationQueue } from "./file-mutation-queue.js";
 export {
-	createIpythonTool,
-	createIpythonToolDefinition,
-	IpythonKernelProvisioner,
-	type IpythonToolDetails,
-	type IpythonToolInput,
-	type IpythonToolOptions,
-} from "./ipython.js";
+	createCodeTool,
+	createCodeToolDefinition,
+	CodeKernelProvisioner,
+	type CodeToolDetails,
+	type CodeToolInput,
+	type CodeToolOptions,
+} from "./code.js";
 export {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -39,18 +39,18 @@ export {
 
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { ToolDefinition } from "../extensions/types.js";
-import { createIpythonToolDefinition, type IpythonToolOptions } from "./ipython.js";
+import { createCodeToolDefinition, type CodeToolOptions } from "./code.js";
 
 export type Tool = AgentTool<any>;
 export type ToolDef = ToolDefinition<any, any>;
-export type ToolName = "ipython";
+export type ToolName = "code";
 
 export interface ToolsOptions {
-	ipython?: IpythonToolOptions;
+	code?: CodeToolOptions;
 }
 
 export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): Record<ToolName, ToolDef> {
 	return {
-		ipython: createIpythonToolDefinition(cwd, options?.ipython),
+		code: createCodeToolDefinition(cwd, options?.code),
 	};
 }

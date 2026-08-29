@@ -253,15 +253,8 @@ function detectPythonSkill(
 	};
 }
 
-export function getPythonSkillRuntimeInfo(skills: readonly Skill[]): PythonSkillRuntimeInfo[] {
-	return skills
-		.filter((skill): skill is PythonSkill => skill.kind === "python")
-		.map((skill) => ({
-			name: skill.name,
-			importName: skill.python.importName,
-			packagePath: skill.python.packagePath,
-			pyprojectPath: skill.python.pyprojectPath,
-		}));
+export function getPythonSkillRuntimeInfo(_skills: readonly Skill[]): PythonSkillRuntimeInfo[] {
+	return [];
 }
 
 /**
@@ -449,8 +442,8 @@ export function formatSkillsForPrompt(skills: Skill[]): string {
 
 	const lines = [
 		"\n\nThe following skills provide specialized instructions for specific tasks.",
-		"Use ipython to inspect a skill's file when the task matches its description.",
-		"Skills with a python_import are prepared in the persistent IPython kernel when available and can be called directly by that import name.",
+		"Use code to inspect a skill's file when the task matches its description.",
+		"Skills with a python_import are prepared in the persistent Code kernel when available and can be called directly by that import name.",
 		"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
 		"",
 		"<available_skills>",

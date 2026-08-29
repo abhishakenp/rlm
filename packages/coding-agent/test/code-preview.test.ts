@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { previewBashCommand, previewIpythonCode, previewPythonCode } from "../src/core/tools/code-preview.js";
+import { previewBashCommand, previewCodeCode, previewPythonCode } from "../src/core/tools/code-preview.js";
 
 describe("code preview", () => {
 	it("skips bash setup and previews the real command", () => {
@@ -26,7 +26,7 @@ PY`;
 		expect(previewBashCommand(command)).toEqual({ language: "python", text: "path.write_text(text)" });
 	});
 
-	it("unwraps bash cells in ipython", () => {
+	it("unwraps bash cells in code", () => {
 		const code = `%%bash
 set -e
 python3 - <<'PY'
@@ -34,12 +34,12 @@ import json
 data = json.loads("{}")
 print(data.keys())
 PY`;
-		expect(previewIpythonCode(code)).toEqual({ language: "python", text: "data.keys()" });
+		expect(previewCodeCode(code)).toEqual({ language: "python", text: "data.keys()" });
 	});
 
 	it("prefers meaningful python effects over setup assignments", () => {
 		const code = `from pathlib import Path
-p = Path("packages/coding-agent/src/modes/interactive/components/ipython-cell.ts")
+p = Path("packages/coding-agent/src/modes/interactive/components/code-cell.ts")
 txt = p.read_text()
 p.write_text(txt.replace("old", "new"))`;
 		expect(previewPythonCode(code)).toEqual({

@@ -74,9 +74,9 @@ export interface Args {
 }
 
 const REMOVED_BUILTIN_TOOL_NAMES = new Set(["read", "write", "grep", "find", "ls"]);
-const BUILTIN_TOOL_NAMES = ["ipython"];
+const BUILTIN_TOOL_NAMES = ["code"];
 
-export const INTERNAL_RUNTIME_COMMAND_MARKER = "\0prime-agent-runtime-command";
+export const INTERNAL_RUNTIME_COMMAND_MARKER = "\0rlm-runtime-command";
 
 export function isValidThinkingLevel(level: string): level is ThinkingLevel {
 	return THINKING_LEVELS.includes(level as ThinkingLevel);

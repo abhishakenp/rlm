@@ -47,7 +47,7 @@ export async function addHostToFleet(
 		hostname,
 		address: address ?? device?.tailscaleIp ?? device?.address ?? hostname,
 		tags: finalTags,
-		capabilities: ["bash", "ipython", "browser"],
+		capabilities: ["bash", "code", "browser"],
 		os: device?.os,
 		addedAt: Date.now(),
 		lastStatus: device?.sshable ? "disconnected" : "unreachable",
@@ -167,7 +167,7 @@ export async function bootstrapFleetHost(
 		target,
 		hostname,
 		tags: finalTags,
-		capabilities: ["bash", "ipython", "browser"],
+		capabilities: ["bash", "code", "browser"],
 	});
 
 	if (!result.success) {

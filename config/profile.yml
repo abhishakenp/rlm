@@ -1,10 +1,23 @@
 # rlm profile — Cordis entry-list composing all plugins.
 #
-# Each entry is a plugin loaded by the Cordis host. HMR can reload any
-# plugin at runtime. Dependency order matters:
-#   1. SDK (wraps prime-agent runtime for in-process spawning)
-#   2. Workflow (depends on SDK)
-#   3. Learn (depends on SDK + Workflow)
+# Four plugins, all hot-swappable via HMR:
+#   1. Code — persistent JS code execution (replaces bash + edit)
+#   2. SDK — in-process subagent spawning (wraps prime-agent runtime)
+#   3. Workflow — hot-swappable TS workflows from ~/.prime/agent/workflows/
+#   4. Learn — self-evolution (tracks outcomes, proposes modifications)
+#
+# Order matters: Code must load before SDK so the code service is
+# available when SDK spawns subagents with baseToolsOverride.
+#
+# The prime-agent bundle provides the UI, agent loop, session management,
+# model routing (OmniRoute), and recursive subagent infrastructure.
+# These four plugins are the Cordis-managed layer on top.
+
+- id: code
+  name: './packages/rlm-code/src/index.ts'
+  config:
+    timeout: 60000
+    maxOutputChars: 65536
 
 - id: sdk
   name: './packages/rlm-sdk/src/index.ts'
@@ -12,3 +25,13 @@
     maxDepth: 10
     defaultModel: auto/best-free
 
+- id: workflow
+  name: './packages/rlm-workflow/src/index.ts'
+  config:
+    workflowsDir: ~/.prime/agent/workflows
+
+- id: learn
+  name: './packages/rlm-learn/src/index.ts'
+  config:
+    reflectInterval: 60000
+    maxLearningsBeforeReflect: 10

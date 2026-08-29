@@ -66,16 +66,16 @@ describe("regression #2835: tool allowlists filter extension tools", () => {
 	}
 
 	it("allows only explicitly listed built-in and extension tools", async () => {
-		const session = await createSession(["ipython", "dynamic_tool"]);
+		const session = await createSession(["code", "dynamic_tool"]);
 
 		expect(
 			session
 				.getAllTools()
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["dynamic_tool", "ipython"]);
-		expect(session.getActiveToolNames().sort()).toEqual(["dynamic_tool", "ipython"]);
-		expect(session.systemPrompt).not.toContain("- ipython:");
+		).toEqual(["dynamic_tool", "code"]);
+		expect(session.getActiveToolNames().sort()).toEqual(["dynamic_tool", "code"]);
+		expect(session.systemPrompt).not.toContain("- code:");
 		expect(session.systemPrompt).not.toContain("- dynamic_tool: Run dynamic test behavior");
 		expect(session.systemPrompt).not.toContain("- bash:");
 		expect(session.systemPrompt).not.toContain("- edit:");

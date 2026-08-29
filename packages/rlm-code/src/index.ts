@@ -1,12 +1,12 @@
 /**
  * @rlm/code — persistent JS code execution tool.
  *
- * Cordis Service. Replaces IPython + bash + edit with a single tool.
- * Mirrors prime-agent's IPython tool UX exactly, but JS instead of Python.
+ * Cordis Service. Replaces kernel + bash + edit with a single tool.
+ * Mirrors prime-agent's kernel tool UX exactly, but JS.
  *
- * What it does (same as prime-agent's IPython):
- * - `!command` → shell out (IPython-style ! prefix)
- * - `%%bash` cell magic → multi-line shell block (IPython-style %%bash)
+ * What it does (same as prime-agent's kernel):
+ * - `!command` → shell out (kernel-style ! prefix)
+ * - `%%bash` cell magic → multi-line shell block (kernel-style %%bash)
  * - Persistent variables across calls (vm.Context = kernel namespace)
  * - console.log() output captured as stdout
  * - Last expression value captured as result
@@ -38,7 +38,7 @@ export interface RlmCodeConfig {
 export interface CodeResult {
 	stdout: string;
 	stderr: string;
-	/** Last expression value (like IPython's execute_result). */
+	/** Last expression value (like kernel's execute_result). */
 	result?: string;
 	status: "ok" | "error" | "aborted";
 	error?: { name: string; message: string; stack: string[] };
@@ -46,15 +46,17 @@ export interface CodeResult {
 }
 
 export class RlmCodeService extends Service {
-	static inject = ["rlmSdk"] as const;
+	static inject = [] as const;
 	static provide = "rlmCode" as const;
 
 	declare config: RlmCodeConfig;
 	private context: vm.Context | null = null;
 
 	constructor(ctx: any, config: RlmCodeConfig = {}) {
-		super(ctx, "rlmCode");
-		this.config = config;
+		// Cordis passes (ctx, config) to class plugins, but Service expects (ctx, name).
+		// Pass undefined as name so Service uses static provide = "rlmCode".
+		super(ctx, undefined as any);
+		this.config = typeof config === "object" && !Array.isArray(config) ? config : {};
 	}
 
 	async [Service.init]() {
@@ -66,14 +68,36 @@ export class RlmCodeService extends Service {
 
 	/** Create a fresh vm context with all builtins exposed. */
 	resetContext() {
-		const sdk = this.ctx.get("rlmSdk");
 		const cwd = this.config.cwd ?? process.cwd();
 
-		// stdout/stderr capture — same as IPython kernel capturing print output.
+		// stdout/stderr capture — same as kernel kernel capturing print output.
 		const outputCapture = {
 			stdout: [] as string[],
 			stderr: [] as string[],
 		};
+
+		// Resolve rlm SDK lazily — it may not be available at init time
+		// (Cordis loads plugins in order, SDK may load after Code).
+		const getRlm = () => {
+			const sdk = this.ctx.get("rlmSdk");
+			if (!sdk) return null;
+			return {
+				run: (prompt: string, opts?: any) => sdk.run(prompt, opts),
+				spawn: (prompt: string, opts?: any) => sdk.spawn(prompt, opts),
+				listSubagents: () => sdk.listSubagents(),
+				deleteSubagent: (target: string) => sdk.deleteSubagent(target),
+				goal: sdk.goal,
+			};
+		};
+
+		// Use a Proxy so `rlm` resolves dynamically — always gets the latest SDK.
+		const rlmProxy = new Proxy({}, {
+			get: (_target, prop) => {
+				const rlm = getRlm();
+				if (!rlm) return undefined;
+				return rlm[prop as keyof typeof rlm];
+			},
+		});
 
 		const sandbox: Record<string, any> = {
 			// Node builtins
@@ -94,7 +118,7 @@ export class RlmCodeService extends Service {
 			clearInterval,
 			fetch: globalThis.fetch,
 
-			// console.log → captured as stdout (like IPython's print capture)
+			// console.log → captured as stdout (like kernel's print capture)
 			console: {
 				log: (...args: any[]) => outputCapture.stdout.push(args.map(formatValue).join(" ") + "\n"),
 				error: (...args: any[]) => outputCapture.stderr.push(args.map(formatValue).join(" ") + "\n"),
@@ -109,16 +133,9 @@ export class RlmCodeService extends Service {
 			// require for CJS modules
 			require,
 
-			// rlm SDK — spawn subagents in-process
-			rlm: sdk
-				? {
-						run: (prompt: string, opts?: any) => sdk.run(prompt, opts),
-						spawn: (prompt: string, opts?: any) => sdk.spawn(prompt, opts),
-						listSubagents: () => sdk.listSubagents(),
-						deleteSubagent: (target: string) => sdk.deleteSubagent(target),
-						goal: sdk.goal,
-					}
-				: null,
+			// rlm SDK — resolved lazily via Proxy so it works even if SDK
+			// loads after Code. Always gets the latest SDK instance.
+			rlm: rlmProxy,
 
 			// Helpers
 			cwd,
@@ -134,12 +151,12 @@ export class RlmCodeService extends Service {
 	}
 
 	/**
-	 * Pre-process code — transform IPython-style syntax to JS:
+	 * Pre-process code — transform kernel-style syntax to JS:
 	 *
 	 *   !command        →  execSync("command").toString()   (line magic)
 	 *   %%bash\n...     →  execSync("...").toString()        (cell magic)
 	 *
-	 * Same UX as IPython. Only transforms lines/cells starting with ! or %%bash.
+	 * Same UX as kernel. Only transforms lines/cells starting with ! or %%bash.
 	 */
 	private transformCode(code: string): string {
 		// %%bash cell magic — entire block is shell.
@@ -170,13 +187,13 @@ export class RlmCodeService extends Service {
 
 	/**
 	 * Execute JS code in the persistent context.
-	 * Variables persist across calls — same as IPython cells.
+	 * Variables persist across calls — same as kernel cells.
 	 *
 	 * Returns { stdout, stderr, result, status } — same as prime-agent's
 	 * kernel ExecuteResult.
 	 *
-	 * - `!cmd` for shell (IPython-style)
-	 * - `%%bash` for multi-line shell blocks (IPython-style)
+	 * - `!cmd` for shell (kernel-style)
+	 * - `%%bash` for multi-line shell blocks (kernel-style)
 	 * - `await` at top level
 	 * - `var`/`globalThis.x` persist across calls
 	 * - `console.log()` captured as stdout
@@ -200,7 +217,7 @@ export class RlmCodeService extends Service {
 			// Wrap in async IIFE for top-level await support.
 			// Use globalThis for variable persistence (var in function scope
 			// doesn't leak, so we transform var → globalThis assignment).
-			// Capture the last expression's value as the return (like IPython's
+			// Capture the last expression's value as the return (like kernel's
 			// execute_result — the last expression value is displayed).
 			const finalCode = transformVarToGlobal(transformed);
 			const withReturn = captureLastExpression(finalCode);
@@ -226,7 +243,7 @@ export class RlmCodeService extends Service {
 			let stderr = capture.stderr.join("");
 			let resultStr: string | undefined;
 
-			// Capture last expression value (like IPython's execute_result).
+			// Capture last expression value (like kernel's execute_result).
 			if (value !== undefined) {
 				resultStr = formatValue(value);
 			}
@@ -302,7 +319,7 @@ const BUILTINS = new Set([
  * across calls even inside the async IIFE wrapper.
  *
  * `let` and `const` are left alone (block-scoped, won't persist — same
- * as Python's local variables in a function). For persistence, use `var`
+ * as local variables in a function). For persistence, use `var`
  * or `globalThis.x = ...`.
  */
 function transformVarToGlobal(code: string): string {
@@ -318,7 +335,7 @@ function transformVarToGlobal(code: string): string {
 /**
  * Capture the last expression's value by prepending `return`.
  *
- * IPython captures the last expression value as `execute_result`.
+ * kernel captures the last expression value as `execute_result`.
  * We do the same: find the last expression in the code and prepend
  * `return` so the async IIFE returns it.
  *
@@ -373,7 +390,7 @@ function captureLastExpression(code: string): string {
 	return lines.join("\n");
 }
 
-/** Format a value for display — like IPython's repr. */
+/** Format a value for display — like kernel's repr. */
 function formatValue(value: any): string {
 	if (value === null) return "null";
 	if (value === undefined) return "";
@@ -392,5 +409,5 @@ function formatValue(value: any): string {
 
 export default RlmCodeService;
 export const name = "rlm-code";
-export const inject = ["rlmSdk"] as const;
+export const inject = [] as const;
 export { RlmCodeService as RlmCode };

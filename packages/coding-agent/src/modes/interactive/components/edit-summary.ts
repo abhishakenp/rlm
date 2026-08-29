@@ -4,7 +4,7 @@ import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { EditToolDetails } from "../../../core/tools/edit.js";
 import { generateDiffString } from "../../../core/tools/edit-diff.js";
-import type { IpythonToolDetails } from "../../../core/tools/ipython.js";
+import type { CodeToolDetails } from "../../../core/tools/code.js";
 import { resolveToCwd } from "../../../core/tools/path-utils.js";
 import { canonicalizePath, formatPathRelativeToCwdOrAbsolute } from "../../../utils/paths.js";
 import { theme } from "../theme/theme.js";
@@ -45,9 +45,9 @@ export function getToolFileChanges(
 	cwd: string,
 ): FileChangeSummary[] {
 	const changes = new Map<string, FileChangeSummary>();
-	if (toolName === "ipython") {
-		for (const display of (result.details as IpythonToolDetails | undefined)?.diffs ?? []) {
-			const { diff } = generateDiffString(display.oldStr, display.newStr, 4, display.startLine ?? 1);
+	if (toolName === "code") {
+		for (const display of (result.details as CodeToolDetails | undefined)?.diffs ?? []) {
+			const { diff } = generateDiffString(display.oldStr ?? "", display.newStr ?? "", 4, display.startLine ?? 1);
 			mergeFileChange(changes, { path: display.path, ...countChangedLines(diff) }, cwd);
 		}
 	} else if (toolName === "edit" && !result.isError) {

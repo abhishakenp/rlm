@@ -280,14 +280,8 @@ describe("skills", () => {
 					pyprojectPath: join(skillDir, "pyproject.toml"),
 				},
 			});
-			expect(getPythonSkillRuntimeInfo(skills)).toEqual([
-				{
-					name: "python-skill",
-					importName: "python_skill",
-					packagePath: skillDir,
-					pyprojectPath: join(skillDir, "pyproject.toml"),
-				},
-			]);
+			// Python skills are detected on disk but no longer injected into the JS kernel.
+			expect(getPythonSkillRuntimeInfo(skills)).toEqual([]);
 			expect(diagnostics).toHaveLength(0);
 		});
 
@@ -370,7 +364,7 @@ describe("skills", () => {
 			const introText = result.substring(0, xmlStart);
 
 			expect(introText).toContain("The following skills provide specialized instructions");
-			expect(introText).toContain("Use ipython to inspect a skill's file");
+			expect(introText).toContain("Use code to inspect a skill's file");
 			expect(introText).toContain("Skills with a python_import are prepared");
 		});
 

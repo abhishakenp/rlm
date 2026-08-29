@@ -6,7 +6,7 @@ import type { RestoreResult } from "../../../src/core/kernel/state-snapshot.js";
 import {
 	type CustomMessage,
 	IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
-	type IpythonStateRestoredDetails,
+	type CodeStateRestoredDetails,
 } from "../../../src/core/messages.js";
 import {
 	InjectedPromptMessageComponent,
@@ -16,7 +16,7 @@ import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
 import { createHarness, getMessageText, getUserTexts, type Harness } from "../harness.js";
 
 type StateRestoreHost = {
-	_onIpythonStateRestored(result: RestoreResult): void;
+	_onCodeStateRestored(result: RestoreResult): void;
 };
 
 function stripAnsi(text: string): string {
@@ -27,7 +27,7 @@ function render(component: InjectedPromptMessageComponent): string {
 	return stripAnsi(component.render(120).join("\n"));
 }
 
-describe("ENG-4530 IPython state restore message", () => {
+describe("ENG-4530 Code state restore message", () => {
 	const harnesses: Harness[] = [];
 
 	beforeAll(() => {
@@ -79,7 +79,7 @@ describe("ENG-4530 IPython state restore message", () => {
 
 		const firstPrompt = harness.session.prompt("start");
 		await toolStarted;
-		(harness.session as unknown as StateRestoreHost)._onIpythonStateRestored({
+		(harness.session as unknown as StateRestoreHost)._onCodeStateRestored({
 			restored: ["alpha", "beta"],
 			failed: [],
 			path: "/tmp/kernel-state.dill",
@@ -112,15 +112,15 @@ describe("ENG-4530 IPython state restore message", () => {
 				message.role === "custom" && message.customType === IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
 		);
 		if (!restoreMessage || !isInjectedPromptMessage(restoreMessage)) {
-			throw new Error("Expected an injected IPython restore message");
+			throw new Error("Expected an injected Code restore message");
 		}
 
 		const component = new InjectedPromptMessageComponent(restoreMessage);
-		expect(render(component)).toContain("◆ Restored IPython kernel state");
+		expect(render(component)).toContain("◆ Restored Code kernel state");
 		expect(render(component)).not.toContain("alpha");
 		component.setExpanded(true);
-		expect(render(component)).toContain("◆ Restored IPython kernel state");
-		expect(render(component)).not.toContain("ipython_state_restored");
+		expect(render(component)).toContain("◆ Restored Code kernel state");
+		expect(render(component)).not.toContain("code_state_restored");
 		expect(render(component)).not.toContain("alpha");
 	});
 
@@ -160,7 +160,7 @@ describe("ENG-4530 IPython state restore message", () => {
 	});
 
 	it("shows an accurate fixed label when restoration starts a fresh kernel", () => {
-		const message: CustomMessage<IpythonStateRestoredDetails> = {
+		const message: CustomMessage<CodeStateRestoredDetails> = {
 			role: "custom",
 			customType: IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
 			content: "restore details",
@@ -170,7 +170,7 @@ describe("ENG-4530 IPython state restore message", () => {
 		};
 		const component = new InjectedPromptMessageComponent(message);
 
-		expect(render(component)).toContain("◆ Started fresh IPython kernel");
+		expect(render(component)).toContain("◆ Started fresh Code kernel");
 		component.setExpanded(true);
 		expect(render(component)).not.toContain("restore details");
 	});

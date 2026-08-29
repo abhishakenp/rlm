@@ -11,7 +11,7 @@ describe("mergeAgentSessionRuntimeConfig", () => {
 			cwd: "/repo/default",
 			agentDir: "/agent/default",
 			model: "openai/gpt-4o",
-			tools: ["ipython"],
+			tools: ["code"],
 			noTools: true,
 			extensionFlagValues: { plan: true },
 		};
@@ -39,7 +39,7 @@ describe("mergeAgentSessionRuntimeConfig", () => {
 			cwd: "/repo/default",
 			agentDir: "/agent/default",
 			model: "openai/gpt-4o",
-			tools: ["ipython"],
+			tools: ["code"],
 			noTools: true,
 			extensionFlagValues: { plan: true },
 		});
@@ -101,7 +101,7 @@ describe("mergeAgentSessionRuntimeConfig", () => {
 			cwd: "/repo/default",
 			agentDir: "/agent/default",
 			model: "openai/gpt-4o",
-			tools: ["ipython"],
+			tools: ["code"],
 		};
 
 		const merged = mergeAgentSessionRuntimeConfig(defaults, {
@@ -115,7 +115,7 @@ describe("mergeAgentSessionRuntimeConfig", () => {
 			cwd: "/repo/default",
 			agentDir: "/agent/default",
 			model: "openai/gpt-4o",
-			tools: ["ipython"],
+			tools: ["code"],
 			noTools: false,
 		});
 	});

@@ -14,7 +14,7 @@ import {
 	HEARTBEAT_PROMPT_CUSTOM_TYPE,
 	type HeartbeatPromptDetails,
 	IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
-	type IpythonStateRestoredDetails,
+	type CodeStateRestoredDetails,
 	RLM_CHILD_FAILURE_CUSTOM_TYPE,
 	RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
 	type RlmChildFailureDetails,
@@ -26,7 +26,7 @@ import { expandCollapseHint } from "./keybinding-hints.js";
 type InjectedPromptDetails =
 	| GoalContextDetails
 	| HeartbeatPromptDetails
-	| IpythonStateRestoredDetails
+	| CodeStateRestoredDetails
 	| RlmChildFailureDetails
 	| RlmChildTerminalNoticeDetails;
 type InjectedPromptMessage = CustomMessage<InjectedPromptDetails>;
@@ -126,8 +126,8 @@ export class InjectedPromptMessageComponent extends Container {
 			return this.heartbeatHeaderText();
 		}
 		if (this.message.customType === IPYTHON_STATE_RESTORED_CUSTOM_TYPE) {
-			const details = this.message.details as IpythonStateRestoredDetails | undefined;
-			const label = details?.restored === false ? "Started fresh IPython kernel" : "Restored IPython kernel state";
+			const details = this.message.details as CodeStateRestoredDetails | undefined;
+			const label = details?.restored === false ? "Started fresh Code kernel" : "Restored Code kernel state";
 			return `${theme.fg("accent", "◆")} ${theme.fg("muted", label)}`;
 		}
 		if (

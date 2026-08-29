@@ -153,13 +153,13 @@ describe("ToolExecutionComponent parity", () => {
 	});
 
 	test.each(["kitty", "iterm2", null] as const)(
-		"keeps one visible IPython image row without emitting terminal graphics for %s capability",
+		"keeps one visible Code image row without emitting terminal graphics for %s capability",
 		(protocol) => {
 			setCapabilities({ images: protocol, trueColor: true, hyperlinks: true });
 			try {
 				const component = new ToolExecutionComponent(
-					"ipython",
-					`tool-ipython-image-${protocol}`,
+					"code",
+					`tool-code-image-${protocol}`,
 					{ code: "display(image)" },
 					{ showImages: true, includeImageDimensions: false },
 					undefined,
@@ -186,7 +186,7 @@ describe("ToolExecutionComponent parity", () => {
 		},
 	);
 
-	test("uses the compact fallback for a live IPython image in fullscreen", async () => {
+	test("uses the compact fallback for a live Code image in fullscreen", async () => {
 		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 		const terminal = new VirtualTerminal(120, 12);
 		const tui = new TUI(terminal);
@@ -194,8 +194,8 @@ describe("ToolExecutionComponent parity", () => {
 			const transcript = new Container();
 			const dock = new Text("> prompt", 0, 0);
 			const component = new ToolExecutionComponent(
-				"ipython",
-				"tool-ipython-image-fullscreen",
+				"code",
+				"tool-code-image-fullscreen",
 				{ code: "display(image)" },
 				{ showImages: true },
 				undefined,
@@ -825,15 +825,15 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).toContain("custom_tool");
 		expect(rendered).toContain("done");
 	});
-	test("does not add built-in edit stats to custom IPython renderers", () => {
+	test("does not add built-in edit stats to custom Code renderers", () => {
 		const component = new ToolExecutionComponent(
-			"ipython",
-			"custom-ipython",
+			"code",
+			"custom-code",
 			{},
 			{},
 			{
-				...createBaseToolDefinition("ipython"),
-				renderCall: () => new Text("custom ipython", 0, 0),
+				...createBaseToolDefinition("code"),
+				renderCall: () => new Text("custom code", 0, 0),
 			},
 			createFakeTui(),
 			process.cwd(),
@@ -845,14 +845,14 @@ describe("ToolExecutionComponent parity", () => {
 		});
 
 		const rendered = stripAnsi(component.render(120).join("\n"));
-		expect(rendered).toContain("custom ipython");
+		expect(rendered).toContain("custom code");
 		expect(rendered).not.toContain("README.md +1 -1");
 	});
 
-	test("globally expands built-in IPython source associated with diffs", () => {
+	test("globally expands built-in Code source associated with diffs", () => {
 		const component = new ToolExecutionComponent(
-			"ipython",
-			"tool-ipython-edit",
+			"code",
+			"tool-code-edit",
 			{
 				code: 'hidden_side_effect = "only in full source"\nawait edit(path="README.md", old_str="before", new_str="after")',
 			},

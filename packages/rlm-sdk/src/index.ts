@@ -1,22 +1,23 @@
 /**
  * @rlm/sdk — TypeScript SDK for rlm.
  *
- * Cordis Service. Wraps the prime-agent runtime's createAgentSession()
- * for in-process subagent spawning — no IPython comm bridge needed.
+ * Cordis Service. Wraps the coding-agent runtime's createAgentSession()
+ * for in-process subagent spawning.
  *
- * This is the same API surface as the Python `rlm` module, but in TS:
+ * API surface:
  *   - rlm.run(prompt, opts) → spawn a child agent, get a handle
+ *   - rlm.spawn(prompt, opts) → spawn and await result string
  *   - rlm.listSubagents() → list active children
  *   - rlm.deleteSubagent(name) → dispose a child
  *   - rlm.goal.* → goal management
  *
  * Workflows use this SDK to compose recursive agent trees.
  *
- * Reference: Python SDK at packages/coding-agent/dist/prime-agent-runtime/src/rlm/__init__.py
- * wraps AgentSession.runRlmChild via Jupyter comm. This SDK wraps
- * createAgentSession() directly — same runtime, no kernel detour.
+ * Child sessions get the JS code tool via baseToolsOverride, connected
+ * to the shared Cordis rlmCode service.
  */
 import { Service } from "@deepseek-ai/cordis";
+import { createJsCodeTool } from "./js-code-tool.js";
 
 export interface RlmSdkConfig {
 	maxDepth?: number;
@@ -64,7 +65,7 @@ export interface GoalInfo {
  *
  * The SDK creates child AgentSessions via createAgentSession() from the
  * prime-agent runtime. Each child gets its own agent loop, tools, model,
- * and session persistence — same as Python rlm.run() but in-process TS.
+ * and session persistence — same as rlm.run() but in-process TS.
  */
 export class RlmSdkService extends Service {
 	static inject = [] as const;
@@ -77,8 +78,8 @@ export class RlmSdkService extends Service {
 	private goalState: GoalInfo = { objective: "", status: "idle", tokensUsed: 0 };
 
 	constructor(ctx: any, config: RlmSdkConfig = {}) {
-		super(ctx, "rlmSdk");
-		this.config = config;
+		super(ctx, undefined as any);
+		this.config = typeof config === "object" && !Array.isArray(config) ? config : {};
 	}
 
 	async [Service.init]() {
@@ -112,7 +113,7 @@ export class RlmSdkService extends Service {
 	/**
 	 * Spawn a subagent. Returns a handle that can be awaited for the result.
 	 *
-	 * Same semantics as Python rlm.run(prompt, **kwargs):
+	 * Same semantics as rlm.run(prompt, opts):
 	 *   - Creates a child AgentSession with incremented depth
 	 *   - Child gets its own agent loop, tools, model, session
 	 *   - Result is the child's final assistant message
@@ -147,10 +148,18 @@ export class RlmSdkService extends Service {
 		this.ctx.emit("rlm/sdk-spawn", { id, depth, prompt, name: opts.name });
 
 		try {
+			// Connect the child's code tool to the shared Cordis rlmCode service.
+			const codeService = this.ctx.get("rlmCode");
+			const baseToolsOverride: Record<string, any> = {};
+			if (codeService) {
+				baseToolsOverride.code = createJsCodeTool(codeService);
+			}
+
 			const { session } = await this.createAgentSessionFn({
 				cwd: opts.cwd ?? process.cwd(),
 				rlmDepth: depth,
 				rlmMaxDepth: maxDepth,
+				...(Object.keys(baseToolsOverride).length > 0 ? { baseToolsOverride } : {}),
 			});
 			this.childSessions.set(id, session);
 

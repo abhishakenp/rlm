@@ -9,7 +9,7 @@ import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/rend
 import type { AgentConnectionToolDefinition } from "../../agent-connection/index.js";
 import { type Theme, theme } from "../theme/theme.js";
 import { getWorkingPulseFrame, workingIconFrame } from "../theme/working-icon.js";
-import { getIpythonCodeFromArgs, IPythonCellComponent } from "./ipython-cell.js";
+import { getCodeCodeFromArgs, CodeCellComponent } from "./code-cell.js";
 import { ToolPanel } from "./tool-panel.js";
 
 export interface ToolExecutionOptions {
@@ -49,8 +49,8 @@ function createReplayBuiltInToolDefinition(
 	cwd: string,
 	toolDefinition: ToolExecutionDefinition | undefined,
 ): ToolDefinition<any, any> | undefined {
-	if (toolName === "ipython") {
-		return createAllToolDefinitions(cwd).ipython;
+	if (toolName === "code") {
+		return createAllToolDefinitions(cwd).code;
 	}
 	switch (toolName) {
 		case "bash": {
@@ -71,7 +71,7 @@ export class ToolExecutionComponent extends Container {
 	private selfRenderContainer: Container;
 	private callRendererComponent?: Component;
 	private resultRendererComponent?: Component;
-	private ipythonCellComponent?: IPythonCellComponent;
+	private codeCellComponent?: CodeCellComponent;
 	private rendererState: any = {};
 	private imageComponents: Image[] = [];
 	private toolName: string;
@@ -159,7 +159,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private getRenderShell(): "default" | "self" {
-		if (this.shouldUseIpythonRenderer()) {
+		if (this.shouldUseCodeRenderer()) {
 			return "self";
 		}
 		if (!this.builtInToolDefinition) {
@@ -171,8 +171,8 @@ export class ToolExecutionComponent extends Container {
 		return this.toolDefinition.renderShell ?? this.builtInToolDefinition.renderShell ?? "default";
 	}
 
-	private shouldUseIpythonRenderer(): boolean {
-		return this.toolName === "ipython" && !this.toolDefinition?.renderCall && !this.toolDefinition?.renderResult;
+	private shouldUseCodeRenderer(): boolean {
+		return this.toolName === "code" && !this.toolDefinition?.renderCall && !this.toolDefinition?.renderResult;
 	}
 
 	private isBuiltInEditTool(): boolean {
@@ -347,9 +347,9 @@ export class ToolExecutionComponent extends Container {
 		if (this.hasRendererDefinition() && this.getRenderShell() === "self") {
 			this.selfRenderContainer.clear();
 
-			if (this.shouldUseIpythonRenderer()) {
+			if (this.shouldUseCodeRenderer()) {
 				const state = {
-					code: getIpythonCodeFromArgs(this.args),
+					code: getCodeCodeFromArgs(this.args),
 					content: this.result?.content,
 					details: this.result?.details,
 					isPartial: this.isPartial,
@@ -363,12 +363,12 @@ export class ToolExecutionComponent extends Container {
 					showImages: this.showImages,
 					cwd: this.cwd,
 				};
-				if (!this.ipythonCellComponent) {
-					this.ipythonCellComponent = new IPythonCellComponent(state);
+				if (!this.codeCellComponent) {
+					this.codeCellComponent = new CodeCellComponent(state);
 				} else {
-					this.ipythonCellComponent.update(state);
+					this.codeCellComponent.update(state);
 				}
-				this.selfRenderContainer.addChild(this.ipythonCellComponent);
+				this.selfRenderContainer.addChild(this.codeCellComponent);
 				hasContent = true;
 			} else {
 				hasContent = this.mountRenderers(this.selfRenderContainer, true);

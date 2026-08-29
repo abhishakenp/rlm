@@ -11,13 +11,14 @@
  * 3. Starts chokidar HMR watcher on all package source dirs
  * 4. Launches prime-agent's runCli() in-process (interactive TUI or print mode)
  *
- * HMR: editing any plugin source file triggers dispose + reload.
- * The prime-agent TUI handles subagent visualization, streaming, tools, etc.
+ * HMR: editing any plugin source file triggers hot-swap (new generation
+ * takes over, old fiber disposed in background — active sessions never
+ * interrupted).
  */
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const profilePath = join(here, "config", "profile.yml");
@@ -150,29 +151,53 @@ async function loadPlugins(ctx) {
 	}
 
 	// HMR reload handler — reload the changed rlm-* plugin.
+	// CRITICAL: never interrupt active sessions. The old fiber stays alive
+	// until the new one is fully loaded and ready. Only then do we swap.
+	// In-flight operations using the old service complete normally.
 	ctx.on("rlm/hmr-change", async ({ path }) => {
 		// Only reload rlm-* plugins (not prime-agent source — that's too complex for HMR).
 		const match = path.match(/packages\/(rlm-[^/]+)\//);
 		if (!match) return;
 		const pkgDir = match[1];
-		const pkgName = `@rlm/${pkgDir.replace(/^rlm-/, "")}`;
-		const entry = loaded.find((e) => e.pkgName === pkgName);
+		// Find the loaded entry by matching the package dir in the import path.
+		const entry = loaded.find((e) => e.pkgName.includes(pkgDir));
 		if (!entry) return;
 
-		console.error(`[rlm] HMR: reloading ${pkgName}...`);
+		// Debounce: skip if already reloading this plugin.
+		if (entry._reloading) return;
+		entry._reloading = true;
+
+		console.error(`[rlm] HMR: hot-swapping ${pkgDir}...`);
 		try {
-			if (entry.fiber?.dispose) {
-				await entry.fiber.dispose();
-			}
+			// Load the new module FIRST — don't touch the old fiber yet.
 			const modUrl = pathToFileURL(join(process.cwd(), "packages", pkgDir, "src", "index.ts")).href;
 			const cacheBust = `${modUrl}?hmr=${Date.now()}`;
 			const mod = await import(cacheBust);
 			const NewPlugin = mod.default ?? mod;
+
+			// Register the new plugin — it takes over the service name.
+			const newFiber = ctx.plugin(NewPlugin, entry.config);
+
+			// Swap: new fiber is active. Old fiber is disposed AFTER the swap.
+			// Any in-flight calls on the old service have already captured their
+			// reference and will complete normally — dispose just stops new
+			// activations and cleans up timers/watchers.
+			const oldFiber = entry.fiber;
 			entry.Plugin = NewPlugin;
-			entry.fiber = ctx.plugin(NewPlugin, entry.config);
-			console.error(`[rlm] HMR: ${pkgName} reloaded`);
+			entry.fiber = newFiber;
+
+			// Dispose old fiber asynchronously — don't await, don't block.
+			// If in-flight operations are still running, they complete on the
+			// old service instance which remains in memory until GC.
+			if (oldFiber?.dispose) {
+				oldFiber.dispose().catch(() => {});
+			}
+
+			console.error(`[rlm] HMR: ${pkgDir} hot-swapped (old fiber disposed in background)`);
 		} catch (error) {
-			console.error(`[rlm] HMR: reload failed for ${pkgName}: ${error?.message ?? error}`);
+			console.error(`[rlm] HMR: reload failed for ${pkgDir}: ${error?.message ?? error}`);
+		} finally {
+			entry._reloading = false;
 		}
 	});
 }
@@ -194,6 +219,11 @@ async function main() {
 	const ctx = await bootCordis();
 	if (!ctx) process.exit(1);
 
+	// The code tool is now the native built-in — no override injection needed.
+	// The CLI's createAllToolDefinitions() returns { code: createCodeToolDefinition(...) }
+	// and the rlmCode Cordis service provides the execution backend.
+	console.error(`[rlm] code tool is native built-in`);
+
 	// Launch prime-agent in-process.
 	// runCli() reads process.argv and dispatches to interactive mode or print mode.
 	// The interactive mode uses InProcessAgentConnection (no daemon).
@@ -207,5 +237,14 @@ async function main() {
 		process.exit(1);
 	} finally {
 		if (ctx?.fiber?.dispose) await ctx.fiber.dispose();
+	}
+
+	// Print mode (-p) exits after the response. Interactive mode exits on Ctrl+C.
+	// In both cases, chokidar watchers keep the process alive — force exit.
+	// Only force-exit if stdout is not a TTY (print mode), or if the CLI
+	// has finished. The prime-agent CLI calls process.exit() itself in
+	// interactive mode, so this is a safety net for print mode.
+	if (!process.stdout.isTTY) {
+		process.exit(0);
 	}
 }

@@ -463,6 +463,7 @@ export function resolveRuntimeSessionOptions(
 		tools: runtimeSessionOptions?.tools ?? sessionOptions.tools,
 		noTools: runtimeSessionOptions?.noTools ?? sessionOptions.noTools,
 		customTools: runtimeSessionOptions?.customTools ?? sessionOptions.customTools,
+		baseToolsOverride: runtimeSessionOptions?.baseToolsOverride ?? sessionOptions.baseToolsOverride,
 		initialActiveToolNames: runtimeSessionOptions?.initialActiveToolNames,
 		allowedToolNames: runtimeSessionOptions?.allowedToolNames,
 		includeGoals: runtimeSessionOptions?.includeGoals,
@@ -833,7 +834,7 @@ export async function main(args: string[], options?: MainOptions) {
 			...resolvedSessionOptions,
 			// Main agents boot their kernel in the background at session creation;
 			// subagent sessions (rlmDepth > 0) keep the lazy first-call start.
-			prewarmIpythonKernel: true,
+			prewarmCodeKernel: true,
 			// Read serializedRefine from the merged runtime config (passed
 			// from the JSON/print client through AgentSessionRuntimeConfig).
 			serializedRefine: config.serializedRefine ?? false,

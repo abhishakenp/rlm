@@ -6,9 +6,9 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { formatAgentMessageParticipant } from "../../../core/agent-messages.js";
-import { previewIpythonCode } from "../../../core/tools/code-preview.js";
+import { previewCodeCode } from "../../../core/tools/code-preview.js";
 import { generateDiffString } from "../../../core/tools/edit-diff.js";
-import { parseIpythonBashCell } from "../../../core/tools/ipython-cell-code.js";
+import { parseCodeBashCell } from "../../../core/tools/code-cell-code.js";
 import { getLanguageFromPath, highlightCode, theme } from "../theme/theme.js";
 import { getWorkingPulseFrame, WORKING_ICON_FRAMES, workingIconFrame } from "../theme/working-icon.js";
 import { agentMessageBodyLines, agentMessagePreview, agentMessageSummaryLine } from "./agent-message.js";
@@ -17,16 +17,16 @@ import { renderDiffSeparator, renderRichDiff } from "./diff.js";
 import { countChangedLines, FILE_CHANGE_DIFF_INDENT, formatFileChangeSummaryLine } from "./edit-summary.js";
 import { expandCollapseHint } from "./keybinding-hints.js";
 
-export interface IPythonCellContentBlock {
+export interface CodeCellContentBlock {
 	type: string;
 	text?: string;
 	data?: string;
 	mimeType?: string;
 }
 
-export interface IPythonCellState {
+export interface CodeCellState {
 	code: string;
-	content?: readonly IPythonCellContentBlock[];
+	content?: readonly CodeCellContentBlock[];
 	details?: unknown;
 	isPartial?: boolean;
 	isError?: boolean;
@@ -60,7 +60,7 @@ interface SentAgentMessageDisplay {
 	};
 }
 
-interface IpythonDetails {
+interface CodeDetails {
 	durationMs?: number;
 	status?: string;
 	errorEname?: string;
@@ -69,10 +69,10 @@ interface IpythonDetails {
 	result?: string;
 	diffs?: DiffDisplay[];
 	sentAgentMessages?: SentAgentMessageDisplay[];
-	error?: IpythonErrorDetails;
+	error?: CodeErrorDetails;
 }
 
-interface IpythonErrorDetails {
+interface CodeErrorDetails {
 	ename: string;
 	evalue: string;
 	traceback: readonly string[];
@@ -126,7 +126,7 @@ function closeOpenSgr(line: string): string {
 	return fgOpen || bgOpen ? `${line}\x1b[0m` : line;
 }
 
-export function getIpythonCodeFromArgs(args: unknown): string {
+export function getCodeCodeFromArgs(args: unknown): string {
 	if (!args || typeof args !== "object" || !("code" in args)) {
 		return "";
 	}
@@ -134,7 +134,7 @@ export function getIpythonCodeFromArgs(args: unknown): string {
 	return typeof code === "string" ? code : "";
 }
 
-function readDetails(details: unknown): IpythonDetails {
+function readDetails(details: unknown): CodeDetails {
 	if (!details || typeof details !== "object") {
 		return {};
 	}
@@ -257,7 +257,7 @@ function isAgentMessageReceipt(text: string | undefined, messages: readonly Sent
 	);
 }
 
-function readErrorDetails(value: unknown): IpythonErrorDetails | undefined {
+function readErrorDetails(value: unknown): CodeErrorDetails | undefined {
 	if (!value || typeof value !== "object") {
 		return undefined;
 	}
@@ -284,11 +284,11 @@ function formatDuration(durationMs: number | undefined): string | undefined {
 	return `${(durationMs / 1000).toFixed(1)}s`;
 }
 
-function isImageBlock(block: IPythonCellContentBlock): boolean {
+function isImageBlock(block: CodeCellContentBlock): boolean {
 	return block.type === "image" && typeof block.data === "string" && typeof block.mimeType === "string";
 }
 
-function textFromBlocks(blocks: readonly IPythonCellContentBlock[] | undefined): string {
+function textFromBlocks(blocks: readonly CodeCellContentBlock[] | undefined): string {
 	if (!blocks) {
 		return "";
 	}
@@ -319,7 +319,7 @@ function splitTraceback(text: string, errorName: string | undefined): TracebackP
 	return { output, traceback, preview: preview === "Error" && errorName ? errorName : preview };
 }
 
-function formatIpythonErrorSummary(error: IpythonErrorDetails): string {
+function formatCodeErrorSummary(error: CodeErrorDetails): string {
 	const normalizedValue = normalizeErrorDetails(error.evalue);
 	if (!normalizedValue.trim()) {
 		return error.ename;
@@ -331,16 +331,16 @@ function formatIpythonErrorSummary(error: IpythonErrorDetails): string {
 	return visibleWidth(value) <= 48 ? `${error.ename}: ${value}` : error.ename;
 }
 
-export class IPythonCellComponent implements Component {
+export class CodeCellComponent implements Component {
 	private readonly renderCache = new VersionedRenderCache();
-	private state: IPythonCellState;
+	private state: CodeCellState;
 	private stateVersion = 0;
 
-	constructor(state: IPythonCellState) {
+	constructor(state: CodeCellState) {
 		this.state = state;
 	}
 
-	update(state: IPythonCellState): void {
+	update(state: CodeCellState): void {
 		this.state = state;
 		this.stateVersion += 1;
 	}
@@ -386,10 +386,10 @@ export class IPythonCellComponent implements Component {
 		return this.renderCache.set(safeWidth, cacheVersion, lines);
 	}
 
-	private collapsedLine(details: IpythonDetails): string {
+	private collapsedLine(details: CodeDetails): string {
 		const code = this.state.code.trimEnd();
-		const isBashCell = parseIpythonBashCell(code) !== undefined;
-		const preview = previewIpythonCode(code);
+		const isBashCell = parseCodeBashCell(code) !== undefined;
+		const preview = previewCodeCode(code);
 		const languageLabel = isBashCell && preview.language !== "bash" ? `bash · ${preview.language}` : preview.language;
 		const parts = [`${this.marker(details)} ${theme.fg("muted", languageLabel)}`];
 
@@ -421,7 +421,7 @@ export class IPythonCellComponent implements Component {
 	}
 
 	/** Status marker — color carries running/done/error; ✓/✗ once finished. */
-	private marker(details: IpythonDetails): string {
+	private marker(details: CodeDetails): string {
 		switch (this.statusKind(details)) {
 			case "error":
 				return theme.fg("error", "✗");
@@ -438,8 +438,8 @@ export class IPythonCellComponent implements Component {
 
 	// `↑in ↓out lines` — the "lines" unit disambiguates from the token counts on
 	// the activity line. Output is omitted for edits (the diff shows on expand).
-	private lineCounts(details: IpythonDetails): string | undefined {
-		const bashCell = parseIpythonBashCell(this.state.code);
+	private lineCounts(details: CodeDetails): string | undefined {
+		const bashCell = parseCodeBashCell(this.state.code);
 		const body = (bashCell?.body ?? this.state.code).split(/\r?\n/);
 		const input = body.filter((line) => line.trim().length > 0).length;
 
@@ -464,7 +464,7 @@ export class IPythonCellComponent implements Component {
 		return segments.length > 0 ? `${segments.join(" ")} lines` : undefined;
 	}
 
-	private statusKind(details: IpythonDetails): "error" | "aborted" | "running" | "queued" | "done" {
+	private statusKind(details: CodeDetails): "error" | "aborted" | "running" | "queued" | "done" {
 		const status = details.status;
 		if (this.state.isError || status === "error") {
 			return "error";
@@ -483,7 +483,7 @@ export class IPythonCellComponent implements Component {
 		return "queued";
 	}
 
-	private hasResult(details: IpythonDetails): boolean {
+	private hasResult(details: CodeDetails): boolean {
 		return (
 			details.stdout !== undefined ||
 			details.stderr !== undefined ||
@@ -505,14 +505,14 @@ export class IPythonCellComponent implements Component {
 		}
 
 		this.addBlank(lines, width);
-		const isBashCell = parseIpythonBashCell(code) !== undefined;
+		const isBashCell = parseCodeBashCell(code) !== undefined;
 		const rawLines = code.split("\n");
 		// Highlight the whole cell at once so multi-line strings keep their color.
 		const highlightedLines = isBashCell ? [] : highlightCode(code, "python");
 		for (const [index, rawLine] of rawLines.entries()) {
 			const prefix = index === 0 ? theme.fg("dim", "› ") : theme.fg("dim", "  ");
 			const highlighted =
-				isBashCell || MAGIC_LINE_PATTERN.test(rawLine) || parseIpythonBashCell(rawLine) !== undefined
+				isBashCell || MAGIC_LINE_PATTERN.test(rawLine) || parseCodeBashCell(rawLine) !== undefined
 					? theme.fg("bashMode", rawLine)
 					: (highlightedLines[index] ?? theme.fg("mdCodeBlock", rawLine));
 			this.addWrapped(lines, prefix, highlighted || " ", width);
@@ -522,7 +522,7 @@ export class IPythonCellComponent implements Component {
 	}
 
 	private highlightInputLine(line: string, isBashCell: boolean): string {
-		if (isBashCell || MAGIC_LINE_PATTERN.test(line) || parseIpythonBashCell(line) !== undefined) {
+		if (isBashCell || MAGIC_LINE_PATTERN.test(line) || parseCodeBashCell(line) !== undefined) {
 			return theme.fg("bashMode", line);
 		}
 		const highlighted = highlightCode(line, "python");
@@ -530,7 +530,7 @@ export class IPythonCellComponent implements Component {
 	}
 
 	// Only runs when expanded — shows full output below the code, no previews.
-	private renderOutput(lines: string[], width: number, details: IpythonDetails, hasCode: boolean): void {
+	private renderOutput(lines: string[], width: number, details: CodeDetails, hasCode: boolean): void {
 		const blocks = this.state.content ?? [];
 		const text = textFromBlocks(blocks);
 		const imageCount = blocks.filter(isImageBlock).length;
@@ -615,7 +615,7 @@ export class IPythonCellComponent implements Component {
 			this.renderTraceback(
 				lines,
 				width,
-				details.error.traceback.join("\n") || formatIpythonErrorSummary(details.error),
+				details.error.traceback.join("\n") || formatCodeErrorSummary(details.error),
 			);
 		} else if (traceback) {
 			startOutput();

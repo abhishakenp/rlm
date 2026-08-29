@@ -2092,7 +2092,7 @@ describe("P0 concurrency regressions", () => {
 		expect(internals._pendingRequestedRefine).toBeUndefined();
 
 		(harness.session.agent.state as { isStreaming: boolean }).isStreaming = false;
-		const toolUseAssistant = fauxAssistantMessage([fauxToolCall("ipython", { code: "await refine.run()" })], {
+		const toolUseAssistant = fauxAssistantMessage([fauxToolCall("code", { code: "await refine.run()" })], {
 			stopReason: "toolUse",
 		});
 		internals._lastAssistantMessage = toolUseAssistant;

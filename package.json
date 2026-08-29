@@ -15,7 +15,7 @@
     "packages/rlm-*"
   ],
   "scripts": {
-    "build": "cd packages/tui && npm run build && cd ../ai && npm run build && cd ../agent && npm run build && cd ../coding-agent && npm run build && node scripts/build-rlm-plugins.mjs",
+    "build": "cd packages/tui && npm run build && cd ../ai && npm run build && cd ../agent && npm run build && cd ../coding-agent && npm run build",
     "dev": "node cordis-shell.mjs"
   },
   "dependencies": {

@@ -26,7 +26,7 @@ export interface FleetHost {
 	user?: string;
 	/** Tags for routing (linux, macos, cloud, local, etc.). */
 	tags: string[];
-	/** Capabilities (bash, ipython, browser, ios-sim, etc.). */
+	/** Capabilities (bash, code, browser, ios-sim, etc.). */
 	capabilities: string[];
 	/** OS family. */
 	os?: string;
@@ -56,7 +56,7 @@ export interface FleetMember {
 	user?: string;
 	/** Tags for routing and grouping. */
 	tags: string[];
-	/** Capabilities (bash, ipython, browser, etc.). */
+	/** Capabilities (bash, code, browser, etc.). */
 	capabilities?: string[];
 	/** OS family. */
 	os?: string;

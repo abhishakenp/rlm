@@ -18,7 +18,7 @@ import { DefaultResourceLoader } from "./resource-loader.js";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.js";
 import { SettingsManager } from "./settings-manager.js";
 import { time } from "./timings.js";
-import { createBashTool, createEditTool, createIpythonTool, withFileMutationQueue } from "./tools/index.js";
+import { createBashTool, createEditTool, createCodeTool, withFileMutationQueue } from "./tools/index.js";
 
 export interface CreateAgentSessionOptions extends AgentSessionCreationOptions {
 	/** Working directory for project-local discovery. Default: process.cwd() */
@@ -42,14 +42,14 @@ export interface CreateAgentSessionOptions extends AgentSessionCreationOptions {
 	 * Optional default tool suppression mode when no explicit allowlist is provided.
 	 *
 	 * - "all": start with no tools enabled
-	 * - "builtin": disable the default built-in tool (ipython)
+	 * - "builtin": disable the default built-in tool (code)
 	 *   but keep extension/custom tools enabled
 	 */
 	noTools?: "all" | "builtin";
 	/**
 	 * Optional allowlist of tool names.
 	 *
-	 * When omitted, pi enables the default built-in tool (ipython)
+	 * When omitted, pi enables the default built-in tool (code)
 	 * and leaves extension/custom tools enabled unless `noTools` changes that default.
 	 * When provided, only the listed tool names are enabled.
 	 */
@@ -101,7 +101,7 @@ export type { CreateRlmSubagentRuntimeOptions, RlmSubagentRuntime, SubagentRunti
 export type { Skill } from "./skills.js";
 export type { Tool } from "./tools/index.js";
 
-export { createBashTool, createEditTool, createIpythonTool, withFileMutationQueue };
+export { createBashTool, createEditTool, createCodeTool, withFileMutationQueue };
 
 function getDefaultAgentDir(): string {
 	return getAgentDir();
@@ -136,7 +136,7 @@ function getDefaultAgentDir(): string {
  * await loader.reload();
  * const { session } = await createAgentSession({
  *   model: myModel,
- *   tools: ["ipython"],
+ *   tools: ["code"],
  *   resourceLoader: loader,
  *   sessionManager: SessionManager.inMemory(),
  * });
@@ -235,7 +235,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const allowedToolNames = options.allowedToolNames ?? options.tools ?? (options.noTools === "all" ? [] : undefined);
 	const includeGoals = options.includeGoals ?? (options.tools !== undefined || options.noTools !== "all");
 	const initialActiveToolNames: string[] =
-		options.initialActiveToolNames ?? (options.tools ? [...options.tools] : options.noTools ? [] : ["ipython"]);
+		options.initialActiveToolNames ??
+		(options.tools
+			? [...options.tools]
+			: options.noTools
+				? []
+				: ["code"]);
 
 	let agent: Agent;
 
@@ -355,6 +360,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		scopedModels: options.scopedModels,
 		resourceLoader,
 		customTools: options.customTools,
+		baseToolsOverride: options.baseToolsOverride,
 		modelRegistry,
 		mcpManager,
 		initialActiveToolNames,
@@ -372,7 +378,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		rlmParentAgent: options.rlmParentAgent,
 		subagentRuntimeHost: options.subagentRuntimeHost,
 		sessionStartEvent: options.sessionStartEvent,
-		prewarmIpythonKernel: options.prewarmIpythonKernel,
+		prewarmCodeKernel: options.prewarmCodeKernel,
 		autonomous: options.autonomous,
 		serializedRefine: options.serializedRefine,
 		initialGoal: options.initialGoal,

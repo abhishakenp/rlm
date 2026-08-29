@@ -51,6 +51,8 @@ export interface AgentSessionCreationOptions {
 	tools?: string[];
 	noTools?: "all" | "builtin";
 	customTools?: ToolDefinition[];
+	/** Override built-in tools (e.g. replace code tool with a custom one). */
+	baseToolsOverride?: Record<string, import("@earendil-works/pi-agent-core").AgentTool<any>>;
 	initialActiveToolNames?: string[];
 	allowedToolNames?: string[];
 	includeGoals?: boolean;
@@ -64,7 +66,7 @@ export interface AgentSessionCreationOptions {
 	rlmParentAgent?: string;
 	subagentRuntimeHost?: SubagentRuntimeHost;
 	rlmHeartbeatController?: AgentRlmHeartbeatController;
-	prewarmIpythonKernel?: boolean;
+	prewarmCodeKernel?: boolean;
 	autonomous?: AgentAutonomousConfig;
 	serializedRefine?: boolean;
 	executionMode?: AgentExecutionMode;
@@ -240,6 +242,7 @@ export async function createAgentSessionFromServices(
 		tools: options.tools,
 		noTools: options.noTools,
 		customTools: options.customTools,
+		baseToolsOverride: options.baseToolsOverride,
 		initialActiveToolNames: options.initialActiveToolNames,
 		allowedToolNames: options.allowedToolNames,
 		includeGoals: options.includeGoals,
@@ -254,7 +257,7 @@ export async function createAgentSessionFromServices(
 		subagentRuntimeHost: options.subagentRuntimeHost,
 		rlmHeartbeatController: options.rlmHeartbeatController,
 		sessionStartEvent: options.sessionStartEvent,
-		prewarmIpythonKernel: options.prewarmIpythonKernel,
+		prewarmCodeKernel: options.prewarmCodeKernel,
 		autonomous: options.autonomous,
 		serializedRefine: options.serializedRefine,
 		initialGoal: options.initialGoal,

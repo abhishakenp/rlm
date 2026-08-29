@@ -68,7 +68,7 @@ function toolCallOnlyAssistant(id: string, parentId: string | null): AgentConnec
 		message: {
 			role: "assistant",
 			content: [
-				{ type: "toolCall", id: `tc-${id}`, name: "ipython", arguments: { code: "open('test.ts').read()" } },
+				{ type: "toolCall", id: `tc-${id}`, name: "code", arguments: { code: "open('test.ts').read()" } },
 			],
 			api: "anthropic-messages",
 			provider: "anthropic",

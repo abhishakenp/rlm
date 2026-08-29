@@ -2391,7 +2391,7 @@ describe("AgentSession rlm recursion", () => {
 
 	it("adds child usage to the parent session aggregate", async () => {
 		const root = createSession();
-		const parentAssistant = assistantMessage("running ipython", usage(0, 0));
+		const parentAssistant = assistantMessage("running code", usage(0, 0));
 		root.agent.state.messages.push(parentAssistant);
 		root.sessionManager.appendMessage(parentAssistant);
 
@@ -2463,7 +2463,7 @@ describe("AgentSession rlm recursion", () => {
 				return stream;
 			},
 		});
-		const parentAssistant = assistantMessage("running ipython", usage(0, 0));
+		const parentAssistant = assistantMessage("running code", usage(0, 0));
 		root.agent.state.messages.push(parentAssistant);
 		root.sessionManager.appendMessage(parentAssistant);
 

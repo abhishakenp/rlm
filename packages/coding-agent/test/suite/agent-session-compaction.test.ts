@@ -96,9 +96,9 @@ describe("AgentSession compaction characterization", () => {
 
 		const pruneOversizedVariables = vi.fn(async () => ["large_text"]);
 		const listNamespaceNames = vi.fn(async () => ["small_value"]);
-		const internals = harness.session as unknown as { _ipythonKernelProvisioner?: unknown };
-		const previousProvisioner = internals._ipythonKernelProvisioner;
-		internals._ipythonKernelProvisioner = {
+		const internals = harness.session as unknown as { _codeKernelProvisioner?: unknown };
+		const previousProvisioner = internals._codeKernelProvisioner;
+		internals._codeKernelProvisioner = {
 			hasRunningKernel: true,
 			pruneOversizedVariables,
 			listNamespaceNames,
@@ -107,7 +107,7 @@ describe("AgentSession compaction characterization", () => {
 		try {
 			result = await harness.session.compact();
 		} finally {
-			internals._ipythonKernelProvisioner = previousProvisioner;
+			internals._codeKernelProvisioner = previousProvisioner;
 		}
 		const compactionEntries = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction");
 
@@ -119,7 +119,7 @@ describe("AgentSession compaction characterization", () => {
 		expect(harness.session.messages).toContainEqual(
 			expect.objectContaining({
 				role: "custom",
-				customType: "ipython_state",
+				customType: "code_state",
 				content: expect.stringContaining("were removed: large_text"),
 			}),
 		);

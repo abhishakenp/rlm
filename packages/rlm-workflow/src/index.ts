@@ -65,7 +65,7 @@ export function define(fn: (api: WorkflowApi) => WorkflowDef): (api: WorkflowApi
 }
 
 export class RlmWorkflowService extends Service {
-	static inject = ["rlmSdk"] as const;
+	static inject = [] as const;
 	static provide = "rlmWorkflow" as const;
 
 	declare config: RlmWorkflowConfig;
@@ -74,8 +74,8 @@ export class RlmWorkflowService extends Service {
 	private watcher: any = null;
 
 	constructor(ctx: any, config: RlmWorkflowConfig = {}) {
-		super(ctx, "rlmWorkflow");
-		this.config = config;
+		super(ctx, undefined as any);
+		this.config = typeof config === "object" && !Array.isArray(config) ? config : {};
 	}
 
 	async [Service.init]() {
@@ -250,5 +250,5 @@ export class RlmWorkflowService extends Service {
 
 export default RlmWorkflowService;
 export const name = "rlm-workflow";
-export const inject = ["rlmSdk"] as const;
+export const inject = [] as const;
 export { RlmWorkflowService as RlmWorkflow };

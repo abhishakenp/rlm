@@ -113,7 +113,7 @@ function createConnectionState(overrides: Partial<AgentConnectionState> = {}): A
 		compactionCount: 0,
 		goal: emptyGoalState(),
 		scopedModels: [],
-		activeToolNames: ["ipython"],
+		activeToolNames: ["code"],
 		contextUsage: undefined,
 		...overrides,
 	};
@@ -207,8 +207,8 @@ describe("InteractiveMode.showStatus", () => {
 
 type RenderSessionContextHarness = {
 	pendingTools: Map<string, ToolExecutionComponent>;
-	ipythonToolComponents: Map<string, unknown>;
-	lateIpythonSentAgentMessages: Map<string, unknown[]>;
+	codeToolComponents: Map<string, unknown>;
+	lateCodeSentAgentMessages: Map<string, unknown[]>;
 	toolOutputExpanded: boolean;
 	chatContainer: Container;
 	editor: { addToHistory?: (text: string) => void };
@@ -255,8 +255,8 @@ function createRenderSessionContextHarness(overrides: Partial<RenderSessionConte
 	const addToHistory = vi.fn();
 	const harness: RenderSessionContextHarness = {
 		pendingTools: new Map<string, ToolExecutionComponent>(),
-		ipythonToolComponents: new Map<string, unknown>(),
-		lateIpythonSentAgentMessages: new Map<string, unknown[]>(),
+		codeToolComponents: new Map<string, unknown>(),
+		lateCodeSentAgentMessages: new Map<string, unknown[]>(),
 		toolOutputExpanded: false,
 		chatContainer,
 		editor: { addToHistory },
@@ -322,12 +322,12 @@ describe("InteractiveMode.renderSessionContext", () => {
 		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 		try {
 			const chatContainer = new Container();
-			const ipythonToolComponents = new Map([["stale-tool", {}]]);
-			const lateIpythonSentAgentMessages = new Map([["stale-tool", []]]);
+			const codeToolComponents = new Map([["stale-tool", {}]]);
+			const lateCodeSentAgentMessages = new Map([["stale-tool", []]]);
 			const fakeThis: any = {
 				pendingTools: new Map(),
-				ipythonToolComponents,
-				lateIpythonSentAgentMessages,
+				codeToolComponents,
+				lateCodeSentAgentMessages,
 				toolOutputExpanded: false,
 				chatContainer,
 				footer: { invalidate: vi.fn() },
@@ -366,8 +366,8 @@ describe("InteractiveMode.renderSessionContext", () => {
 
 			const rendered = renderAll(chatContainer);
 			expect(rendered).not.toContain("\x1b_G");
-			expect(ipythonToolComponents.size).toBe(0);
-			expect(lateIpythonSentAgentMessages.size).toBe(0);
+			expect(codeToolComponents.size).toBe(0);
+			expect(lateCodeSentAgentMessages.size).toBe(0);
 		} finally {
 			resetCapabilitiesCache();
 		}
@@ -380,8 +380,8 @@ describe("InteractiveMode.renderSessionContext", () => {
 			const pendingTools = new Map<string, ToolExecutionComponent>();
 			const fakeThis: any = {
 				pendingTools,
-				ipythonToolComponents: new Map(),
-				lateIpythonSentAgentMessages: new Map(),
+				codeToolComponents: new Map(),
+				lateCodeSentAgentMessages: new Map(),
 				toolOutputExpanded: false,
 				chatContainer,
 				footer: { invalidate: vi.fn() },
@@ -744,7 +744,7 @@ describe("InteractiveMode working timer", () => {
 			state: createConnectionState({ isStreaming: true }),
 			messages: [
 				userMessage("Start the task.", 100),
-				{ ...toolCallMessage("tool-1", "ipython"), timestamp: 200 },
+				{ ...toolCallMessage("tool-1", "code"), timestamp: 200 },
 				userMessage("Also check this.", 300),
 			],
 		});
@@ -773,7 +773,7 @@ describe("InteractiveMode working timer", () => {
 
 	test.each([
 		["a non-streaming snapshot", false, [userMessage("Old prompt.", 200)]],
-		["a streaming snapshot without a starter", true, [{ ...toolCallMessage("tool-1", "ipython"), timestamp: 200 }]],
+		["a streaming snapshot without a starter", true, [{ ...toolCallMessage("tool-1", "code"), timestamp: 200 }]],
 	])("clears a stale anchor for %s and falls back to the loader start", async (_name, isStreaming, messages) => {
 		const harness = createInitialTimerHarness({ state: createConnectionState({ isStreaming }), messages }, 100);
 
@@ -1411,8 +1411,8 @@ describe("InteractiveMode pending bash components", () => {
 			discardRefineLoader: vi.fn(),
 			recapContainer: new Container(),
 			renderRecap: vi.fn(),
-			ipythonToolComponents: new Map(),
-			lateIpythonSentAgentMessages: new Map(),
+			codeToolComponents: new Map(),
+			lateCodeSentAgentMessages: new Map(),
 			resetPendingToolState: vi.fn(),
 			resetSubagentSummary: vi.fn(),
 			setGoalAnnouncementBaseline: vi.fn(),
@@ -2009,8 +2009,8 @@ describe("InteractiveMode tool event rendering", () => {
 			pendingTools: new Map<string, ToolExecutionComponent>(),
 			pendingToolCreations: new Set<string>(),
 			startedToolCalls: new Set<string>(),
-			ipythonToolComponents: new Map(),
-			lateIpythonSentAgentMessages: new Map(),
+			codeToolComponents: new Map(),
+			lateCodeSentAgentMessages: new Map(),
 			loadToolDefinition: vi.fn(() => definitionPromise),
 			uiServices: {
 				settingsManager: {
@@ -2027,7 +2027,7 @@ describe("InteractiveMode tool event rendering", () => {
 				{
 					type: "toolCall",
 					id: "tool-1",
-					name: "ipython",
+					name: "code",
 					arguments: { code: "print(1)" },
 				},
 			],
@@ -4513,7 +4513,7 @@ describe("InteractiveMode.setToolsExpanded", () => {
 
 	test("toggles agent messages separately from tools", () => {
 		const toolChild = { setExpanded: vi.fn() };
-		const ipythonChild = { setExpanded: vi.fn(), setAgentMessagesExpanded: vi.fn(), setEditDiffsExpanded: vi.fn() };
+		const codeChild = { setExpanded: vi.fn(), setAgentMessagesExpanded: vi.fn(), setEditDiffsExpanded: vi.fn() };
 		const messageChild = new AgentMessageComponent({
 			role: "custom",
 			customType: "agent_message",
@@ -4523,7 +4523,7 @@ describe("InteractiveMode.setToolsExpanded", () => {
 			timestamp: 123,
 		} as any);
 		const messageSetExpanded = vi.spyOn(messageChild, "setExpanded");
-		const fakeThis = createExpansionFakeThis([toolChild, ipythonChild, messageChild]);
+		const fakeThis = createExpansionFakeThis([toolChild, codeChild, messageChild]);
 
 		fakeThis.toggleAgentMessageExpansion();
 
@@ -4531,15 +4531,15 @@ describe("InteractiveMode.setToolsExpanded", () => {
 		expect(fakeThis.toolOutputExpanded).toBe(false);
 		expect(messageSetExpanded).toHaveBeenCalledWith(true);
 		expect(toolChild.setExpanded).toHaveBeenCalledWith(false);
-		expect(ipythonChild.setExpanded).toHaveBeenCalledWith(false);
-		expect(ipythonChild.setAgentMessagesExpanded).toHaveBeenCalledWith(true);
+		expect(codeChild.setExpanded).toHaveBeenCalledWith(false);
+		expect(codeChild.setAgentMessagesExpanded).toHaveBeenCalledWith(true);
 
 		fakeThis.setToolsExpanded(true);
 
 		expect(toolChild.setExpanded).toHaveBeenCalledWith(true);
 		expect(messageSetExpanded).toHaveBeenLastCalledWith(true);
-		expect(ipythonChild.setExpanded).toHaveBeenCalledWith(true);
-		expect(ipythonChild.setAgentMessagesExpanded).toHaveBeenLastCalledWith(true);
+		expect(codeChild.setExpanded).toHaveBeenCalledWith(true);
+		expect(codeChild.setAgentMessagesExpanded).toHaveBeenLastCalledWith(true);
 		expect(fakeThis.agentMessagesExpanded).toBe(true);
 	});
 

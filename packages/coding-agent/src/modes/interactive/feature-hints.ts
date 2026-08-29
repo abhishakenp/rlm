@@ -75,8 +75,8 @@ export const FEATURE_HINTS: readonly FeatureHintDefinition[] = [
 		getText: () => "Share traces with Prime Intellect using /traces on to train open-source LLMs.",
 	},
 	{
-		id: "persistent-ipython",
-		getText: () => "Compaction removes IPython variables over 16 MiB; smaller state persists.",
+		id: "persistent-code",
+		getText: () => "Compaction removes Code variables over 16 MiB; smaller state persists.",
 	},
 	{
 		id: "context-usage",

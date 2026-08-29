@@ -64,13 +64,12 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	const contextFiles = providedContextFiles ?? [];
 	const skills = providedSkills ?? [];
-	const tools = selectedTools ?? ["ipython"];
-	const hasIpython = tools.includes("ipython");
+	const tools = selectedTools ?? ["code"];
 	const hasBash = tools.includes("bash");
 	const visibleSkills = skills.filter((skill) => !skill.disableModelInvocation);
-	const visiblePythonSkillImportNames = getPythonSkillRuntimeInfo(visibleSkills).map((skill) => skill.importName);
+	const visibleSkillImportNames = getPythonSkillRuntimeInfo(visibleSkills).map((skill) => skill.importName);
 	const hasRefineSkill = visibleSkills.some((skill) => skill.name === REFINE_SKILL_NAME);
-	const genericMcpSection = hasIpython ? formatGenericMcpGuidance(options.genericMcpServers) : "";
+	const genericMcpSection = formatGenericMcpGuidance(options.genericMcpServers);
 
 	if (customPrompt) {
 		let prompt = customPrompt;
@@ -86,7 +85,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 		// Append skills section only when the model has a way to inspect skill files.
 		const customPromptHasFileAccess =
-			!selectedTools || selectedTools.includes("ipython") || selectedTools.includes("bash");
+			!selectedTools || selectedTools.includes("code") || selectedTools.includes("bash");
 		if (customPromptHasFileAccess && skills.length > 0) {
 			prompt += formatSkillsForPrompt(skills);
 		}
@@ -98,7 +97,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		const childDoctrine = buildChildAgentDoctrine({
 			depth: options.rlmDepth,
 			parentAgent: options.rlmParentAgent,
-			installedSkills: visiblePythonSkillImportNames,
+			installedSkills: visibleSkillImportNames,
 			activeTools: tools,
 		});
 		if (childDoctrine) {
@@ -106,7 +105,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		}
 
 		if (harnessState) {
-			prompt += `\n\n${formatHarnessStateForPrompt(harnessState, { includeIpythonExamples: hasIpython, includeShellExamples: hasBash, includeRefineExamples: hasIpython && hasRefineSkill })}`;
+			prompt += `\n\n${formatHarnessStateForPrompt(harnessState, { includeCodeExamples: true, includeShellExamples: hasBash, includeRefineExamples: hasRefineSkill })}`;
 		}
 
 		if (genericMcpSection) {
@@ -123,8 +122,8 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	let prompt = buildRlmPrompt({
 		cwd: promptCwd,
 		messagesPath: promptMessagesPath,
-		installedSkills: visiblePythonSkillImportNames,
-		activeTools: tools.filter((name) => name === "ipython" || name === "bash" || name === "edit"),
+		installedSkills: visibleSkillImportNames,
+		activeTools: tools.filter((name) => name === "code" || name === "bash" || name === "edit"),
 		allowRecursion,
 		depth: options.rlmDepth,
 		parentAgent: options.rlmParentAgent,
@@ -133,19 +132,19 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	// Appended AFTER the trained buildRlmPrompt prefix, and before the harness-state
 	// menu, so the model reads when/why to delegate and then sees the concrete subagent
 	// specs it can match against — the same ordering as Claude Code's Agent tool.
-	if ((allowRecursion ?? true) && hasIpython) {
-		const visiblePythonSkillNames = new Set(
+	if (allowRecursion ?? true) {
+		const visibleSkillNames = new Set(
 			getPythonSkillRuntimeInfo(visibleSkills).map((skill) => skill.importName),
 		);
 		prompt += `\n\n${buildSubagentGuidance({
 			includeRefineExamples: hasRefineSkill,
-			hasAgentMessage: visiblePythonSkillNames.has("agent_message"),
-			hasAgentObserve: visiblePythonSkillNames.has("agent_observe"),
+			hasAgentMessage: visibleSkillNames.has("agent_message"),
+			hasAgentObserve: visibleSkillNames.has("agent_observe"),
 		})}`;
 	}
 
 	if (harnessState) {
-		prompt += `\n\n${formatHarnessStateForPrompt(harnessState, { includeIpythonExamples: hasIpython, includeShellExamples: hasBash, includeRefineExamples: hasIpython && hasRefineSkill })}`;
+		prompt += `\n\n${formatHarnessStateForPrompt(harnessState, { includeCodeExamples: true, includeShellExamples: hasBash, includeRefineExamples: hasRefineSkill })}`;
 	}
 
 	if (genericMcpSection) {
@@ -167,7 +166,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	}
 
 	// Append skills section only when the model has a way to inspect skill files.
-	const hasFileAccess = tools.includes("ipython") || tools.includes("bash");
+	const hasFileAccess = tools.includes("code") || tools.includes("bash");
 	if (hasFileAccess && skills.length > 0) {
 		prompt += formatSkillsForPrompt(skills);
 	}
@@ -186,7 +185,7 @@ function formatGenericMcpGuidance(servers: string[] | undefined): string {
 	return [
 		"# Generic MCP Connections",
 		"",
-		"Generic MCP connections are accessed through the pre-imported Python `mcp` object in IPython, not as top-level native tool namespaces or installed Python skills.",
+		"Generic MCP connections are accessed through the pre-imported `mcp` object in the code kernel, not as top-level native tool namespaces or installed skills.",
 		`Enabled generic MCP servers: ${enabledServers.map((server) => `\`${server}\``).join(", ")}.`,
 		...enabledServers.map(
 			(server) =>

@@ -148,7 +148,7 @@ describe("createAgentSessionFromServices", () => {
 		try {
 			const initialPrompt = session.systemPrompt;
 			expect(initialPrompt).toContain(
-				"Generic MCP connections are accessed through the pre-imported Python `mcp` object in IPython, not as top-level native tool namespaces or installed Python skills.",
+				"Generic MCP connections are accessed through the pre-imported Python `mcp` object in Code, not as top-level native tool namespaces or installed Python skills.",
 			);
 			expect(initialPrompt).toContain("Enabled generic MCP servers: `filesystem`, `zebra`.");
 			expect(initialPrompt).toContain('await mcp.list_tools("filesystem")');
@@ -189,11 +189,11 @@ describe("createAgentSessionFromServices", () => {
 			const waitForIdle = vi.spyOn(session.agent, "waitForIdle");
 			await session.releaseAcpMcpServers("unknown-owner", ["task"]);
 			expect(waitForIdle).not.toHaveBeenCalled();
-			const originalProvisioner = Reflect.get(session, "_ipythonKernelProvisioner");
+			const originalProvisioner = Reflect.get(session, "_codeKernelProvisioner");
 			const execute = vi.fn(async (_code: string) => ({ status: "ok" }));
-			Reflect.set(session, "_ipythonKernelProvisioner", { manager: { isRunning: true, execute } });
+			Reflect.set(session, "_codeKernelProvisioner", { manager: { isRunning: true, execute } });
 			await session.releaseAcpMcpServers("owner-a", ["task"]);
-			Reflect.set(session, "_ipythonKernelProvisioner", originalProvisioner);
+			Reflect.set(session, "_codeKernelProvisioner", originalProvisioner);
 			expect(rebuildRuntime).not.toHaveBeenCalled();
 			expect(execute).toHaveBeenCalledOnce();
 			expect(execute.mock.calls[0]?.[0]).toContain("await _prime_mcp.reload(_prime_mcp_name)");

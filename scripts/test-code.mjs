@@ -11,8 +11,8 @@ async function main() {
 	const { default: RlmSdk } = await import("../packages/rlm-sdk/src/index.ts");
 	const { default: RlmCode } = await import("../packages/rlm-code/src/index.ts");
 
-	ctx.plugin(RlmSdk, { maxDepth: 5 });
 	ctx.plugin(RlmCode, { timeout: 60000 });
+	ctx.plugin(RlmSdk, { maxDepth: 5 });
 
 	await new Promise((r) => setTimeout(r, 1500));
 

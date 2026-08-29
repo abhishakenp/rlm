@@ -574,7 +574,7 @@ export interface AgentConnectionRlmChildAgentSnapshot {
 
 export type AgentConnectionSessionEvent =
 	| AgentEvent
-	| { type: "ipython_sent_agent_message"; toolCallId: string; message: KernelSentAgentMessage }
+	| { type: "code_sent_agent_message"; toolCallId: string; message: KernelSentAgentMessage }
 	| { type: "session_action_update"; actions: SessionActionSnapshot }
 	| {
 			type: "compaction_start";
