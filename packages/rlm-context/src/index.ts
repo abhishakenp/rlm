@@ -116,6 +116,63 @@ export class RlmContextService extends Service {
 		this.ctx.logger?.info(
 			`rlm-context: ready (${this.projectVars.size} project vars loaded)`,
 		);
+
+		// Register TUI extensions — /vars slash command.
+		// When this plugin is hot-swapped, the TUI service disposes these
+		// extensions automatically, rolling back the TUI to its core state.
+		this.registerTuiExtensions();
+	}
+
+	/** Register TUI extensions via the @rlm/tui service. */
+	private tuiHandles: any[] = [];
+
+	private registerTuiExtensions(): void {
+		const tui = (globalThis as any).__rlmTui;
+		if (!tui) return;
+
+		// Register /vars slash command.
+		const handle = tui.registerSlashCommand("rlm-context", {
+			name: "vars",
+			description: "Show context registry variables (agent working memory)",
+			argumentHint: "[pattern]",
+			takesArgument: true,
+			handler: (args: string, ctx: any) => {
+				const proxy = createContextProxy(this);
+				try {
+					const pattern = args.trim() || undefined;
+					const names = proxy.list(pattern);
+					if (names.length === 0) {
+						ctx.showMessage("No context variables set" + (pattern ? ` matching "${pattern}"` : ""));
+						return;
+					}
+					const summary = proxy.summarize();
+					ctx.showMessage(`# Context Variables (${names.length})\n\n${summary}`);
+				} catch (error) {
+					ctx.showError(error instanceof Error ? error.message : String(error));
+				}
+			},
+		});
+		if (handle) this.tuiHandles.push(handle);
+
+		// Register a status bar item showing context var count.
+		const statusHandle = tui.registerStatusBarItem("rlm-context", {
+			id: "context-vars-count",
+			renderer: () => {
+				const count = this.getAll().length;
+				return count > 0 ? `ctx:${count}` : null;
+			},
+		});
+		if (statusHandle) this.tuiHandles.push(statusHandle);
+
+		this.ctx.logger?.info("rlm-context: registered /vars command + status bar item");
+	}
+
+	/** Dispose TUI extensions — called on hot-swap. */
+	private disposeTuiExtensions(): void {
+		for (const handle of this.tuiHandles) {
+			try { handle.dispose(); } catch {}
+		}
+		this.tuiHandles = [];
 	}
 
 	// ─── Project scope ────────────────────────────────────────────────────────
@@ -493,6 +550,9 @@ export class RlmContextService extends Service {
 	}
 
 	async [Symbol.dispose]() {
+		// Dispose TUI extensions — roll back the TUI to its core state.
+		this.disposeTuiExtensions();
+		// Persist on dispose.
 		this.saveProject();
 		this.saveSession();
 	}

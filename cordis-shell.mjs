@@ -186,6 +186,16 @@ async function loadPlugins(ctx) {
 			entry.Plugin = NewPlugin;
 			entry.fiber = newFiber;
 
+			// Before disposing the old fiber, tell the TUI service to remove
+			// any extensions this plugin registered (slash commands, status bar
+			// items, custom components). This rolls back the TUI to its core
+			// state for this plugin's contributions. The new fiber will
+			// re-register its extensions when it initializes.
+			const tuiService = ctx.get("rlmTui");
+			if (tuiService) {
+				try { tuiService.disposePlugin(pkgDir); } catch {}
+			}
+
 			// Dispose old fiber asynchronously — don't await, don't block.
 			// If in-flight operations are still running, they complete on the
 			// old service instance which remains in memory until GC.

@@ -1313,8 +1313,27 @@ export class InteractiveMode {
 			}
 		}
 
+		// Merge plugin-registered slash commands from @rlm/tui service.
+		// These are dynamically registered by other plugins (e.g. @rlm/context
+		// registers /vars). When a plugin is hot-swapped, its commands are
+		// automatically unregistered and disappear from autocomplete.
+		const tuiService = (globalThis as any).__rlmTui;
+		const pluginCommands: SlashCommand[] = [];
+		if (tuiService) {
+			for (const ext of tuiService.getSlashCommands()) {
+				if (!slashCommands.some((c) => c.name === ext.name)) {
+					pluginCommands.push({
+						name: ext.name,
+						description: ext.description,
+						argumentHint: ext.argumentHint,
+						takesArgument: ext.takesArgument,
+					});
+				}
+			}
+		}
+
 		return new CombinedAutocompleteProvider(
-			[...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList],
+			[...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList, ...pluginCommands],
 			this.getCurrentCwd(),
 			this.fdPath,
 		);
@@ -4735,11 +4754,27 @@ export class InteractiveMode {
 					this.editor.setText("");
 					return;
 				}
-				if (commandName === "vars") {
-					this.echoLocalCommand(text);
-					await this.handleVarsCommand(commandArgs);
-					this.editor.setText("");
-					return;
+				// /vars is now registered by the @rlm/context plugin via @rlm/tui.
+				// Check if any plugin has registered this command.
+				const tuiService = (globalThis as any).__rlmTui;
+				if (tuiService) {
+					const extCommand = tuiService.getSlashCommand(commandName);
+					if (extCommand) {
+						this.echoLocalCommand(text);
+						const tuiCtx = {
+							showMessage: (msg: string) => {
+								this.chatContainer.addChild(new Spacer(1));
+								this.chatContainer.addChild(new Text(msg, 1, 0));
+								this.ui.requestRender();
+							},
+							showError: (msg: string) => this.showError(msg),
+							requestRender: () => this.ui.requestRender(),
+							width: this.ui.terminal.columns,
+						};
+						await extCommand.handler(commandArgs, tuiCtx);
+						this.editor.setText("");
+						return;
+					}
 				}
 				if (commandName === "logs" && !commandArgs) {
 					this.echoLocalCommand(text);
@@ -9474,30 +9509,6 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(info, 1, 0));
 		this.ui.requestRender();
-	}
-
-	private async handleVarsCommand(args: string): Promise<void> {
-		const proxy = (globalThis as any).__rlmContextProxy;
-		if (!proxy) {
-			this.showError("Context registry not active");
-			return;
-		}
-		try {
-			const pattern = args.trim() || undefined;
-			const names = proxy.list(pattern);
-			if (names.length === 0) {
-				this.chatContainer.addChild(new Spacer(1));
-				this.chatContainer.addChild(new Text("No context variables set" + (pattern ? ` matching "${pattern}"` : ""), 1, 0));
-				this.ui.requestRender();
-				return;
-			}
-			const summary = proxy.summarize();
-			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(new Text(`# Context Variables (${names.length})\n\n${summary}`, 1, 0));
-			this.ui.requestRender();
-		} catch (error) {
-			this.showError(error instanceof Error ? error.message : String(error));
-		}
 	}
 
 	private async handleHeartbeatCommand(text: string): Promise<void> {

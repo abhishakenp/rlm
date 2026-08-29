@@ -1,15 +1,20 @@
 # rlm profile — Cordis entry-list composing all plugins.
 #
-# Five plugins, all hot-swappable via HMR:
-#   1. Context — persistent typed variable registry (agent working memory)
-#   2. Code — persistent JS code execution (replaces bash + edit)
-#   3. SDK — in-process subagent spawning (wraps coding-agent runtime)
-#   4. Workflow — hot-swappable TS workflows from ~/.prime/agent/workflows/
-#   5. Learn — self-evolution (tracks outcomes, proposes modifications)
+# Six plugins, all hot-swappable via HMR:
+#   1. TUI — extension service (other plugins register slash commands, components)
+#   2. Context — persistent typed variable registry (agent working memory)
+#   3. Code — persistent JS code execution (replaces bash + edit)
+#   4. SDK — in-process subagent spawning (wraps coding-agent runtime)
+#   5. Workflow — hot-swappable TS workflows from ~/.prime/agent/workflows/
+#   6. Learn — self-evolution (tracks outcomes, proposes modifications)
 #
-# Order matters: Context must load first so the context service is
-# available when Code injects it into the VM context. Code must load
-# before SDK so the code service is available when SDK spawns subagents.
+# Order matters: TUI must load first so other plugins can register extensions.
+# Context must load before Code so the context service is available when Code
+# injects it into the VM context. Code must load before SDK so the code service
+# is available when SDK spawns subagents.
+
+- id: tui
+  name: './packages/rlm-tui/src/index.ts'
 
 - id: context
   name: './packages/rlm-context/src/index.ts'

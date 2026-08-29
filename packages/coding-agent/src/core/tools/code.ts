@@ -185,6 +185,9 @@ export class CodeKernelProvisioner {
 			// Context registry — persistent typed variables (agent working memory)
 			context: this.options?.contextProxy,
 
+		// TUI service — for inspecting registered extensions (read-only)
+		tui: new Proxy({}, { get: (_, prop) => (globalThis as any).__rlmTui?.[prop] }),
+
 			// Helpers
 			cwd,
 		};
