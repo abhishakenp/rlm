@@ -3599,10 +3599,11 @@ export class InteractiveMode {
 					const lines = comp.renderer({ width: this.ui.terminal.columns, cwd: this.getCurrentCwd() });
 					if (lines && lines.length > 0) {
 						this.recapContainer.addChild(new Spacer(1));
-						this.recapContainer.addChild(new Text(theme.fg("dim", "Context:"), 1, 0));
+						this.recapContainer.addChild(new Text(theme.fg("accent", `┌ vars (${lines.length})`), 1, 0));
 						for (const line of lines) {
-							this.recapContainer.addChild(new Text(theme.fg("dim", line), 1, 0));
+							this.recapContainer.addChild(new Text(theme.fg("accent", line), 1, 0));
 						}
+						this.recapContainer.addChild(new Text(theme.fg("accent", "└"), 1, 0));
 					}
 				} catch {}
 			}

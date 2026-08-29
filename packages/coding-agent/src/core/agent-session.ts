@@ -1409,6 +1409,11 @@ export class AgentSession {
 		};
 
 		this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
+			// Auto-capture tool results as context variables.
+			// This is runtime enforcement — don't rely on the model to call context.set().
+			// Every tool execution that returns data gets captured automatically.
+			this._autoCaptureToolResult(toolCall.name, args as Record<string, unknown>, result, isError);
+
 			const runner = this._extensionRunner;
 			if (!runner.hasHandlers("tool_result")) {
 				return undefined;
@@ -1434,6 +1439,87 @@ export class AgentSession {
 				isError: hookResult.isError ?? isError,
 			};
 		};
+	}
+
+	/**
+	 * Auto-capture tool results as context variables.
+	 * Runtime enforcement — every tool execution that returns data
+	 * gets captured. Doesn't rely on the model to call context.set().
+	 */
+	private _autoCaptureToolResult(
+		toolName: string,
+		args: Record<string, unknown>,
+		result: { content: any[]; details?: any },
+		isError: boolean,
+	): void {
+		const ctx = (globalThis as any).__rlmContextProxy;
+		if (!ctx || isError) return;
+		try {
+			// Extract text content from the tool result.
+			const textParts: string[] = [];
+			for (const part of result.content ?? []) {
+				if (typeof part === "string") textParts.push(part);
+				else if (part?.type === "text" && typeof part.text === "string") textParts.push(part.text);
+			}
+			const text = textParts.join("\n").trim();
+			if (!text || text.length < 5) return;
+
+			// Truncate large outputs — context vars should be compact.
+			const truncated = text.length > 2000 ? text.slice(0, 2000) + "..." : text;
+
+			// Generate a variable name based on the tool and args.
+			const varName = this._deriveContextVarName(toolName, args);
+			if (!varName) return;
+
+			// Store or update the variable.
+			if (ctx.get(varName) === undefined) {
+				ctx.set(varName, truncated, {
+					type: "string",
+					mutable: true,
+					description: `Auto-captured from ${toolName} tool`,
+					scope: "session",
+					source: "auto-capture",
+				});
+			} else {
+				ctx.update(varName, truncated);
+			}
+		} catch { /* best effort */ }
+	}
+
+	/** Derive a context variable name from the tool name and args. */
+	private _deriveContextVarName(toolName: string, args: Record<string, unknown>): string | undefined {
+		if (toolName === "code") {
+			// For code tool, try to infer from the code content.
+			const code = typeof args?.code === "string" ? args.code : "";
+			// If the code runs a shell command, use the command name.
+			const cmdMatch = code.match(/(?:execSync|exec)\(['"]([^'"]+)/);
+			if (cmdMatch) {
+				const cmd = cmdMatch[1].trim();
+				const cmdName = cmd.split(/\s+/)[0];
+				// e.g. "uptime" → "system.uptime", "ls" → "files.ls"
+				if (cmdName === "uptime") return "system.resources";
+				if (cmdName === "ls" || cmdName === "find") return "project.files";
+				if (cmdName === "cat" || cmdName === "head" || cmdName === "tail") return "file.contents";
+				if (cmdName === "grep" || cmdName === "rg") return "search.results";
+				if (cmdName === "git") return "git.status";
+				if (cmdName === "npm" || cmdName === "bun") return "project.deps";
+				return `cmd.${cmdName}`;
+			}
+			// If the code reads a file, use file.<name>.
+			const readMatch = code.match(/readFileSync?\(['"]([^'"]+)/);
+			if (readMatch) {
+				const fname = readMatch[1].split("/").pop()?.replace(/\.\w+$/, "") ?? "file";
+				return `file.${fname}`;
+			}
+			// If the code does a directory listing.
+			if (code.includes("readdirSync") || code.includes("readdir")) {
+				return "project.files";
+			}
+			// Default for code tool — don't capture if we can't infer a name.
+			return undefined;
+		}
+		// For other tools, use the tool name.
+		return `tool.${toolName}`;
 	}
 
 	private _installAgentContinuationHook(): void {
@@ -4346,7 +4432,78 @@ export class AgentSession {
 			genericMcpServers: this._mcpManager?.getEnabledGenericServers(),
 			contextSummary: this._getContextSummary(),
 		};
+		this._registerRuntimeContextVars(loadedSkills, validToolNames);
 		return buildSystemPrompt(this._baseSystemPromptOptions);
+	}
+
+	/**
+	 * Register runtime state (skills, model, tools, system prompt) as context
+	 * variables. These are first-class variables — the TUI shows them, the
+	 * agent can read them, subagents inherit them.
+	 */
+	private _registerRuntimeContextVars(skills: Skill[], tools: string[]): void {
+		const ctx = (globalThis as any).__rlmContextProxy;
+		if (!ctx) return;
+		try {
+			// Skills as a variable
+			const skillNames = skills.map((s) => s.name);
+			if (ctx.get("runtime.skills") === undefined) {
+				ctx.set("runtime.skills", skillNames, {
+					type: "array",
+					mutable: true,
+					description: "Installed skills available to the agent",
+					scope: "session",
+				});
+			} else {
+				ctx.update("runtime.skills", skillNames);
+			}
+
+			// Model as a variable
+			const modelId = this.model ? `${this.model.provider}/${this.model.id}` : "auto/best-free";
+			if (ctx.get("runtime.model") === undefined) {
+				ctx.set("runtime.model", modelId, {
+					type: "string",
+					mutable: true,
+					description: "Current model for this session",
+					scope: "session",
+				});
+			} else {
+				ctx.update("runtime.model", modelId);
+			}
+
+			// Tools as a variable
+			if (ctx.get("runtime.tools") === undefined) {
+				ctx.set("runtime.tools", tools, {
+					type: "array",
+					mutable: true,
+					description: "Active tools available to the agent",
+					scope: "session",
+				});
+			} else {
+				ctx.update("runtime.tools", tools);
+			}
+
+			// Depth as a variable
+			if (ctx.get("runtime.depth") === undefined) {
+				ctx.set("runtime.depth", this._rlmDepth, {
+					type: "number",
+					mutable: false,
+					description: "Recursion depth (0 = root agent)",
+					scope: "session",
+				});
+			}
+
+			// Max depth as a variable
+			const maxDepth = this.settingsManager.getRlmMaxDepth();
+			if (ctx.get("runtime.maxDepth") === undefined) {
+				ctx.set("runtime.maxDepth", maxDepth, {
+					type: "number",
+					mutable: true,
+					description: "Maximum recursion depth",
+					scope: "session",
+				});
+			}
+		} catch { /* best effort */ }
 	}
 
 	private _getContextSummary(): string | undefined {

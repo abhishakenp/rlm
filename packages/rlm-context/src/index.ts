@@ -132,17 +132,28 @@ export class RlmContextService extends Service {
 		if (!tui) return;
 
 		// Register a context panel component — renders inline in the TUI.
-		// This is the agent's working memory, always visible.
+		// Shows ALL variables grouped by namespace: runtime.*, user.*, project.*, etc.
+		// Ultra-compact: one line per variable, no values for large objects.
 		const componentHandle = tui.registerComponent("rlm-context", {
 			id: "context-panel",
 			renderer: () => {
 				const all = this.getAll();
 				if (all.length === 0) return null;
-				const lines: string[] = [];
+				// Group by namespace prefix.
+				const groups = new Map<string, typeof all>();
 				for (const v of all.sort((a, b) => a.name.localeCompare(b.name))) {
-					const kind = v.mutable ? "let" : "const";
-					const valStr = formatValueCompact(v.value);
-					lines.push(`  ${kind} ${v.name} = ${valStr}`);
+					const ns = v.name.split(".")[0] ?? "misc";
+					if (!groups.has(ns)) groups.set(ns, []);
+					groups.get(ns)!.push(v);
+				}
+				const lines: string[] = [];
+				for (const [ns, vars] of groups) {
+					lines.push(`  ${ns}`);
+					for (const v of vars) {
+						const kind = v.mutable ? "let" : "const";
+						const valStr = formatValueCompact(v.value);
+						lines.push(`    ${kind} ${v.name.replace(`${ns}.`, "")} = ${valStr}`);
+					}
 				}
 				return lines;
 			},
