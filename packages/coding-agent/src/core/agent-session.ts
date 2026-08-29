@@ -7434,9 +7434,10 @@ export class AgentSession {
 			}
 		}
 
+		const contextSummary = this._getContextSummary();
 		const { summary, firstKeptEntryId, tokensBefore, details } =
 			extensionCompaction ??
-			(await compact(preparation, model, apiKey, headers, customInstructions, signal, this.thinkingLevel));
+			(await compact(preparation, model, apiKey, headers, customInstructions, signal, this.thinkingLevel, contextSummary));
 
 		if (signal.aborted) {
 			throw new Error("Compaction cancelled");

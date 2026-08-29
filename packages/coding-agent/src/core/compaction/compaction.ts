@@ -448,7 +448,10 @@ Use this EXACT format:
 Keep each section concise. Preserve exact file paths, function names, and error messages.`;
 
 const KERNEL_PERSIST_SUMMARY_NOTE =
-	"Note: the Code kernel keeps running after this summary — every Python variable, import, and helper you defined stays available. The cells that defined them won't appear above, so record in the summary any names worth remembering so you reuse them instead of redefining them.";
+	"Note: the Code kernel keeps running after this summary — every JS variable, import, and helper you defined stays available via globalThis. The cells that defined them won't appear above, so record in the summary any names worth remembering so you reuse them instead of redefining them.";
+
+const CONTEXT_REGISTRY_COMPACT_NOTE =
+	"Context registry variables (context.get/set) persist across compaction — they are stored separately from the conversation. Before this summary, the agent should have stored important findings as context variables. The summary should reference key context variable names (e.g. 'see auth.files in context') instead of duplicating their values. After compaction, the agent can context.summarize() to recover the full state.";
 
 const UPDATE_SUMMARIZATION_PROMPT = `The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
 
@@ -493,12 +496,20 @@ Keep each section concise. Preserve exact file paths, function names, and error 
  * Build the instruction portion of the summarization prompt: the initial or
  * update template, optional user instructions, and the kernel persistence note.
  */
-export function buildSummarizationPrompt(customInstructions?: string, previousSummary?: string): string {
+export function buildSummarizationPrompt(
+	customInstructions?: string,
+	previousSummary?: string,
+	contextSummary?: string,
+): string {
 	let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
 	if (customInstructions) {
 		basePrompt += `\n\n<user-instructions>\nThe user provided these instructions for this summary. Follow them with high priority while keeping the section format above: emphasize what they ask to focus on, and preserve verbatim anything they ask to remember.\n${customInstructions}\n</user-instructions>`;
 	}
-	return `${basePrompt}\n\n${KERNEL_PERSIST_SUMMARY_NOTE}`;
+	let prompt = `${basePrompt}\n\n${KERNEL_PERSIST_SUMMARY_NOTE}\n\n${CONTEXT_REGISTRY_COMPACT_NOTE}`;
+	if (contextSummary && contextSummary !== "(no context variables)") {
+		prompt += `\n\n<context-registry>\nThe following context variables are already stored in the registry and will survive compaction. Reference them by name in the summary instead of duplicating their values:\n\n${contextSummary}\n</context-registry>`;
+	}
+	return prompt;
 }
 
 /**
@@ -515,10 +526,11 @@ export async function generateSummary(
 	customInstructions?: string,
 	previousSummary?: string,
 	thinkingLevel?: ThinkingLevel,
+	contextSummary?: string,
 ): Promise<string> {
 	const maxTokens = Math.floor(0.8 * reserveTokens);
 
-	const basePrompt = buildSummarizationPrompt(customInstructions, previousSummary);
+	const basePrompt = buildSummarizationPrompt(customInstructions, previousSummary, contextSummary);
 	// Serialize before the LLM call so it summarizes rather than continues this conversation.
 	const llmMessages = convertToLlm(currentMessages);
 	const conversationText = serializeConversation(llmMessages);
@@ -678,6 +690,7 @@ export async function compact(
 	customInstructions?: string,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
+	contextSummary?: string,
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -704,6 +717,7 @@ export async function compact(
 						customInstructions,
 						previousSummary,
 						thinkingLevel,
+						contextSummary,
 					)
 				: Promise.resolve("No prior history."),
 			generateTurnPrefixSummary(
@@ -728,6 +742,7 @@ export async function compact(
 			customInstructions,
 			previousSummary,
 			thinkingLevel,
+			contextSummary,
 		);
 	}
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);

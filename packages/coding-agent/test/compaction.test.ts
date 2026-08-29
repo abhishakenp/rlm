@@ -200,6 +200,38 @@ describe("buildSummarizationPrompt", () => {
 		expect(update).toContain("existing summary provided in <previous-summary> tags");
 		expect(update).toContain("<user-instructions>");
 	});
+
+	it("includes context registry note and variables when contextSummary is provided", () => {
+		const prompt = buildSummarizationPrompt(
+			undefined,
+			undefined,
+			'  const test.var1 = "hello"\n  let test.var2 = 42',
+		);
+		expect(prompt).toContain("Context registry variables");
+		expect(prompt).toContain("<context-registry>");
+		expect(prompt).toContain("test.var1");
+		expect(prompt).toContain("test.var2");
+		expect(prompt).toContain("survive compaction");
+	});
+
+	it("omits context-registry block when no context variables exist", () => {
+		const prompt = buildSummarizationPrompt(undefined, undefined, "(no context variables)");
+		expect(prompt).not.toContain("<context-registry>");
+		// The note about context persistence is still present.
+		expect(prompt).toContain("Context registry variables");
+	});
+
+	it("omits context-registry block when contextSummary is undefined", () => {
+		const prompt = buildSummarizationPrompt();
+		expect(prompt).not.toContain("<context-registry>");
+		expect(prompt).toContain("Context registry variables");
+	});
+
+	it("uses JS not Python in kernel persistence note", () => {
+		const prompt = buildSummarizationPrompt();
+		expect(prompt).toContain("JS variable");
+		expect(prompt).not.toContain("Python variable");
+	});
 });
 
 describe("Token calculation", () => {
