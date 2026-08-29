@@ -2,31 +2,56 @@
 /**
  * rlm — self-evolving terminal agent.
  *
- * Modified Cordis host, DSH philosophy, no prime-agent code.
- * Everything is a plugin. The host boots Cordis, loads plugins from
- * config/profile.yml, then runs the TUI or print mode.
+ * Prime-agent UI + Cordis plugin architecture + HMR hot-swap.
+ * Everything runs in-process. No daemon. Foreground-only.
  *
- * HMR watches plugin source dirs — any plugin can be hot-swapped at runtime.
- * Foreground-only: process dies when terminal exits.
- * Session/memory data persists on disk under ~/.rlm/.
+ * The host:
+ * 1. Boots Cordis Context
+ * 2. Loads rlm-* plugins from config/profile.yml
+ * 3. Starts chokidar HMR watcher on all package source dirs
+ * 4. Launches prime-agent's runCli() in-process (interactive TUI or print mode)
+ *
+ * HMR: editing any plugin source file triggers dispose + reload.
+ * The prime-agent TUI handles subagent visualization, streaming, tools, etc.
  */
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const profilePath = join(here, "config", "profile.yml");
 
-// HMR requires --expose-internals. Re-spawn if not present.
+// HMR requires --expose-internals for Cordis loader internals.
+// Also needed for Node's module cache manipulation.
+// Dev mode: re-exec with tsx so HMR can re-import TS source.
+// Installed mode: run directly — plugins are compiled JS, CLI is bundled JS.
 if (!process.execArgv.includes("--expose-internals")) {
 	const { spawn } = await import("node:child_process");
-	const args = ["--expose-internals", fileURLToPath(import.meta.url), ...process.argv.slice(2)];
-	const child = spawn(process.execPath, args, { stdio: "inherit", env: process.env });
-	child.on("exit", (code, signal) => {
-		if (signal) process.kill(process.pid, signal);
-		else process.exit(code ?? 0);
-	});
+	const { existsSync } = await import("node:fs");
+	const { dirname, join } = await import("node:path");
+
+	// Dev mode: if tsx is available locally, use it for HMR on TS source.
+	const localTsx = join(here, "node_modules", "tsx", "dist", "loader.mjs");
+	if (existsSync(localTsx)) {
+		const args = [
+			"--expose-internals",
+			"--import", localTsx,
+			fileURLToPath(import.meta.url),
+			...process.argv.slice(2),
+		];
+		const child = spawn(process.execPath, args, { stdio: "inherit", env: process.env });
+		child.on("exit", (code, signal) => {
+			if (signal) process.kill(process.pid, signal);
+			else process.exit(code ?? 0);
+		});
+	} else {
+		// Installed mode: no tsx, no HMR — run directly with compiled JS.
+		main().catch((error) => {
+			console.error(error);
+			process.exit(1);
+		});
+	}
 } else {
 	main().catch((error) => {
 		console.error(error);
@@ -35,13 +60,9 @@ if (!process.execArgv.includes("--expose-internals")) {
 }
 
 async function bootCordis() {
-	let Context, Loader, Timer, Include, Group;
+	let Context;
 	try {
 		({ Context } = await import("@deepseek-ai/cordis"));
-		Loader = (await import("@deepseek-ai/cordis-plugin-loader")).default;
-		Timer = (await import("@deepseek-ai/cordis-plugin-timer")).default;
-		Include = (await import("@deepseek-ai/cordis-plugin-include")).default;
-		({ Group } = await import("@deepseek-ai/cordis-plugin-loader"));
 	} catch (error) {
 		console.error("[rlm] Cordis unavailable:", error?.message ?? error);
 		return null;
@@ -50,51 +71,56 @@ async function bootCordis() {
 	const ctx = new Context();
 	ctx.baseUrl = pathToFileURL(here + "/").href;
 
-	// Bedrock: loader + timer
-	await ctx.plugin(Loader, { root: process.cwd() });
-	ctx.plugin(Timer);
-
-	const loader = ctx.get("loader");
-	if (loader) {
-		loader.builtins.include = Include;
-		loader.builtins.group = Group;
-	}
-
-	// HMR — direct chokidar watcher. Emits rlm/hmr-change events that
-	// plugins can listen for to reload themselves.
-	// (Cordis's HMR plugin requires loader-internal module tracking
-	// which doesn't work with direct import() plugin loading.)
+	// HMR — chokidar watcher on all package source dirs.
+	// Emits rlm/hmr-change events. Plugin reload handler in loadPlugins()
+	// disposes the old fiber and re-imports the changed module.
 	try {
 		const { watch } = await import("chokidar");
-		const { readdirSync, statSync } = await import("node:fs");
-		// Chokidar doesn't expand globs — resolve actual plugin src dirs.
-		const pluginDirs = readdirSync(join(here, "packages"))
-			.filter((d) => d.startsWith("rlm-"))
-			.map((d) => join("packages", d, "src"))
-			.filter((p) => existsSync(join(here, p)));
-		const watcher = watch(pluginDirs, {
+		const watchDirs = [];
+		let hmrReady = false;
+
+		// Watch rlm-* plugin source dirs
+		for (const d of readdirSync(join(here, "packages"))) {
+			if (d.startsWith("rlm-")) {
+				const srcPath = join("packages", d, "src");
+				if (existsSync(join(here, srcPath))) watchDirs.push(srcPath);
+			}
+		}
+
+		// Watch prime-agent source dirs (tui, ai, agent, coding-agent)
+		for (const d of ["tui", "ai", "agent", "coding-agent"]) {
+			const srcPath = join("packages", d, "src");
+			if (existsSync(join(here, srcPath))) watchDirs.push(srcPath);
+		}
+
+		const watcher = watch(watchDirs, {
 			cwd: process.cwd(),
-			ignored: ["**/node_modules", "**/.*", "**/dist", "cache", "data"],
+			ignored: ["**/node_modules", "**/.*", "**/dist", "**/*.test.ts", "**/*.test.js"],
 			ignoreInitial: true,
 			debounce: 100,
 		});
+
 		watcher.on("change", (path) => {
 			console.error(`[rlm] HMR: ${path} changed`);
 			ctx.emit("rlm/hmr-change", { path, url: pathToFileURL(join(process.cwd(), path)).href });
 		});
+
 		watcher.on("ready", () => {
-			console.error(`[rlm] HMR active — watching ${pluginDirs.length} plugin dirs`);
+			if (!hmrReady) {
+				hmrReady = true;
+				console.error(`[rlm] HMR active — watching ${watchDirs.length} source dirs`);
+			}
 		});
 	} catch (error) {
 		console.error("[rlm] HMR failed:", error?.message ?? error);
 	}
 
-	// Load plugins from profile YAML.
+	// Load rlm-* plugins from profile YAML.
 	if (existsSync(profilePath)) {
 		await loadPlugins(ctx);
 	}
 
-	// Wait for all plugin services to initialize.
+	// Wait for plugin services to initialize.
 	await new Promise((r) => setTimeout(r, 500));
 
 	return ctx;
@@ -102,6 +128,7 @@ async function bootCordis() {
 
 async function loadPlugins(ctx) {
 	const yaml = await import("yaml");
+	const { readFileSync } = await import("node:fs");
 	const content = readFileSync(profilePath, "utf-8");
 	const profile = yaml.parse(content);
 	const entries = Array.isArray(profile) ? profile : (profile?.plugins ?? []);
@@ -116,40 +143,31 @@ async function loadPlugins(ctx) {
 			const Plugin = mod.default ?? mod;
 			const fiber = ctx.plugin(Plugin, config);
 			loaded.push({ pkgName, config, fiber, Plugin });
-			console.error(`[rlm] loaded: ${pkgName}`);
+			console.error(`[rlm] loaded plugin: ${pkgName}`);
 		} catch (error) {
-			console.error(`[rlm] failed: ${pkgName}: ${error?.message ?? error}`);
+			console.error(`[rlm] plugin failed: ${pkgName}: ${error?.message ?? error}`);
 		}
 	}
 
-	// HMR reload handler — reload the changed plugin.
+	// HMR reload handler — reload the changed rlm-* plugin.
 	ctx.on("rlm/hmr-change", async ({ path }) => {
-		// Match path to plugin package name.
+		// Only reload rlm-* plugins (not prime-agent source — that's too complex for HMR).
 		const match = path.match(/packages\/(rlm-[^/]+)\//);
 		if (!match) return;
 		const pkgDir = match[1];
 		const pkgName = `@rlm/${pkgDir.replace(/^rlm-/, "")}`;
 		const entry = loaded.find((e) => e.pkgName === pkgName);
-		if (!entry) {
-			console.error(`[rlm] HMR: no tracked plugin for ${pkgName}`);
-			return;
-		}
+		if (!entry) return;
 
 		console.error(`[rlm] HMR: reloading ${pkgName}...`);
 		try {
-			// Dispose old fiber.
 			if (entry.fiber?.dispose) {
 				await entry.fiber.dispose();
 			}
-
-			// Clear module cache for this plugin.
 			const modUrl = pathToFileURL(join(process.cwd(), "packages", pkgDir, "src", "index.ts")).href;
-			// Node caches by resolved URL — cache-bust with query param.
 			const cacheBust = `${modUrl}?hmr=${Date.now()}`;
 			const mod = await import(cacheBust);
 			const NewPlugin = mod.default ?? mod;
-
-			// Register new plugin instance.
 			entry.Plugin = NewPlugin;
 			entry.fiber = ctx.plugin(NewPlugin, entry.config);
 			console.error(`[rlm] HMR: ${pkgName} reloaded`);
@@ -172,70 +190,20 @@ function expandPaths(config) {
 	return result;
 }
 
-function parseArgs(argv) {
-	const args = { print: false, prompt: null, verbose: false, rest: [] };
-	for (let i = 0; i < argv.length; i++) {
-		const arg = argv[i];
-		if (arg === "-p" || arg === "--print") {
-			args.print = true;
-		} else if (arg === "--verbose") {
-			args.verbose = true;
-		} else if (arg === "--help" || arg === "-h") {
-			args.help = true;
-		} else {
-			args.rest.push(arg);
-		}
-	}
-	args.prompt = args.rest.join(" ");
-	return args;
-}
-
 async function main() {
 	const ctx = await bootCordis();
 	if (!ctx) process.exit(1);
 
-	const args = parseArgs(process.argv.slice(2));
-
-	if (args.help) {
-		console.log(`rlm — self-evolving terminal agent
-
-Usage:
-  rlm [options] [message]
-
-Options:
-  -p, --print     Print a response and exit
-  --verbose       Show tool calls and results
-  -h, --help      Show this help
-
-Interactive mode:
-  rlm             Start the interactive TUI
-  rlm "message"   Run a one-shot prompt in interactive mode
-
-Print mode:
-  rlm -p "msg"    Print response and exit (no TUI)`);
-		if (ctx?.fiber?.dispose) await ctx.fiber.dispose();
-		return;
-	}
-
-	const tui = ctx.get("rlmTui");
-	if (!tui) {
-		console.error("[rlm] TUI service not available");
-		process.exit(1);
-	}
-
+	// Launch prime-agent in-process.
+	// runCli() reads process.argv and dispatches to interactive mode or print mode.
+	// The interactive mode uses InProcessAgentConnection (no daemon).
+	// Import from the esbuild bundle (self-contained JS, no tsx needed).
 	try {
-		if (args.print && args.prompt) {
-			// Print mode — one-shot, no TUI.
-			await tui.runPrint(args.prompt);
-		} else if (args.prompt) {
-			// One-shot prompt in interactive mode.
-			await tui.runPrint(args.prompt);
-		} else {
-			// Interactive TUI.
-			await tui.startInteractive();
-		}
+		const bundlePath = join(here, "packages", "coding-agent", "dist", "bundle", "cli-main.js");
+		const { runCli } = await import(bundlePath);
+		await runCli();
 	} catch (error) {
-		console.error(`[rlm] ${error?.message ?? error}`);
+		console.error(`[rlm] agent failed: ${error?.message ?? error}`);
 		process.exit(1);
 	} finally {
 		if (ctx?.fiber?.dispose) await ctx.fiber.dispose();

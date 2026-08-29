@@ -1,12 +1,12 @@
 {
   "name": "@rlm/session",
   "version": "0.8.0",
-  "description": "rlm session service \u2014 Cordis plugin wrapping prime-agent session",
+  "description": "rlm session service — Cordis plugin wrapping prime-agent session",
   "type": "module",
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
   "exports": {
     ".": {
-      "default": "./src/index.ts"
+      "default": "./dist/index.js"
     }
   },
   "dependencies": {

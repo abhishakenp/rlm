@@ -3,10 +3,10 @@
   "version": "0.1.0",
   "description": "rlm LLM service — OmniRoute-only OpenAI-compatible client",
   "type": "module",
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
   "exports": {
     ".": {
-      "default": "./src/index.ts"
+      "default": "./dist/index.js"
     }
   },
   "dependencies": {
