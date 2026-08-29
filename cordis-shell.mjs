@@ -1,33 +1,27 @@
 #!/usr/bin/env node
 /**
- * rlm — Cordis lifecycle shell + prime-agent brain.
+ * rlm — modified Cordis host + prime-agent brain, DSH philosophy.
  *
- * Boots the Cordis plugin host from config/profile.yml, which composes
- * all rlm-* plugins (llm, session, kernel, agent, subagent, refinement,
- * wound, reflect, memory, extensions, skills, tui).
+ * Everything is a plugin. The Cordis host owns process lifecycle + HMR.
+ * The agent brain runs IN-PROCESS via runCli(), not as a spawned child.
+ * Each rlm-* plugin owns its prime-agent subsystem as a Cordis Service.
+ * HMR can dispose + reload any plugin at runtime — true hot-swap.
  *
- * Each plugin is a Cordis Service wrapping a prime-agent subsystem.
- * HMR can reload any plugin at runtime — that's the hot-swap primitive.
- *
- * After booting the plugin tree, hands control to the prime-agent CLI
- * (packages/coding-agent/dist/bundle/cli.js) which runs the TUI, kernel,
- * and agent loop using the services registered by the plugins.
- *
- * Foreground-only: the Cordis host + child process die when this process
- * exits. Session/memory/harness data persists on disk.
+ * Foreground-only: the process dies when the terminal exits.
+ * Session/memory/harness data persists on disk.
  */
-import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { dirname, join, isAbsolute } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { readFileSync, existsSync } from "node:fs";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const cliPath = join(here, "packages", "coding-agent", "dist", "bundle", "cli.js");
+const cliMainPath = join(here, "packages", "coding-agent", "dist", "bundle", "cli-main-SUK4CFDY.js");
 const profilePath = join(here, "config", "profile.yml");
 
 // HMR requires --expose-internals. Re-spawn if not present.
 if (!process.execArgv.includes("--expose-internals")) {
+	const { spawn } = await import("node:child_process");
 	const args = ["--expose-internals", fileURLToPath(import.meta.url), ...process.argv.slice(2)];
 	const child = spawn(process.execPath, args, { stdio: "inherit", env: process.env });
 	child.on("exit", (code, signal) => {
@@ -35,7 +29,6 @@ if (!process.execArgv.includes("--expose-internals")) {
 		else process.exit(code ?? 0);
 	});
 } else {
-	// Already running with --expose-internals — boot for real.
 	main().catch((error) => {
 		console.error(error);
 		process.exit(1);
@@ -43,14 +36,14 @@ if (!process.execArgv.includes("--expose-internals")) {
 }
 
 async function bootCordis() {
-	let Context, Loader, Timer, Include, Hmr, Group, EntryTree;
+	let Context, Loader, Timer, Include, Hmr, Group;
 	try {
 		({ Context } = await import("@deepseek-ai/cordis"));
 		Loader = (await import("@deepseek-ai/cordis-plugin-loader")).default;
 		Timer = (await import("@deepseek-ai/cordis-plugin-timer")).default;
 		Include = (await import("@deepseek-ai/cordis-plugin-include")).default;
 		Hmr = (await import("@deepseek-ai/cordis-plugin-hmr")).default;
-		({ Group, EntryTree } = await import("@deepseek-ai/cordis-plugin-loader"));
+		({ Group } = await import("@deepseek-ai/cordis-plugin-loader"));
 	} catch (error) {
 		console.error("[rlm] Cordis unavailable, running agent brain directly:", error?.message ?? error);
 		return null;
@@ -71,25 +64,9 @@ async function bootCordis() {
 			loader.builtins.group = Group;
 		}
 
-		// Mount the profile YAML through the loader (enables HMR)
-		if (existsSync(profilePath)) {
-			const rootInclude = {
-				id: "include",
-				name: "cordis:include",
-				config: { path: pathToFileURL(profilePath).href },
-			};
-			try {
-				const includeId = await loader.create(rootInclude);
-				if (loader) await loader.await();
-				console.error("[rlm] profile mounted, plugins loaded via loader");
-			} catch (error) {
-				console.error("[rlm] profile mount failed, falling back to direct import:", error?.message ?? error);
-				// Fallback: load plugins directly (no HMR)
-				await loadPluginsDirect(ctx);
-			}
-		}
-
 		// HMR — the hot-swap primitive. Watches rlm plugin source dirs.
+		// With --expose-internals + in-process runCli, HMR can dispose +
+		// reload any plugin Service at runtime.
 		try {
 			ctx.plugin(Hmr, {
 				base: process.cwd(),
@@ -97,9 +74,14 @@ async function bootCordis() {
 				ignored: ["**/node_modules", "**/.*", "**/dist", "cache", "data"],
 				debounce: 100,
 			});
-			console.error("[rlm] HMR active");
+			console.error("[rlm] HMR active — hot-swap enabled");
 		} catch (error) {
 			console.error("[rlm] HMR failed:", error?.message ?? error);
+		}
+
+		// Load plugins from profile YAML
+		if (existsSync(profilePath)) {
+			await loadPlugins(ctx, loader);
 		}
 
 		return ctx;
@@ -109,8 +91,26 @@ async function bootCordis() {
 	}
 }
 
-/** Fallback: load plugins from profile YAML via direct import (no HMR). */
-async function loadPluginsDirect(ctx) {
+/** Load plugins from profile YAML. Tries loader mount first, falls back to direct import. */
+async function loadPlugins(ctx, loader) {
+	// Try loader-based mount (enables full HMR hot-reload)
+	if (loader) {
+		try {
+			const rootInclude = {
+				id: "include",
+				name: "cordis:include",
+				config: { path: pathToFileURL(profilePath).href },
+			};
+			await loader.create(rootInclude);
+			await loader.await();
+			console.error("[rlm] profile mounted via loader — full HMR hot-reload");
+			return;
+		} catch (error) {
+			console.error("[rlm] loader mount failed, falling back to direct import:", error?.message ?? error);
+		}
+	}
+
+	// Fallback: load plugins directly via import()
 	const yaml = await import("yaml");
 	const content = readFileSync(profilePath, "utf-8");
 	const profile = yaml.parse(content);
@@ -118,7 +118,7 @@ async function loadPluginsDirect(ctx) {
 
 	for (const entry of entries) {
 		const pkgName = entry.name ?? entry;
-		if (pkgName === "cordis:include" || pkgName?.startsWith("cordis:")) continue;
+		if (pkgName?.startsWith("cordis:")) continue;
 		const config = expandPaths(entry.config ?? {});
 		try {
 			const mod = await import(pkgName);
@@ -147,11 +147,18 @@ function expandPaths(config) {
 
 async function main() {
 	const ctx = await bootCordis();
-	const args = process.argv.slice(2);
-	const child = spawn(process.execPath, [cliPath, ...args], { stdio: "inherit" });
-	child.on("exit", (code, signal) => {
-		if (ctx?.fiber?.dispose) void ctx.fiber.dispose();
-		if (signal) process.kill(process.pid, signal);
-		else process.exit(code ?? 0);
-	});
+
+	// Run the agent brain IN-PROCESS (not spawned).
+	// This is critical for HMR: the Cordis host and the agent brain
+	// share the same process, so HMR can hot-swap plugins that the
+	// agent brain uses.
+	try {
+		const { runCli } = await import(pathToFileURL(cliMainPath).href);
+		await runCli();
+	} catch (error) {
+		console.error("[rlm] agent brain failed:", error?.message ?? error);
+		process.exit(1);
+	} finally {
+		if (ctx?.fiber?.dispose) await ctx.fiber.dispose();
+	}
 }
