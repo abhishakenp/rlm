@@ -1571,6 +1571,78 @@ export class AgentSession {
 		return absPath;
 	}
 
+	/**
+	 * Capture thinking traces and assistant text as context variables.
+	 * Everything the LLM emits is a variable — visible in TUI, copyable to
+	 * subagents, movable, updatable. The thinking is the LLM's live state.
+	 */
+	private _captureThinkingAsContext(assistantMsg: AssistantMessage): void {
+		const ctx = (globalThis as any).__rlmContextProxy;
+		if (!ctx) return;
+		try {
+			// Extract thinking blocks from the assistant message content.
+			const thinkingParts: string[] = [];
+			const textParts: string[] = [];
+			for (const block of assistantMsg.content) {
+				if (block.type === "thinking" && typeof (block as any).thinking === "string") {
+					thinkingParts.push((block as any).thinking);
+				} else if (block.type === "text" && typeof (block as any).text === "string") {
+					textParts.push((block as any).text);
+				}
+			}
+
+			// Capture thinking as a mutable variable — updates each turn.
+			if (thinkingParts.length > 0) {
+				const thinking = thinkingParts.join("\n").trim();
+				if (thinking.length > 0) {
+					const truncated = thinking.length > 4000 ? thinking.slice(0, 4000) + "..." : thinking;
+					if (ctx.get("thinking.current") === undefined) {
+						ctx.set("thinking.current", truncated, {
+							type: "string",
+							mutable: true,
+							description: "LLM thinking trace for the current turn",
+							scope: "session",
+							source: "llm",
+						});
+					} else {
+						ctx.update("thinking.current", truncated);
+					}
+					// Also store a turn-indexed copy (immutable, for history).
+					const turnNum = this._assistantTurnsSinceAutoRefine ?? 0;
+					const historyName = `thinking.turn-${turnNum}`;
+					if (ctx.get(historyName) === undefined) {
+						ctx.set(historyName, truncated, {
+							type: "string",
+							mutable: false,
+							description: `Thinking trace from turn ${turnNum}`,
+							scope: "session",
+							source: "llm",
+						});
+					}
+				}
+			}
+
+			// Capture assistant text response as a variable.
+			if (textParts.length > 0) {
+				const text = textParts.join("").trim();
+				if (text.length > 0) {
+					const truncated = text.length > 2000 ? text.slice(0, 2000) + "..." : text;
+					if (ctx.get("assistant.lastResponse") === undefined) {
+						ctx.set("assistant.lastResponse", truncated, {
+							type: "string",
+							mutable: true,
+							description: "Last assistant text response",
+							scope: "session",
+							source: "llm",
+						});
+					} else {
+						ctx.update("assistant.lastResponse", truncated);
+					}
+				}
+			}
+		} catch { /* best effort */ }
+	}
+
 	private _installAgentContinuationHook(): void {
 		this.agent.getContinuationMessages = (context, signal) => this._getContinuationMessages(context, signal);
 	}
@@ -3709,6 +3781,9 @@ export class AgentSession {
 				this._lastAssistantMessage = event.message;
 
 				const assistantMsg = event.message as AssistantMessage;
+				// Capture thinking traces as context variables.
+				// Everything the LLM emits is a variable — thinking, text, tool calls.
+				this._captureThinkingAsContext(assistantMsg);
 				if (assistantMsg.stopReason !== "error") {
 					addAutonomousUsage(this._autonomousState, assistantMsg.usage);
 				}
@@ -4482,7 +4557,9 @@ export class AgentSession {
 			contextSummary: this._getContextSummary(),
 		};
 		this._registerRuntimeContextVars(loadedSkills, validToolNames);
-		return buildSystemPrompt(this._baseSystemPromptOptions);
+		const systemPrompt = buildSystemPrompt(this._baseSystemPromptOptions);
+		this._registerSystemPromptAsContext(systemPrompt, loadedSkills);
+		return systemPrompt;
 	}
 
 	/**
@@ -4551,6 +4628,58 @@ export class AgentSession {
 					description: "Maximum recursion depth",
 					scope: "session",
 				});
+			}
+		} catch { /* best effort */ }
+	}
+
+	/**
+	 * Register the system prompt and skill contents as context variables.
+	 * These are first-class variables — hot-reloadable, visible in TUI,
+	 * copyable to subagents. When the system prompt or skills change via
+	 * HMR, these variables update without disturbing active work.
+	 */
+	private _registerSystemPromptAsContext(systemPrompt: string, skills: Skill[]): void {
+		const ctx = (globalThis as any).__rlmContextProxy;
+		if (!ctx) return;
+		try {
+			// System prompt as a variable (mutable for hot-reload).
+			const promptSummary = systemPrompt.length > 500
+				? systemPrompt.slice(0, 500) + `... (${systemPrompt.length} chars total)`
+				: systemPrompt;
+			if (ctx.get("runtime.systemPrompt") === undefined) {
+				ctx.set("runtime.systemPrompt", promptSummary, {
+					type: "prompt",
+					mutable: true,
+					description: "Active system prompt (hot-reloadable)",
+					scope: "session",
+					source: "system",
+				});
+			} else {
+				ctx.update("runtime.systemPrompt", promptSummary);
+			}
+
+			// Each skill's content as a variable.
+			for (const skill of skills) {
+				const varName = `skill.${skill.name}`;
+				const content = typeof (skill as any).content === "string"
+					? (skill as any).content
+					: typeof (skill as any).text === "string"
+						? (skill as any).text
+						: JSON.stringify(skill).slice(0, 500);
+				const truncated = content.length > 1000
+					? content.slice(0, 1000) + `... (${content.length} chars)`
+					: content;
+				if (ctx.get(varName) === undefined) {
+					ctx.set(varName, truncated, {
+						type: "prompt",
+						mutable: true,
+						description: `Skill: ${skill.name} (hot-reloadable)`,
+						scope: "session",
+						source: "system",
+					});
+				} else {
+					ctx.update(varName, truncated);
+				}
 			}
 		} catch { /* best effort */ }
 	}
