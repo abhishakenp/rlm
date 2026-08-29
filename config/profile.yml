@@ -1,0 +1,79 @@
+# rlm profile — Cordis entry-list composing all plugins.
+#
+# Each entry is a plugin loaded by the Cordis loader. The loader tracks
+# module URLs, enabling HMR to reload any plugin at runtime.
+#
+# Dependency order matters:
+#   1. Core services (llm, session, kernel, memory) — no deps
+#   2. Agent (depends on session + llm)
+#   3. Subagent, refinement, wound, reflect (depend on agent)
+#   4. Extensions, skills (depend on agent)
+#   5. TUI (depends on agent) — mounted last so it can observe all plugins
+
+- id: llm
+  name: '@rlm/llm'
+  config:
+    modelsJsonPath: ~/.prime/agent/models.json
+    omnirouteUrl: http://localhost:20128
+
+- id: session
+  name: '@rlm/session'
+  config:
+    sessionDir: ~/.prime/agent/sessions
+
+- id: kernel
+  name: '@rlm/kernel'
+  config:
+    pythonPath: python3
+    kernelDir: ~/.prime/agent/kernel-venv
+
+- id: memory
+  name: '@rlm/memory'
+  config:
+    memoryDir: ~/.prime/agent/memory
+
+- id: agent
+  name: '@rlm/agent'
+  config:
+    maxDepth: 10
+    defaultProvider: omniroute
+    defaultModel: auto/best-free
+    defaultThinking: high
+
+- id: subagent
+  name: '@rlm/subagent'
+  config:
+    maxDepth: 10
+
+- id: refinement
+  name: '@rlm/refinement'
+  config:
+    maxProposals: 5
+    autoApply: false
+
+- id: wound
+  name: '@rlm/wound'
+  config:
+    maxRefinePerPlugin: 3
+    cooldownTurns: 5
+
+- id: reflect
+  name: '@rlm/reflect'
+  config:
+    intervalTurns: 10
+
+- id: extensions
+  name: '@rlm/extensions'
+  config:
+    extensionsDir: ~/.prime/agent/extensions
+
+- id: skills
+  name: '@rlm/skills'
+  config:
+    skillsDir: ~/.prime/agent/skills
+
+- id: tui
+  name: '@rlm/tui'
+  config:
+    theme: default
+    maxOutputChars: 65536

@@ -1,0 +1,16 @@
+{
+  "name": "@rlm/llm",
+  "version": "0.8.0",
+  "description": "rlm LLM service — wraps pi-ai stream functions, registers omniroute provider",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": {
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@earendil-works/pi-ai": "^0.8.0"
+  }
+}

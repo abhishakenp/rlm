@@ -1,0 +1,15 @@
+{
+  "name": "@rlm/session",
+  "version": "0.8.0",
+  "description": "rlm session service — Cordis plugin wrapping prime-agent session",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": {
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "@rlm/refinement",
+  "version": "0.8.0",
+  "description": "rlm refinement service — Cordis plugin wrapping prime-agent refinement",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": {
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  }
+}

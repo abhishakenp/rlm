@@ -1,0 +1,15 @@
+{
+  "name": "@rlm/tui",
+  "version": "0.8.0",
+  "description": "rlm tui service — Cordis plugin wrapping prime-agent tui",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": {
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  }
+}
