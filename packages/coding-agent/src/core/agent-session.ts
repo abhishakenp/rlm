@@ -1576,11 +1576,40 @@ export class AgentSession {
 	private _messageVarCounter: number = 0;
 
 	/**
-	 * Capture EVERY message as a context variable. The entire conversation
-	 * is variables — user messages, assistant responses, tool calls, tool
-	 * results. The LLM can mutate them via context.update(), and the
-	 * mutated version is what goes to the next LLM call. The TUI shows
-	 * all message variables live.
+	 * Derive a meaningful, compact variable name from text content.
+	 * Extracts the most significant keywords — not sequential numbers.
+	 * E.g. "explore engine and deduce generation time" → "explore-engine-generation-time"
+	 */
+	private _deriveSemanticName(text: string, maxWords: number = 4): string {
+		const cleaned = text
+			.toLowerCase()
+			.replace(/[^a-z0-9\s]/g, " ")
+			.replace(/\s+/g, " ")
+			.trim();
+		if (!cleaned) return "untitled";
+		// Stopwords to skip.
+		const stop = new Set(["the", "a", "an", "is", "are", "was", "were", "be", "to",
+			"of", "in", "on", "at", "by", "for", "with", "from", "into", "and", "or",
+			"but", "not", "this", "that", "it", "its", "as", "if", "so", "do", "does",
+			"did", "can", "could", "would", "should", "will", "just", "like", "get",
+			"got", "have", "has", "had", "i", "you", "he", "she", "we", "they", "me",
+			"my", "your", "use", "using", "run", "find", "how", "what", "when", "where",
+			"why", "who", "which", "about", "there", "here", "now", "then", "ok", "okay",
+			"please", "need", "want", "let", "lets", "also", "very", "more", "much",
+			"some", "any", "all", "each", "every", "no", "yes", "up", "down", "out",
+			"code", "tool", "const", "let", "var", "require", "console", "log",
+			"function", "return", "args", "opts", "obj", "val", "str", "num",
+			"then", "step", "first", "second", "third", "next", "last"]);
+		const words = cleaned.split(" ").filter((w) => w.length > 1 && !stop.has(w));
+		if (words.length === 0) return cleaned.split(" ").slice(0, maxWords).join("-");
+		return words.slice(0, maxWords).join("-");
+	}
+
+	/**
+	 * Capture EVERY message as a context variable with a MEANINGFUL name
+	 * derived from content — not sequential numbers. The entire conversation
+	 * is variables. The LLM can mutate them via context.update(), and the
+	 * mutated version is what goes to the next LLM call.
 	 */
 	private _captureMessageAsContext(message: AgentMessage): void {
 		const ctx = (globalThis as any).__rlmContextProxy;
@@ -1592,30 +1621,45 @@ export class AgentSession {
 			let description: string;
 
 			if (message.role === "user") {
-				varName = `message.user-${idx}`;
 				const text = typeof (message as any).content === "string"
 					? (message as any).content
-					: JSON.stringify((message as any).content ?? "").slice(0, 500);
+					: Array.isArray((message as any).content)
+						? ((message as any).content as any[])
+							.filter((p) => p?.type === "text")
+							.map((p) => p.text)
+							.join(" ")
+						: "";
+				const semantic = this._deriveSemanticName(text);
+				varName = `user.${semantic}`;
 				value = text.slice(0, 1000);
-				description = `User message ${idx}`;
+				description = `User: ${text.slice(0, 80)}`;
 			} else if (message.role === "assistant") {
-				varName = `message.assistant-${idx}`;
 				const assistant = message as AssistantMessage;
-				// Extract text + tool call summaries.
+				// Extract text + tool call info for naming.
 				const parts: string[] = [];
+				let firstText = "";
+				let toolName = "";
 				for (const block of assistant.content) {
 					if (block.type === "text" && typeof (block as any).text === "string") {
 						parts.push((block as any).text);
+						if (!firstText) firstText = (block as any).text;
 					} else if (block.type === "toolCall") {
 						parts.push(`[tool: ${(block as any).name}]`);
+						if (!toolName) toolName = (block as any).name;
 					} else if (block.type === "thinking") {
 						parts.push(`[thinking]`);
 					}
 				}
 				value = parts.join("\n").slice(0, 1000);
-				description = `Assistant response ${idx}`;
+				// Name from first text or tool name.
+				const semantic = firstText
+					? this._deriveSemanticName(firstText)
+					: toolName
+						? `${toolName}-call`
+						: `response-${idx}`;
+				varName = `assistant.${semantic}`;
+				description = `Assistant: ${firstText.slice(0, 80) || (toolName ? `tool:${toolName}` : "response")}`;
 			} else if (message.role === "toolResult") {
-				varName = `message.tool-result-${idx}`;
 				const toolName = (message as any).toolName ?? "unknown";
 				// Extract text from tool result content.
 				const parts: string[] = [];
@@ -1628,16 +1672,24 @@ export class AgentSession {
 				} else if (typeof content === "string") {
 					parts.push(content);
 				}
-				value = `[${toolName}] ${parts.join("\n")}`.slice(0, 1000);
-				description = `Tool result ${idx}: ${toolName}`;
+				const resultText = parts.join("\n");
+				value = `[${toolName}] ${resultText}`.slice(0, 1000);
+				// Name from tool + result content.
+				const semantic = this._deriveSemanticName(resultText, 3);
+				varName = `tool.${toolName}-${semantic}`;
+				description = `Tool result: ${toolName} → ${resultText.slice(0, 60)}`;
 			} else {
 				return; // Skip custom/other message types.
 			}
 
 			if (value.length < 2) return;
 
+			// Deduplicate: if a var with this name exists, append index.
+			if (ctx.get(varName) !== undefined) {
+				varName = `${varName}-${idx}`;
+			}
+
 			// All message variables are mutable — the LLM can update them.
-			// The mutated version is what gets reconstructed for the next call.
 			if (ctx.get(varName) === undefined) {
 				ctx.set(varName, value, {
 					type: "string",
@@ -1653,9 +1705,9 @@ export class AgentSession {
 	}
 
 	/**
-	 * Capture thinking traces and assistant text as context variables.
-	 * Everything the LLM emits is a variable — visible in TUI, copyable to
-	 * subagents, movable, updatable. The thinking is the LLM's live state.
+	 * Capture thinking traces and assistant text as context variables
+	 * with MEANINGFUL names derived from content. The LLM can reference
+	 * "thinking.generation-time-analysis" instead of "thinking.turn-4".
 	 */
 	private _captureThinkingAsContext(assistantMsg: AssistantMessage): void {
 		const ctx = (globalThis as any).__rlmContextProxy;
@@ -1677,28 +1729,43 @@ export class AgentSession {
 				const thinking = thinkingParts.join("\n").trim();
 				if (thinking.length > 0) {
 					const truncated = thinking.length > 4000 ? thinking.slice(0, 4000) + "..." : thinking;
+					// Always update thinking.current — it's the live trace.
 					if (ctx.get("thinking.current") === undefined) {
 						ctx.set("thinking.current", truncated, {
 							type: "string",
 							mutable: true,
-							description: "LLM thinking trace for the current turn",
+							description: "Live LLM thinking trace (updates each turn)",
 							scope: "session",
 							source: "llm",
 						});
 					} else {
 						ctx.update("thinking.current", truncated);
 					}
-					// Also store a turn-indexed copy (immutable, for history).
-					const turnNum = this._assistantTurnsSinceAutoRefine ?? 0;
-					const historyName = `thinking.turn-${turnNum}`;
+					// Store a semantic-named history copy (immutable).
+					// Name from first meaningful phrase in the thinking.
+					const semantic = this._deriveSemanticName(thinking, 3);
+					const historyName = `thinking.${semantic}`;
 					if (ctx.get(historyName) === undefined) {
 						ctx.set(historyName, truncated, {
 							type: "string",
 							mutable: false,
-							description: `Thinking trace from turn ${turnNum}`,
+							description: `Thinking: ${thinking.slice(0, 80)}`,
 							scope: "session",
 							source: "llm",
 						});
+					} else {
+						// Deduplicate: append turn number if name exists.
+						const turnNum = this._assistantTurnsSinceAutoRefine ?? 0;
+						const dedupName = `thinking.${semantic}-${turnNum}`;
+						if (ctx.get(dedupName) === undefined) {
+							ctx.set(dedupName, truncated, {
+								type: "string",
+								mutable: false,
+								description: `Thinking: ${thinking.slice(0, 80)}`,
+								scope: "session",
+								source: "llm",
+							});
+						}
 					}
 				}
 			}
