@@ -33,7 +33,6 @@ const CODE_CONTROL_PROMPT = [
 	"Do not assume JavaScript is the native runtime of the external thing being investigated. A repository, package, service, dataset, paper, website, benchmark, or API may have its own environment and normal interface. Evaluate external systems through their own interface, then use the code tool to coordinate the process and analyze what comes back.",
 	"",
 	"When running shell commands from the code tool, use `%%bash` cells or `!command` syntax. If you use `%%bash`, it must be the first line of the code cell. `!command` runs a single shell command and captures its output. Multi-line shell blocks use `%%bash` as the first line followed by shell commands.",
-	"CRITICAL: Shell commands (ls, cat, grep, git, npm, etc.) are NOT JavaScript functions. NEVER write bare `ls` or `git status` in the code tool — it will throw ReferenceError. ALWAYS prefix with `!`: `!ls`, `!git status`, `!cat file.txt`. This is the #1 mistake — never make it.",
 	"",
 	"Important: do not install dependencies into the code kernel just to make an external project import or run there. If a project import, test, script, CLI, or dependency check is needed, run it through that project's own environment and normal command interface. Treat failures from that native environment as the relevant result.",
 	"",
