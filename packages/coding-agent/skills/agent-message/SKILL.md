@@ -12,7 +12,7 @@ to include a `from` field.
 
 Call directly from the kernel:
 
-```python
+```JS
 children = await rlm.list_subagents()
 child = next((item for item in children if item.active_session_id), None)
 if child is not None:
@@ -55,6 +55,6 @@ if child is not None:
   `await rlm.delete_subagent(child)`.
 - Reach is limited to parent, siblings, and direct children; relay through an
   intermediate child instead of messaging grandchildren or cousins directly.
-- Sender identity is daemon-derived and cannot be spoofed from Python.
+- Sender identity is daemon-derived and cannot be spoofed from JS.
 - The daemon enforces message size, rate, and pending-queue limits before
   accepting delivery.

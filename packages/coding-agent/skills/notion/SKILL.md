@@ -5,7 +5,7 @@ description: Search Notion and read/create/update pages and databases via Notion
 
 # Notion
 
-Talk to Notion through its official hosted MCP server from the IPython kernel.
+Talk to Notion through its official hosted MCP server from the code kernel.
 
 ## Setup
 
@@ -20,9 +20,9 @@ The tool set is defined by the server, not by this skill, so **discover before
 you call** — don't assume tool names or argument names:
 
 Notion's tools are named with hyphens (e.g. `notion-search`, `notion-fetch`),
-which are **not** valid Python identifiers — so call them via `call_tool`:
+which are **not** valid JS identifiers — so call them via `call_tool`:
 
-```python
+```JS
 import notion
 
 # 1. Discover available tools (returns names + schemas)
@@ -40,7 +40,7 @@ Tools whose names *are* valid identifiers can also be called as
 
 Notes:
 - Every call is `async` — always `await`.
-- Results are already-parsed Python (a `dict` for structured output, otherwise a
+- Results are already-parsed JS (a `dict` for structured output, otherwise a
   string). No need to `json.loads` them.
 - Run `list_tools()` before relying on `help()` or assuming a tool exists — the
   server's schema is the source of truth for names and arguments.

@@ -14,7 +14,7 @@ otherwise mutate another session.
 
 Call directly from the kernel:
 
-```python
+```JS
 children = await rlm.list_subagents()
 child = next((item for item in children if item.active_session_id), None)
 if child is not None:

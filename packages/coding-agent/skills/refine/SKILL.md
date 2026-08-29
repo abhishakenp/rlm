@@ -1,6 +1,6 @@
 ---
 name: refine
-description: Trigger continual harness refinement from IPython. Use when you notice a repeated failure, reusable tactic, delegation role, or behavior policy that should be persisted as a harness entry. Returns immediately; refinement runs when the current turn ends.
+description: Trigger continual harness refinement from JS kernel. Use when you notice a repeated failure, reusable tactic, delegation role, or behavior policy that should be persisted as a harness entry. Returns immediately; refinement runs when the current turn ends.
 ---
 
 # Refine
@@ -9,9 +9,9 @@ Refinement analyzes the conversation trajectory and applies small, evidence-back
 updates to the continual harness (prompts, memories, skills, subagent specs).
 The implementation lives in the host (the same one behind the user's `/refine`
 command); this skill is the kernel-side interface to it. Call it directly from
-IPython:
+JS kernel:
 
-```python
+```JS
 await refine.status()
 await refine.run()
 await refine.run("create a memory about always checking git status before committing")

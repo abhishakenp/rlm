@@ -7,12 +7,12 @@ description: Distribute work across the fleet. Spawn agents on remote hosts (VPS
 
 Distribute work across the fleet using `rlm()` with the `host=` parameter.
 Each spawned agent is a self-contained unit with its own working directory,
-IPython kernel, and identity. Agents can recursively spawn sub-agents on
+code kernel, and identity. Agents can recursively spawn sub-agents on
 other hosts.
 
 ## Spawning on a specific host
 
-```python
+```JS
 # Spawn on a VPS in the fleet (SSH)
 handle = await rlm("Run the test suite and report results", host="a2", name="test-runner")
 
@@ -39,7 +39,7 @@ handle = await rlm("Analyze the auth flow", name="auth-analyzer")
 
 Start independent workers on different hosts without waiting:
 
-```python
+```JS
 # Distribute analysis across 3 hosts in parallel
 handles = []
 for host, task in [("a2", "Analyze backend"), ("genesis", "Analyze frontend"), ("cloudflare", "Analyze docs")]:
@@ -54,7 +54,7 @@ for host, task in [("a2", "Analyze backend"), ("genesis", "Analyze frontend"), (
 
 A child spawned on `a2` can itself spawn children on other hosts:
 
-```python
+```JS
 # On a2, the child can do:
 sub_handle = await rlm("Sub-task", host="genesis", name="sub-task")
 ```
@@ -66,7 +66,7 @@ Use `rlm.list_subagents()` to see where each child runs.
 
 Agents can request files from the fleet:
 
-```python
+```JS
 # The spawned agent can request files from the orchestrator
 # Files are transferred via SSH (for fleet hosts) or HTTP (for CF Workers)
 ```

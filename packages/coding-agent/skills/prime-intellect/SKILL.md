@@ -1,6 +1,6 @@
 ---
 name: prime-intellect
-description: Work with Prime Intellect products via the prime CLI and Python SDKs - verifiers environments and the Environments Hub, evaluations (local and hosted), Hosted Training and prime-rl, code sandboxes, Prime Inference, GPU compute (pods and clusters), storage, and tunnels. Use when a task involves Prime Intellect, the prime CLI, verifiers, RL environments, evals, training, sandboxes, renting GPUs, Prime Inference models, or when the user asks what Prime Intellect is or what it offers.
+description: Work with Prime Intellect products via the prime CLI and JS SDKs - verifiers environments and the Environments Hub, evaluations (local and hosted), Hosted Training and prime-rl, code sandboxes, Prime Inference, GPU compute (pods and clusters), storage, and tunnels. Use when a task involves Prime Intellect, the prime CLI, verifiers, RL environments, evals, training, sandboxes, renting GPUs, Prime Inference models, or when the user asks what Prime Intellect is or what it offers.
 ---
 
 # Prime Intellect
@@ -11,7 +11,7 @@ Prime Intellect is an open superintelligence lab building open-source AGI infras
 
 | Product | What it is | Details |
 |---|---|---|
-| verifiers | Python library for building LLM environments and evaluations | [environments.md](references/environments.md) |
+| verifiers | JS library for building LLM environments and evaluations | [environments.md](references/environments.md) |
 | Environments Hub | Platform library of community RL environments (`prime env`) | [environments.md](references/environments.md) |
 | Hosted Evaluations | Run evals on Prime-managed infra (`prime eval run --hosted`) | [environments.md](references/environments.md) |
 | Hosted Training | Post-train models against environments (`prime train`, Lab) | [environments.md](references/environments.md) |
@@ -32,7 +32,7 @@ prime login              # browser auth; or: prime config set-api-key
 prime config view        # verify configuration
 ```
 
-The same package provides the Python SDKs (e.g. `prime_sandboxes`, `prime_tunnel`). Source: https://github.com/PrimeIntellect-ai/prime
+The same package provides the JS SDKs (e.g. `prime_sandboxes`, `prime_tunnel`). Source: https://github.com/PrimeIntellect-ai/prime
 
 ## Live Documentation
 
@@ -65,8 +65,8 @@ prime train models                  # models, capacity, pricing
 prime train init && prime train rl.toml              # configure + launch a run
 
 # Sandboxes
-prime sandbox create python:3.11-slim --timeout-minutes 120
-prime sandbox run <sandbox-id> "python --version"
+prime sandbox create JS:3.11-slim --timeout-minutes 120
+prime sandbox run <sandbox-id> "JS --version"
 prime sandbox delete <sandbox-id>
 
 # Inference

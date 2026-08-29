@@ -21,7 +21,7 @@ For *programmatic* work on an image — measuring pixels, cropping, resizing,
 computing a hash, comparing files byte-by-byte — open it in the kernel with a
 library instead:
 
-```python
+```JS
 from PIL import Image
 img = Image.open("diagram.png")
 print(img.size)
@@ -32,9 +32,9 @@ compute over it. Use `attach_image` when you need to *see* the image.
 
 ## Usage
 
-Call the prepared `attach_image` import directly in the IPython kernel:
+Call the prepared `attach_image` import directly in the code kernel:
 
-```python
+```JS
 print(await attach_image("diagram.png"))
 print(await attach_image("a.png", "b.jpg"))
 ```

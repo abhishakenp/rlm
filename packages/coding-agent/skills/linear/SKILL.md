@@ -5,7 +5,7 @@ description: Read and write Linear issues, projects, cycles, comments, and more 
 
 # Linear
 
-Talk to Linear through its official hosted MCP server from the IPython kernel.
+Talk to Linear through its official hosted MCP server from the code kernel.
 
 ## Setup
 
@@ -19,7 +19,7 @@ them through `/login`; don't ask them to set environment variables.
 The tool set is defined by the server, not by this skill, so **discover before
 you call** — don't assume tool names or argument names:
 
-```python
+```JS
 import linear
 
 # 1. Discover available tools
@@ -36,9 +36,9 @@ print(result)
 
 Notes:
 - Every tool is an `async` method — always `await`.
-- Results are already-parsed Python (a `dict` for structured output, otherwise a
+- Results are already-parsed JS (a `dict` for structured output, otherwise a
   string). No need to `json.loads` them.
-- For tools whose names aren't valid Python identifiers, use the escape hatch:
+- For tools whose names aren't valid JS identifiers, use the escape hatch:
   `await linear.call_tool("tool-name", {"arg": "value"})`.
 - Run `list_tools()` before relying on `help()` or assuming a tool exists — it
   populates the schemas `help()` shows, and the server is the source of truth

@@ -1,6 +1,6 @@
 ---
 name: rlm-heartbeat
-description: Manage agent-owned RLM heartbeats from IPython. Use when the user asks the agent to start, create, schedule, or manage a heartbeat, unless they explicitly request the user's /heartbeat.
+description: Manage agent-owned RLM heartbeats from JS kernel. Use when the user asks the agent to start, create, schedule, or manage a heartbeat, unless they explicitly request the user's /heartbeat.
 ---
 
 # RLM Heartbeat
@@ -9,9 +9,9 @@ RLM heartbeats are internal recurring prompts for the current agent session.
 They are separate from the user's visible `/heartbeat`: this skill cannot read,
 replace, pause, resume, or clear that user-level heartbeat.
 
-Call directly from IPython:
+Call directly from JS kernel:
 
-```python
+```JS
 await rlm_heartbeat.create("check test progress", interval="5m", label="tests")
 await rlm_heartbeat.create("watch build", delivery_mode="follow_up")
 await rlm_heartbeat.list()
