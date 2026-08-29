@@ -104,6 +104,15 @@ async function bootCordis() {
 		watcher.on("change", (path) => {
 			console.error(`[rlm] HMR: ${path} changed`);
 			ctx.emit("rlm/hmr-change", { path, url: pathToFileURL(join(process.cwd(), path)).href });
+
+			// System prompt / skills / refinement files changed → emit prompt-changed.
+			// The agent session listens for this and rebuilds the system prompt
+			// on the next turn. Active work is NEVER interrupted — only the
+			// next LLM turn uses the new prompt. Context variables update live.
+			if (path.includes("/prompts/") || path.includes("/skills/") || path.includes("/refinement/")) {
+				console.error(`[rlm] HMR: prompt/skill/refinement changed → rebuilding system prompt`);
+				ctx.emit("rlm/prompt-changed", { path });
+			}
 		});
 
 		watcher.on("ready", () => {
@@ -237,6 +246,8 @@ async function main() {
 	// Inject the context registry proxy into the agent session.
 	// The context service is a Cordis plugin — we expose it via globalThis
 	// so agent-session.ts can pass it into the code tool's VM context.
+	// Also expose the Cordis context itself for HMR event listening.
+	globalThis.__rlmCordisContext = ctx;
 	try {
 		const contextService = ctx.get("rlmContext");
 		if (contextService) {

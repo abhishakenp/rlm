@@ -1316,6 +1316,7 @@ export class AgentSession {
 		this._installAgentToolHooks();
 		this._installAgentTurnHook();
 		this._installAgentContinuationHook();
+		this._installPromptHmrListener();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -1645,6 +1646,131 @@ export class AgentSession {
 
 	private _installAgentContinuationHook(): void {
 		this.agent.getContinuationMessages = (context, signal) => this._getContinuationMessages(context, signal);
+	}
+
+	/**
+	 * Propagate refinement to context variables and children.
+	 * Parent learns → children inherit. The refinement is stored as a
+	 * context variable, the system prompt variable updates, and children
+	 * receive the refinement via context transfer.
+	 */
+	private _propagateRefinementToContext(systemPrompt: string, result: RefinementResult): void {
+		const ctx = (globalThis as any).__rlmContextProxy;
+		if (!ctx) return;
+		try {
+			// Update the system prompt variable.
+			const summary = systemPrompt.length > 500
+				? systemPrompt.slice(0, 500) + `... (${systemPrompt.length} chars total)`
+				: systemPrompt;
+			if (ctx.get("runtime.systemPrompt") !== undefined) {
+				ctx.update("runtime.systemPrompt", summary);
+			}
+
+			// Store the refinement as an immutable context variable.
+			const refineVarName = `refinement.${result.id ?? Date.now()}`;
+			const refineValue = JSON.stringify({
+				id: result.id,
+				summary: result.summary,
+				scope: result.scope ?? "local",
+				appliedEdits: result.appliedEdits.filter((e) => e.applied).length,
+			});
+			if (ctx.get(refineVarName) === undefined) {
+				ctx.set(refineVarName, refineValue, {
+					type: "decision",
+					mutable: false,
+					description: `Refinement: ${result.summary?.slice(0, 80) ?? "applied"}`,
+					scope: result.scope === "global" ? "project" : "session",
+					source: "refinement",
+				});
+			}
+
+			// Propagate to children via Cordis event.
+			// Children listen for this event and apply the refinement
+			// to their own system prompt + context.
+			const cordisCtx = (globalThis as any).__rlmCordisContext;
+			if (cordisCtx?.emit) {
+				cordisCtx.emit("rlm/refinement-applied", {
+					id: result.id,
+					summary: result.summary,
+					scope: result.scope ?? "local",
+					systemPrompt: summary,
+				});
+			}
+
+			console.error(`[rlm] refinement propagated: ${result.summary?.slice(0, 60) ?? "applied"}`);
+		} catch { /* best effort */ }
+	}
+
+	/**
+	 * Listen for HMR prompt-changed events. When the system prompt, skills,
+	 * or refinement files change, rebuild the system prompt and update the
+	 * context variable. Active work is NEVER interrupted — only the next
+	 * LLM turn uses the new prompt. This is the Cordis philosophy: everything
+	 * hot-reloads without disturbing work.
+	 */
+	private _installPromptHmrListener(): void {
+		const ctx = (globalThis as any).__rlmCordisContext;
+		if (!ctx?.on) return;
+		try {
+			ctx.on("rlm/prompt-changed", () => {
+				// Invalidate the cached system prompt options — will rebuild
+				// on the next access. Don't interrupt any in-flight work.
+				this._baseSystemPromptOptions = undefined as any;
+				console.error("[rlm] HMR: system prompt invalidated, will rebuild on next turn");
+
+				// Update the context variable immediately so the TUI shows
+				// the new prompt even before the next turn.
+				try {
+					const ctxProxy = (globalThis as any).__rlmContextProxy;
+					if (ctxProxy) {
+						// Force rebuild for the variable update.
+						const prompt = this.systemPrompt;
+						if (prompt) {
+							const summary = prompt.length > 500
+								? prompt.slice(0, 500) + `... (${prompt.length} chars total)`
+								: prompt;
+							if (ctxProxy.get("runtime.systemPrompt") !== undefined) {
+								ctxProxy.update("runtime.systemPrompt", summary);
+							}
+						}
+					}
+				} catch { /* best effort */ }
+			});
+
+			// Listen for refinement propagation from parent.
+			// Parent learns → children inherit. The refinement is applied
+			// to the child's context variables without interrupting work.
+			ctx.on("rlm/refinement-applied", (data: { id?: string; summary?: string; scope?: string; systemPrompt?: string }) => {
+				// Only inherit if this is a child session (depth > 0) or global scope.
+				if (this._rlmDepth === 0 && data?.scope !== "global") return;
+				try {
+					const ctxProxy = (globalThis as any).__rlmContextProxy;
+					if (ctxProxy && data?.systemPrompt) {
+						if (ctxProxy.get("runtime.systemPrompt") !== undefined) {
+							ctxProxy.update("runtime.systemPrompt", data.systemPrompt);
+						}
+					}
+					// Store the inherited refinement as a variable.
+					if (ctxProxy && data?.id) {
+						const varName = `refinement.inherited-${data.id}`;
+						if (ctxProxy.get(varName) === undefined) {
+							ctxProxy.set(varName, JSON.stringify({
+								summary: data.summary,
+								scope: data.scope,
+								inherited: true,
+							}), {
+								type: "decision",
+								mutable: false,
+								description: `Inherited refinement: ${data.summary?.slice(0, 60) ?? ""}`,
+								scope: "session",
+								source: "parent",
+							});
+						}
+					}
+					console.error(`[rlm] child inherited refinement: ${data?.summary?.slice(0, 60) ?? ""}`);
+				} catch { /* best effort */ }
+			});
+		} catch { /* best effort */ }
 	}
 
 	private _installAgentTurnHook(): void {
@@ -8569,6 +8695,8 @@ export class AgentSession {
 			if (refinementAuditAppendError) throw refinementAuditAppendError.error;
 			this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
 			this.agent.state.systemPrompt = this._baseSystemPrompt;
+			// Update context variable + propagate refinement to children.
+			this._propagateRefinementToContext(this._baseSystemPrompt, result);
 			try {
 				this._emit({ type: "refine_complete", result });
 			} catch {
