@@ -174,6 +174,7 @@ import { AgentMessageComponent } from "./components/agent-message.js";
 import { ArminComponent } from "./components/armin.js";
 import { AssistantMessageComponent } from "./components/assistant-message.js";
 import { BashExecutionComponent } from "./components/bash-execution.js";
+import { ContextVariableComponent } from "./components/context-variable.js";
 import { BorderedLoader } from "./components/bordered-loader.js";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.js";
 import { type FullPaneOverlayOptions, showFullPaneOverlay } from "./components/centered-overlay.js";
@@ -3572,6 +3573,61 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	/** Track which context vars we've already rendered inline to avoid duplicates. */
+	private _renderedContextVars: Set<string> = new Set();
+
+	/**
+	 * Render context variables inline in the chat flow — as first-class
+	 * elements like user prompts, tool calls, and assistant turns.
+	 * Only renders NEW or UPDATED vars since the last call.
+	 */
+	private renderContextVarsInline(): void {
+		const ctxProxy = (globalThis as any).__rlmContextProxy;
+		if (!ctxProxy) return;
+		try {
+			const allVars = ctxProxy.list() as string[];
+			if (!allVars || allVars.length === 0) return;
+
+			// Get the epoch to detect changes.
+			const ctxService = (globalThis as any).__rlmContext;
+			const epoch = ctxService?.getEpoch?.() ?? 0;
+
+			// Only render vars we haven't shown yet, or that changed (epoch bumped).
+			const newOrUpdated = allVars.filter((name: string) => {
+				return !this._renderedContextVars.has(name);
+			});
+
+			if (newOrUpdated.length === 0) return;
+
+			// Sort by namespace for clean grouping.
+			newOrUpdated.sort();
+
+			// Add a spacer before the vars if there's already content.
+			if (this.chatContainer.children.length > 0) {
+				this.chatContainer.addChild(new Spacer(1));
+			}
+
+			// Render each new/updated variable inline.
+			for (const name of newOrUpdated) {
+				try {
+					const meta = ctxProxy.meta(name);
+					const value = ctxProxy.get(name);
+					if (value === undefined || value === null) continue;
+
+					const component = new ContextVariableComponent(name, value, {
+						mutable: meta?.mutable,
+						type: meta?.type,
+						scope: meta?.scope,
+						source: meta?.source,
+						description: meta?.description,
+					});
+					this.chatContainer.addChild(component);
+					this._renderedContextVars.add(name);
+				} catch { /* best effort */ }
+			}
+		} catch { /* best effort */ }
+	}
+
 	private renderRecap(): void {
 		if (!this.recapContainer) return;
 		this.recapContainer.clear();
@@ -3586,37 +3642,12 @@ export class InteractiveMode {
 			this.recapContainer.addChild(new TruncatedText(theme.fg("dim", `Recap: ${recap}`), 1, 0));
 		}
 
-		// Render plugin-registered TUI components (context panel, etc).
-		// These are registered by plugins via @rlm/tui service.
-		// Ultra-lightweight: collapsed = 1 line, expanded = full detail (Ctrl+O).
-		// When a plugin is hot-swapped, its components disappear automatically.
+		// Context variables are now rendered INLINE in the chat flow as
+		// first-class elements — like user prompts, tool calls, assistant
+		// turns. No separate collapsed panel. See renderContextVarsInline().
+		// Status bar items from TUI plugins still update here.
 		const tuiService = (globalThis as any).__rlmTui;
 		if (tuiService) {
-			// Render inline components (context panel).
-			const components = tuiService.getComponents();
-			for (const comp of components) {
-				try {
-					const isExpanded = comp.isExpanded?.() ?? false;
-					const lines = comp.renderer({ width: this.ui.terminal.columns, cwd: this.getCurrentCwd(), expanded: isExpanded });
-					if (lines && lines.length > 0) {
-						this.recapContainer.addChild(new Spacer(1));
-						if (isExpanded) {
-							// Expanded: bordered box with full detail.
-							this.recapContainer.addChild(new Text(theme.fg("accent", `┌ vars (${lines.length})`), 1, 0));
-							for (const line of lines) {
-								this.recapContainer.addChild(new Text(theme.fg("accent", line), 1, 0));
-							}
-							this.recapContainer.addChild(new Text(theme.fg("accent", "└ (Ctrl+O to collapse)"), 1, 0));
-						} else {
-							// Collapsed: 1-2 lines, no values, ultra-compact.
-							for (const line of lines) {
-								this.recapContainer.addChild(new Text(theme.fg("accent", line), 1, 0));
-							}
-						}
-					}
-				} catch {}
-			}
-			// Update status bar items (ultra-compact, single line).
 			const statusItems = tuiService.getStatusBarItems();
 			for (const item of statusItems) {
 				try {
@@ -5584,6 +5615,9 @@ export class InteractiveMode {
 					}
 					this.streamingComponent = undefined;
 					this.streamingMessage = undefined;
+					// Render context vars inline in the chat flow — first-class
+					// elements like user prompts, tool calls, assistant turns.
+					this.renderContextVarsInline();
 					this.footer.invalidate();
 				}
 				this.ui.requestRender();

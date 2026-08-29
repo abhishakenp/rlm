@@ -17,6 +17,7 @@ export {
 } from "./configuration-menu.js";
 export { CustomEditor } from "./custom-editor.js";
 export { CustomMessageComponent } from "./custom-message.js";
+export { ContextVariableComponent, ContextVariableGroupComponent } from "./context-variable.js";
 export { DaxnutsComponent } from "./daxnuts.js";
 export { type RenderDiffOptions, renderDiff } from "./diff.js";
 export { DynamicBorder } from "./dynamic-border.js";
