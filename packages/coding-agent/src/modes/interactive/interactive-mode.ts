@@ -3579,38 +3579,35 @@ export class InteractiveMode {
 	/**
 	 * Render context variables inline in the chat flow — as first-class
 	 * elements like user prompts, tool calls, and assistant turns.
-	 * Only renders NEW or UPDATED vars since the last call.
+	 * Only renders NEW vars since the last call, in creation order
+	 * (which reflects LLM input order: system → user → thinking → assistant → tools).
 	 */
 	private renderContextVarsInline(): void {
 		const ctxProxy = (globalThis as any).__rlmContextProxy;
 		if (!ctxProxy) return;
 		try {
+			// Get all vars with metadata, sorted by createdAt (insertion order).
 			const allVars = ctxProxy.list() as string[];
 			if (!allVars || allVars.length === 0) return;
 
-			// Get the epoch to detect changes.
-			const ctxService = (globalThis as any).__rlmContext;
-			const epoch = ctxService?.getEpoch?.() ?? 0;
+			// Filter to vars we haven't rendered yet.
+			const newVars = allVars.filter((name: string) => !this._renderedContextVars.has(name));
+			if (newVars.length === 0) return;
 
-			// Only render vars we haven't shown yet, or that changed (epoch bumped).
-			const newOrUpdated = allVars.filter((name: string) => {
-				return !this._renderedContextVars.has(name);
-			});
-
-			if (newOrUpdated.length === 0) return;
-
-			// Sort by namespace for clean grouping.
-			newOrUpdated.sort();
+			// Sort by createdAt — preserves LLM input order.
+			const withMeta = newVars.map((name: string) => {
+				const meta = ctxProxy.meta(name);
+				return { name, meta, createdAt: meta?.createdAt ?? 0 };
+			}).sort((a: any, b: any) => a.createdAt - b.createdAt);
 
 			// Add a spacer before the vars if there's already content.
 			if (this.chatContainer.children.length > 0) {
 				this.chatContainer.addChild(new Spacer(1));
 			}
 
-			// Render each new/updated variable inline.
-			for (const name of newOrUpdated) {
+			// Render each new variable inline in creation order.
+			for (const { name, meta } of withMeta) {
 				try {
-					const meta = ctxProxy.meta(name);
 					const value = ctxProxy.get(name);
 					if (value === undefined || value === null) continue;
 
@@ -5556,6 +5553,8 @@ export class InteractiveMode {
 					this.ui.requestRender();
 				} else if (event.message.role === "user") {
 					this.addMessageToChat(event.message);
+					// Render user prompt var inline — it's context that goes to LLM.
+					this.renderContextVarsInline();
 					this.ui.requestRender();
 				} else if (event.message.role === "assistant") {
 					this.startAssistantStreamingMessage(event.message);
@@ -5655,6 +5654,8 @@ export class InteractiveMode {
 					component.updateResult({ ...event.result, isError: event.isError });
 					this.pendingTools.delete(event.toolCallId);
 					this.startedToolCalls.delete(event.toolCallId);
+					// Render tool result var inline — it's context that goes to LLM.
+					this.renderContextVarsInline();
 					this.ui.requestRender();
 				}
 				break;
@@ -6646,6 +6647,10 @@ export class InteractiveMode {
 		this.setSessionHasMessages(context.messages.length > 0);
 		this.applyConnectionStateSnapshot(state);
 		this.restoreTurnStartFromMessages(context.messages);
+		// Render system prompt + runtime vars FIRST — they go into the LLM
+		// before any user message. Correct sequence: system → user → thinking
+		// → assistant → tools. Vars appear inline as they're created.
+		this.renderContextVarsInline();
 		await this.renderSessionContext(context, {
 			updateFooter: true,
 			populateHistory: true,

@@ -390,7 +390,7 @@ export class CodeCellComponent implements Component {
 		const code = this.state.code.trimEnd();
 		const isBashCell = parseCodeBashCell(code) !== undefined;
 		const preview = previewCodeCode(code);
-		const languageLabel = isBashCell && preview.language !== "bash" ? `bash · ${preview.language}` : preview.language;
+		const languageLabel = preview.language;
 		const parts = [`${this.marker(details)} ${theme.fg("muted", languageLabel)}`];
 
 		if (preview.text) {
