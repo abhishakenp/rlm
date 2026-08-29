@@ -93,6 +93,7 @@ export class ContextVariableComponent implements Component {
 	invalidate(): void {}
 
 	render(width: number): string[] {
+		this._lastWidth = width;
 		const mutable = this.options.mutable ?? false;
 		const kind = mutable ? "let" : "const";
 		const type = this.options.type ?? typeof this.value;
@@ -138,8 +139,16 @@ export class ContextVariableComponent implements Component {
 	}
 
 	get height(): number {
-		return this._expanded ? 3 : 1;
+		// Compute actual height from render output so expanded vars
+		// with many value lines don't get truncated by a hardcoded value.
+		if (!this._expanded) return 1;
+		// Cache last render width for height computation.
+		// Default to a reasonable width if render hasn't been called.
+		const w = this._lastWidth ?? 80;
+		return this.render(w).length;
 	}
+
+	private _lastWidth: number = 80;
 }
 
 /**

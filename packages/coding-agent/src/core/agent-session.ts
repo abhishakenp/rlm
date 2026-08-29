@@ -1467,6 +1467,11 @@ export class AgentSession {
 					description: "Shell command used as bare JS — must use ! or %%bash prefix",
 				},
 				{
+					key: "python-in-js",
+					test: /^\s*(def |print\(|import |from |elif |#.*print\(|f"|f'|None\b|True\b|False\b|self\.|__init__|__name__)/,
+					description: "Python code written in JS kernel — write to file and run with !python instead",
+				},
+				{
 					key: "top-level-return",
 					test: /^return\s/,
 					description: "Top-level return in code tool — assign to result and console.log instead",
@@ -1501,11 +1506,17 @@ export class AgentSession {
 		failedCode: string,
 		errorText: string,
 	): void {
-		// Build a refinement review directly — we know the fix.
+		// Build refinement instructions based on the error pattern.
+		const instructionsByPattern: Record<string, string> = {
+			"shell-as-js": `Create a prompt note: "Shell commands (ls, cat, grep, git, etc.) MUST be prefixed with ! or use %%bash in the code tool. Bare shell commands cause ReferenceError. Example: use !ls not ls." Also create a memory: "LLM attempted bare shell command as JS. Always use ! prefix."`,
+			"python-in-js": `Create a prompt note: "The code tool ONLY runs JavaScript. When user asks for Python code, write it to a file with fs.writeFileSync('solution.py', code) then run with !python solution.py. Never paste Python syntax (def, print(), import, f-strings) directly into the code tool." Also create a memory: "LLM wrote Python in JS kernel. Must write to file and run with !python."`,
+			"top-level-return": `Create a prompt note: "Do not use top-level return in the code tool. Assign the result to a variable and use console.log() to output it."`,
+		};
+
 		const review: AutoRefineReview = {
 			shouldRefine: true,
 			rationale: `Tool error pattern detected: ${description}. The LLM ran "${failedCode.slice(0, 60)}" which failed with: ${errorText.slice(0, 100)}. This must never repeat.`,
-			instructions: `Create a prompt note: "CRITICAL — Shell commands (ls, cat, grep, git, etc.) MUST be prefixed with ! or use %%bash in the code tool. Never run bare shell commands as JS — they cause ReferenceError. Example: use !ls not ls. Use !git status not git status." Also create a memory: "LLM attempted to run bare shell command as JS, causing ReferenceError. Always use ! prefix for shell commands."`,
+			instructions: instructionsByPattern[patternKey] ?? `Create a prompt note to prevent: ${description}`,
 		};
 
 		// Schedule the refinement to run after the current turn.

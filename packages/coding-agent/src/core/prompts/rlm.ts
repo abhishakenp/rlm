@@ -26,7 +26,9 @@ const SIMPLIFIED_TECHNICAL_ENGLISH_PROMPT = [
 ].join("\n");
 
 const CODE_CONTROL_PROMPT = [
-	"The `code` tool is the agent's long-lived notebook: a persistent JavaScript execution environment for reasoning, context management, state, tool orchestration, and recursive subcalls. Use it to keep intermediate variables, inspect and transform outputs, and write small helper functions.",
+	"The `code` tool is the agent's long-lived notebook: a persistent JavaScript execution environment for reasoning, context management, state, tool orchestration, and recursive subcalls. Use it to keep intermediate variables, inspect and transform outputs, and write small helper functions. The code tool ONLY executes JavaScript — it does not run Python, Ruby, or any other language directly.",
+	"",
+	"When the user asks for code in a non-JavaScript language (e.g. 'write binary search in Python'), write the code to a file using `fs.writeFileSync('solution.py', code)` then run it with `!python solution.py` or `%%bash\\npython solution.py`. Never paste Python/Ruby/etc syntax directly into the code tool — it will fail with a syntax error.",
 	"",
 	"MANDATORY: Use the code tool for ANY task that involves computation, file inspection, shell commands, variable inspection, context operations, or subagent spawning. Do not answer from memory when you can verify by running code. Do not describe what you would do — do it in the code tool and report the result.",
 	"",

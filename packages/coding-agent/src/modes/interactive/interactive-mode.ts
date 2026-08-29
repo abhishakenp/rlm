@@ -6707,6 +6707,10 @@ export class InteractiveMode {
 	private async rebuildChatFromMessages(): Promise<void> {
 		const context = await this.agentConnection.getSessionContext();
 		await this.renderSessionContext(context, { clearChat: true });
+		// Re-render context vars after chat rebuild — clearChat removed them.
+		// Reset the tracked set so all existing vars get re-added inline.
+		this._renderedContextVars.clear();
+		this.renderContextVarsInline();
 	}
 
 	private handleEscape(): void {
@@ -7365,6 +7369,9 @@ export class InteractiveMode {
 			activeHeader.setExpanded(this.toolOutputExpanded);
 		}
 		for (const child of this.chatContainer.children) {
+			// Context variables have their own expansion — don't toggle them
+			// with the global tool/message expansion keybindings.
+			if (child instanceof ContextVariableComponent) continue;
 			if (isExpandable(child)) {
 				child.setExpanded(this.expansionStateFor(child));
 			}

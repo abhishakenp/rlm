@@ -126,4 +126,14 @@ context.set("packages.firstThree", result);`;
 		// Should show a meaningful line, not a closing brace.
 		expect(result.text.length).toBeGreaterThan(2);
 	});
+
+	it("does not show # comment as preview (Python-style comment in JS)", () => {
+		const code = `# print(f"Index of {target} is {result}")
+const result = binarySearch(arr, target);
+console.log(result);`;
+		const result = previewJsCode(code);
+		expect(result.text).not.toContain("#");
+		expect(result.text).not.toBe("");
+		expect(result.text.length).toBeGreaterThan(2);
+	});
 });

@@ -256,6 +256,8 @@ export function previewBashCommand(command: string): CodePreview {
 function isSkippableJsLine(line: string): boolean {
 	const trimmed = line.trim();
 	if (!trimmed || JS_COMMENT_PATTERN.test(trimmed)) return true;
+	// Skip Python-style # comments (not valid JS at top level).
+	if (/^#/.test(trimmed)) return true;
 	// Skip lines that are just braces/brackets/semicolons.
 	if (/^[}\])`;]+$/.test(trimmed)) return true;
 	return false;
