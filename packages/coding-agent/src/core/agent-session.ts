@@ -1489,37 +1489,86 @@ export class AgentSession {
 	/** Derive a context variable name from the tool name and args. */
 	private _deriveContextVarName(toolName: string, args: Record<string, unknown>): string | undefined {
 		if (toolName === "code") {
-			// For code tool, try to infer from the code content.
 			const code = typeof args?.code === "string" ? args.code : "";
-			// If the code runs a shell command, use the command name.
+			// Shell command via execSync/!command
 			const cmdMatch = code.match(/(?:execSync|exec)\(['"]([^'"]+)/);
 			if (cmdMatch) {
 				const cmd = cmdMatch[1].trim();
 				const cmdName = cmd.split(/\s+/)[0];
-				// e.g. "uptime" → "system.uptime", "ls" → "files.ls"
 				if (cmdName === "uptime") return "system.resources";
-				if (cmdName === "ls" || cmdName === "find") return "project.files";
-				if (cmdName === "cat" || cmdName === "head" || cmdName === "tail") return "file.contents";
-				if (cmdName === "grep" || cmdName === "rg") return "search.results";
-				if (cmdName === "git") return "git.status";
-				if (cmdName === "npm" || cmdName === "bun") return "project.deps";
+				if (cmdName === "ls" || cmdName === "find") {
+					// Try to get the dir name for more meaningful var name
+					const dirMatch = cmd.match(/(?:ls|find)\s+(\S+)/);
+					if (dirMatch) {
+						const dir = this._toRelativePath(dirMatch[1]).replace(/[\/\.]/g, ".");
+						return `files.${dir.replace(/^\.+/, "")}`;
+					}
+					return "project.files";
+				}
+				if (cmdName === "cat" || cmdName === "head" || cmdName === "tail") {
+					const fileMatch = cmd.match(/(?:cat|head|tail)\s+(\S+)/);
+					if (fileMatch) {
+						const fname = this._pathToVarName(fileMatch[1]);
+						return `file.${fname}`;
+					}
+					return "file.contents";
+				}
+				if (cmdName === "grep" || cmdName === "rg") {
+					const patternMatch = cmd.match(/(?:grep|rg)\s+(?:['"]([^'"]+)['"]|(\S+))/);
+					if (patternMatch) {
+						const pattern = (patternMatch[1] ?? patternMatch[2] ?? "search").replace(/[^a-zA-Z0-9]/g, "");
+						return `search.${pattern.slice(0, 20)}`;
+					}
+					return "search.results";
+				}
+				if (cmdName === "git") {
+					const subCmd = cmd.split(/\s+/)[1];
+					return `git.${subCmd ?? "status"}`;
+				}
+				if (cmdName === "npm" || cmdName === "bun") {
+					const subCmd = cmd.split(/\s+/)[1];
+					return `deps.${subCmd ?? "list"}`;
+				}
 				return `cmd.${cmdName}`;
 			}
-			// If the code reads a file, use file.<name>.
+			// readFileSync('path')
 			const readMatch = code.match(/readFileSync?\(['"]([^'"]+)/);
 			if (readMatch) {
-				const fname = readMatch[1].split("/").pop()?.replace(/\.\w+$/, "") ?? "file";
+				const fname = this._pathToVarName(readMatch[1]);
 				return `file.${fname}`;
 			}
-			// If the code does a directory listing.
-			if (code.includes("readdirSync") || code.includes("readdir")) {
-				return "project.files";
+			// readdirSync('path')
+			const readdirMatch = code.match(/readdir(?:Sync)?\(['"]([^'"]+)/);
+			if (readdirMatch) {
+				const dirname = this._pathToVarName(readdirMatch[1]);
+				return `files.${dirname}`;
 			}
-			// Default for code tool — don't capture if we can't infer a name.
+			// context.set('name', ...) — the model is explicitly setting a var
+			const ctxSetMatch = code.match(/context\.set\(['"]([^'"]+)['"]/);
+			if (ctxSetMatch) return undefined; // model is handling it
 			return undefined;
 		}
-		// For other tools, use the tool name.
 		return `tool.${toolName}`;
+	}
+
+	/** Convert a file path to a meaningful variable name component. */
+	private _pathToVarName(path: string): string {
+		const relative = this._toRelativePath(path);
+		const basename = relative.split("/").pop() ?? "file";
+		return basename.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9]/g, "-").toLowerCase();
+	}
+
+	/** Convert absolute path to relative/~/ path. */
+	private _toRelativePath(absPath: string): string {
+		const home = process.env.HOME ?? process.env.HOMEPATH ?? "";
+		if (home && absPath.startsWith(home)) {
+			return "~" + absPath.slice(home.length);
+		}
+		const cwd = process.cwd();
+		if (absPath.startsWith(cwd + "/")) {
+			return "." + absPath.slice(cwd.length);
+		}
+		return absPath;
 	}
 
 	private _installAgentContinuationHook(): void {

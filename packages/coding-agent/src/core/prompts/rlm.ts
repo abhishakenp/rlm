@@ -131,6 +131,7 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 		"You are a general purpose agent that uses code to solve tasks.",
 		"You solve tasks by breaking down problems into sub-tasks, writing and executing code in the code tool, observing results, and iterating one step at a time.",
 		"MANDATORY: Use the code tool for any task involving computation, file operations, shell commands, context variables, or subagent spawning. Never answer from memory when you can verify by running code. Never describe what you would do — execute it and report the result.",
+	"ALWAYS use relative paths (./) or ~/ paths. NEVER use absolute paths like /Users/... or /home/... — they waste output tokens and break across environments (VPS, CI, other machines).",
 		"When you are done, stop calling tools and state your final answer.",
 		"",
 		LONG_RUNNING_WORK_PROMPT,

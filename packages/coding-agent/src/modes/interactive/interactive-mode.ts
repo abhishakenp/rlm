@@ -3588,7 +3588,7 @@ export class InteractiveMode {
 
 		// Render plugin-registered TUI components (context panel, etc).
 		// These are registered by plugins via @rlm/tui service.
-		// Ultra-lightweight: each component returns a few lines of text.
+		// Ultra-lightweight: collapsed = 1 line, expanded = full detail (Ctrl+O).
 		// When a plugin is hot-swapped, its components disappear automatically.
 		const tuiService = (globalThis as any).__rlmTui;
 		if (tuiService) {
@@ -3596,14 +3596,23 @@ export class InteractiveMode {
 			const components = tuiService.getComponents();
 			for (const comp of components) {
 				try {
-					const lines = comp.renderer({ width: this.ui.terminal.columns, cwd: this.getCurrentCwd() });
+					const isExpanded = comp.isExpanded?.() ?? false;
+					const lines = comp.renderer({ width: this.ui.terminal.columns, cwd: this.getCurrentCwd(), expanded: isExpanded });
 					if (lines && lines.length > 0) {
 						this.recapContainer.addChild(new Spacer(1));
-						this.recapContainer.addChild(new Text(theme.fg("accent", `┌ vars (${lines.length})`), 1, 0));
-						for (const line of lines) {
-							this.recapContainer.addChild(new Text(theme.fg("accent", line), 1, 0));
+						if (isExpanded) {
+							// Expanded: bordered box with full detail.
+							this.recapContainer.addChild(new Text(theme.fg("accent", `┌ vars (${lines.length})`), 1, 0));
+							for (const line of lines) {
+								this.recapContainer.addChild(new Text(theme.fg("accent", line), 1, 0));
+							}
+							this.recapContainer.addChild(new Text(theme.fg("accent", "└ (Ctrl+O to collapse)"), 1, 0));
+						} else {
+							// Collapsed: 1-2 lines, no values, ultra-compact.
+							for (const line of lines) {
+								this.recapContainer.addChild(new Text(theme.fg("accent", line), 1, 0));
+							}
 						}
-						this.recapContainer.addChild(new Text(theme.fg("accent", "└"), 1, 0));
 					}
 				} catch {}
 			}

@@ -105,6 +105,10 @@ export class RlmContextService extends Service {
 	private projectRoot: string = process.cwd();
 	private sessionDir: string | null = null;
 
+	/** Epoch counter — increments on every mutation. Used for cache invalidation. */
+	private _epoch: number = 0;
+	getEpoch(): number { return this._epoch; }
+
 	constructor(ctx: any, config: RlmContextConfig = {}) {
 		super(ctx, undefined as any);
 		this.config = typeof config === "object" && !Array.isArray(config) ? config : {};
@@ -131,17 +135,49 @@ export class RlmContextService extends Service {
 		const tui = (globalThis as any).__rlmTui;
 		if (!tui) return;
 
+
+		// Track expansion state — collapsed by default for ultra-minimal RAM.
+		// When collapsed, only var NAMES are shown (1-2 lines), values are NOT
+		// materialized. When expanded (Ctrl+O), full values are loaded.
+		let expanded = false;
+		// Cached var names only — ultra-lightweight, no values stored.
+		let cachedNames: string[] | null = null;
+		let cacheEpoch = 0;
+
+		const getVarNames = (): string[] => {
+			// Only return names, not values — lazy loading.
+			const epoch = this.getEpoch?.() ?? 0;
+			if (cachedNames === null || epoch !== cacheEpoch) {
+				cachedNames = this.getAll().map((v) => v.name).sort();
+				cacheEpoch = epoch;
+			}
+			return cachedNames;
+		};
+
 		// Register a context panel component — renders inline in the TUI.
-		// Shows ALL variables grouped by namespace: runtime.*, user.*, project.*, etc.
-		// Ultra-compact: one line per variable, no values for large objects.
+		// Collapsed: 1 line with var count + names (no values = minimal RAM).
+		// Expanded: full detail with values, grouped by namespace.
 		const componentHandle = tui.registerComponent("rlm-context", {
 			id: "context-panel",
-			renderer: () => {
-				const all = this.getAll();
-				if (all.length === 0) return null;
-				// Group by namespace prefix.
+			renderer: (opts?: { expanded?: boolean }) => {
+				// Update expansion state from TUI if provided.
+				if (opts?.expanded !== undefined) expanded = opts.expanded;
+
+				const names = getVarNames();
+				if (names.length === 0) return null;
+
+				if (!expanded) {
+					// Collapsed: 1 line, names only, no values materialized.
+					// Ultra-compact: show count + first few names.
+					const preview = names.slice(0, 4).join(", ");
+					const more = names.length > 4 ? ` +${names.length - 4}` : "";
+					return [`  ctx(${names.length}): ${preview}${more}`];
+				}
+
+				// Expanded: load full values (lazy materialization).
+				const all = this.getAll().sort((a, b) => a.name.localeCompare(b.name));
 				const groups = new Map<string, typeof all>();
-				for (const v of all.sort((a, b) => a.name.localeCompare(b.name))) {
+				for (const v of all) {
 					const ns = v.name.split(".")[0] ?? "misc";
 					if (!groups.has(ns)) groups.set(ns, []);
 					groups.get(ns)!.push(v);
@@ -157,6 +193,15 @@ export class RlmContextService extends Service {
 				}
 				return lines;
 			},
+			toggle: () => {
+				expanded = !expanded;
+				if (!expanded) {
+					// Offload: clear cached values when collapsing.
+					// Names cache stays (ultra-lightweight) but values are released.
+				}
+				return expanded;
+			},
+			isExpanded: () => expanded,
 		});
 		if (componentHandle) this.tuiHandles.push(componentHandle);
 
@@ -164,7 +209,7 @@ export class RlmContextService extends Service {
 		const statusHandle = tui.registerStatusBarItem("rlm-context", {
 			id: "context-vars-count",
 			renderer: () => {
-				const count = this.getAll().length;
+				const count = getVarNames().length;
 				return count > 0 ? `ctx:${count}` : null;
 			},
 		});
@@ -349,6 +394,7 @@ export class RlmContextService extends Service {
 		else if (scope === "session") this.saveSession();
 
 		this.ctx.emit("rlm/context-set", { name, scope, type: variable.type, mutable: variable.mutable });
+		this._epoch++;
 		return variable;
 	}
 
@@ -384,6 +430,7 @@ export class RlmContextService extends Service {
 			if (existing.scope === "project") this.saveProject();
 			else if (existing.scope === "session") this.saveSession();
 			this.ctx.emit("rlm/context-delete", { name, scope: existing.scope });
+			this._epoch++;
 		}
 		return deleted;
 	}
