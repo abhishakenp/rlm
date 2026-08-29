@@ -1,75 +1,125 @@
 /**
  * @rlm/tui — terminal UI service.
  *
- * Wraps prime-agent's TUI as a Cordis Service.
- * Owns the terminal rendering surface — differential rendering, input,
- * scrollback, and the agent conversation view.
+ * Clean Cordis Service. No prime-agent code.
+ * Owns terminal rendering: raw mode, input, ANSI output.
  *
- * On disposal (HMR): stops rendering, restores terminal state.
- * On reload: re-initializes the TUI with a fresh instance.
+ * Reference: DSH's dsh-host-frontend-static is a plugin that injects
+ * webServer and serves static files. rlm-tui is the terminal analog —
+ * it injects rlmAgent and renders the conversation to stdout.
  *
- * This is the direct analog of DSH's dsh-host-frontend-static (web GUI plugin).
- * In DSH the web GUI is a plugin; in rlm the TUI is a plugin.
+ * On disposal (HMR): restores terminal state (raw mode off, alternate screen off).
+ * On reload: re-initializes with fresh state.
  */
 import { Service } from "@deepseek-ai/cordis";
+import { createInterface } from "node:readline";
+import { stdin, stdout } from "node:process";
 
 export interface RlmTuiConfig {
-	/** Theme name (default: system). */
-	theme?: string;
-	/** Max output chars per cell (default: 65536). */
-	maxOutputChars?: number;
+	/** Show tool calls. */
+	verbose?: boolean;
 }
 
 export class RlmTuiService extends Service {
-	static inject = ["rlmAgent"];
+	static inject = ["rlmAgent", "rlmLlm"] as const;
+	static provide = "rlmTui" as const;
 
 	declare config: RlmTuiConfig;
-	private tui: any = null;
+	private active = false;
 
 	constructor(ctx: any, config: RlmTuiConfig = {}) {
-		super(ctx, config);
+		super(ctx, "rlmTui");
 		this.config = config;
 	}
 
-	get [Symbol.name]() {
-		return "rlmTui";
-	}
-
 	async [Service.init]() {
-		this.ctx.logger?.info("rlm-tui: TUI service ready (lazy init)");
-		// TUI is created on interactive start, not at boot.
+		this.ctx.logger?.info("rlm-tui: terminal UI ready");
 	}
 
-	/** Start the TUI. */
-	async start(opts: any = {}) {
-		if (this.tui) return this.tui;
-		const { TUI } = await import("@earendil-works/pi-tui");
-		this.tui = new TUI({
-			maxOutputChars: this.config.maxOutputChars ?? 65536,
-			...opts,
+	/** Run a one-shot prompt in print mode (no interactive UI). */
+	async runPrint(prompt: string): Promise<string> {
+		const agent = this.ctx.get("rlmAgent");
+		if (!agent) throw new Error("rlm-tui: rlmAgent service not available");
+
+		let output = "";
+		const result = await agent.run({
+			prompt,
+			onContent: (delta) => {
+				process.stdout.write(delta);
+				output += delta;
+			},
+			onToolCall: (name, args) => {
+				if (this.config.verbose) {
+					process.stderr.write(`\n[tool: ${name}]\n`);
+				}
+			},
+			onToolResult: (name, result) => {
+				if (this.config.verbose) {
+					process.stderr.write(`\n[tool result: ${name} → ${result.slice(0, 200)}]\n`);
+				}
+			},
 		});
-		return this.tui;
+		process.stdout.write("\n");
+		return result;
 	}
 
-	/** Get the running TUI instance (if any). */
-	get instance() {
-		return this.tui;
-	}
+	/** Start the interactive TUI loop. */
+	async startInteractive(): Promise<void> {
+		const agent = this.ctx.get("rlmAgent");
+		if (!agent) throw new Error("rlm-tui: rlmAgent service not available");
 
-	/** Stop the TUI and restore terminal state. */
-	async stop(opts?: any) {
-		if (this.tui) {
-			await this.tui.stop(opts);
-			this.tui = null;
+		this.active = true;
+		const rl = createInterface({ input: stdin, output: stdout });
+
+		process.stdout.write("rlm — self-evolving terminal agent\n");
+		process.stdout.write("Type your message. Ctrl+C to exit.\n\n");
+
+		const prompt = (): Promise<string> =>
+			new Promise((resolve) => {
+				rl.question("you> ", (answer) => resolve(answer));
+			});
+
+		while (this.active) {
+			const input = await prompt();
+			if (!input.trim() || !this.active) continue;
+			if (input.trim() === "exit" || input.trim() === "quit") break;
+
+			process.stdout.write("rlm> ");
+			try {
+				await agent.run({
+					prompt: input,
+					onContent: (delta) => process.stdout.write(delta),
+					onToolCall: (name) => process.stdout.write(`\n  [tool: ${name}]`),
+					onToolResult: (name, result) => {
+						if (this.config.verbose) {
+							process.stdout.write(`\n  [result: ${result.slice(0, 200)}]`);
+						}
+					},
+				});
+			} catch (error) {
+				process.stdout.write(`\nError: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			process.stdout.write("\n\n");
 		}
+
+		rl.close();
+		this.active = false;
+	}
+
+	stop(): void {
+		this.active = false;
 	}
 
 	async [Symbol.dispose]() {
-		await this.stop();
+		this.active = false;
+		// Restore terminal state if needed.
+		if (process.stdin.isTTY) {
+			process.stdin.setRawMode(false);
+		}
 	}
 }
 
 export default RlmTuiService;
 export const name = "rlm-tui";
-export const inject = ["rlmAgent"] as const;
+export const inject = ["rlmAgent", "rlmLlm"] as const;
 export { RlmTuiService as RlmTui };

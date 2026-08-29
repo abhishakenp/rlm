@@ -1,66 +1,94 @@
 /**
- * @rlm/session — session management service.
+ * @rlm/session — JSONL session persistence.
  *
- * Wraps prime-agent's SessionManager as a Cordis Service.
- * Manages on-disk session files under ~/.prime/agent/sessions.
+ * Clean Cordis Service. No prime-agent code.
+ * Stores conversation sessions as JSONL files on disk.
+ *
+ * Reference: DSH's dsh-session-persistence-jsonl stores sessions as JSONL.
+ * rlm-session does the same — one JSONL file per session.
  */
 import { Service } from "@deepseek-ai/cordis";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { existsSync, mkdirSync, appendFileSync, readFileSync, readdirSync } from "node:fs";
 
 export interface RlmSessionConfig {
-	/** Working directory. */
-	cwd?: string;
-	/** Session directory (default: ~/.prime/agent/sessions). */
 	sessionDir?: string;
 }
 
+export interface SessionEntry {
+	role: "user" | "assistant" | "system" | "tool";
+	content: string;
+	timestamp: number;
+	toolCalls?: any[];
+	toolCallId?: string;
+}
+
 export class RlmSessionService extends Service {
-	static inject = [];
+	static inject = [] as const;
+	static provide = "rlmSession" as const;
 
 	declare config: RlmSessionConfig;
-	private manager: any = null;
+	private sessionDir: string;
+	private currentSession: string | null = null;
 
 	constructor(ctx: any, config: RlmSessionConfig = {}) {
-		super(ctx, config);
+		super(ctx, "rlmSession");
 		this.config = config;
-	}
-
-	get [Symbol.name]() {
-		return "rlmSession";
+		this.sessionDir = config.sessionDir ?? join(homedir(), ".rlm", "sessions");
 	}
 
 	async [Service.init]() {
-		const { SessionManager } = await import("@earendil-works/pi-coding-agent");
-		const cwd = this.config.cwd ?? process.cwd();
-		const sessionDir = this.config.sessionDir ?? join(homedir(), ".prime", "agent", "sessions");
-		this.manager = SessionManager.create(cwd, sessionDir);
-		this.ctx.logger?.info("rlm-session: SessionManager ready");
+		if (!existsSync(this.sessionDir)) {
+			mkdirSync(this.sessionDir, { recursive: true });
+		}
+		this.ctx.logger?.info("rlm-session: session persistence ready");
 	}
 
-	/** Get the underlying SessionManager. */
-	get manager_() {
-		return this.manager;
+	/** Start a new session. Returns the session ID. */
+	newSession(): string {
+		const id = `session-${Date.now()}`;
+		const path = join(this.sessionDir, `${id}.jsonl`);
+		appendFileSync(path, ""); // Create empty file.
+		this.currentSession = id;
+		return id;
 	}
 
-	/** Create a new session. */
-	newSession(opts?: any) {
-		return this.manager?.newSession(opts);
+	/** Append an entry to the current session. */
+	append(entry: SessionEntry): void {
+		if (!this.currentSession) {
+			this.newSession();
+		}
+		const path = join(this.sessionDir, `${this.currentSession}.jsonl`);
+		appendFileSync(path, JSON.stringify(entry) + "\n", "utf-8");
 	}
 
-	/** Continue the previous session. */
-	continueSession() {
-		return this.manager?.continueSession();
+	/** Load a session by ID. */
+	load(sessionId: string): SessionEntry[] {
+		const path = join(this.sessionDir, `${sessionId}.jsonl`);
+		if (!existsSync(path)) return [];
+		return readFileSync(path, "utf-8")
+			.trim()
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => JSON.parse(line));
 	}
 
-	/** Resume a session by path or id. */
-	resumeSession(pathOrId: string) {
-		return this.manager?.resumeSession(pathOrId);
+	/** List all sessions. */
+	list(): string[] {
+		if (!existsSync(this.sessionDir)) return [];
+		return readdirSync(this.sessionDir)
+			.filter((f) => f.endsWith(".jsonl"))
+			.map((f) => f.replace(/\.jsonl$/, ""));
+	}
+
+	/** Get the current session ID. */
+	get current() {
+		return this.currentSession;
 	}
 
 	async [Symbol.dispose]() {
-		// SessionManager is stateless beyond file paths — nothing to dispose.
-		this.manager = null;
+		// All writes are immediate.
 	}
 }
 

@@ -1,37 +1,34 @@
 /**
- * @rlm/extensions — extension system service.
+ * @rlm/extensions — extension system.
  *
- * Wraps prime-agent's extension loader/runner as a Cordis Service.
- * Discovers, loads, and manages extensions from ~/.prime/agent/extensions.
- * Each extension can register tools, commands, flags, shortcuts, message
- * renderers, and event handlers.
+ * Clean Cordis Service. No prime-agent code.
+ * Discovers and loads extensions from ~/.rlm/extensions.
+ * Extensions can register tools, commands, and event handlers.
+ *
+ * Reference: DSH has dsh-tool-* and dsh-command-* as separate plugins.
+ * rlm-extensions is simpler — extensions are JS/TS files that export
+ * a register function receiving the Cordis context.
  */
 import { Service } from "@deepseek-ai/cordis";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 
 export interface RlmExtensionsConfig {
-	/** Extensions directory (default: ~/.prime/agent/extensions). */
 	extensionsDir?: string;
-	/** Whether to disable extension discovery. */
 	disabled?: boolean;
 }
 
 export class RlmExtensionsService extends Service {
-	static inject = ["rlmAgent"];
+	static inject = ["rlmAgent"] as const;
+	static provide = "rlmExtensions" as const;
 
 	declare config: RlmExtensionsConfig;
-	private extensions: any[] = [];
-	private runtime: any = null;
+	private loaded: Map<string, any> = new Map();
 
 	constructor(ctx: any, config: RlmExtensionsConfig = {}) {
-		super(ctx, config);
+		super(ctx, "rlmExtensions");
 		this.config = config;
-	}
-
-	get [Symbol.name]() {
-		return "rlmExtensions";
 	}
 
 	async [Service.init]() {
@@ -39,28 +36,39 @@ export class RlmExtensionsService extends Service {
 			this.ctx.logger?.info("rlm-extensions: disabled");
 			return;
 		}
-		const dir = this.config.extensionsDir ?? join(homedir(), ".prime", "agent", "extensions");
+		const dir = this.config.extensionsDir ?? join(homedir(), ".rlm", "extensions");
 		if (!existsSync(dir)) {
-			this.ctx.logger?.info("rlm-extensions: no extensions dir, skipping");
+			this.ctx.logger?.info("rlm-extensions: no extensions dir");
 			return;
 		}
-		this.ctx.logger?.info("rlm-extensions: extension service ready");
+		await this.loadAll(dir);
 	}
 
-	/** Discover and load extensions. */
-	async loadExtensions() {
-		const { discoverAndLoadExtensions } = await import("@earendil-works/pi-coding-agent");
-		return discoverAndLoadExtensions;
+	private async loadAll(dir: string): Promise<void> {
+		for (const entry of readdirSync(dir)) {
+			const path = join(dir, entry);
+			if (!statSync(path).isFile()) continue;
+			if (!entry.endsWith(".mjs") && !entry.endsWith(".js")) continue;
+			try {
+				const mod = await import(path);
+				const register = mod.default ?? mod.register;
+				if (typeof register === "function") {
+					register(this.ctx);
+					this.loaded.set(entry, mod);
+					this.ctx.logger?.info(`rlm-extensions: loaded ${entry}`);
+				}
+			} catch (error) {
+				this.ctx.logger?.warn(`rlm-extensions: failed to load ${entry}: ${error}`);
+			}
+		}
 	}
 
-	/** Get loaded extensions. */
 	get list() {
-		return this.extensions;
+		return [...this.loaded.keys()];
 	}
 
 	async [Symbol.dispose]() {
-		this.extensions = [];
-		this.runtime = null;
+		this.loaded.clear();
 	}
 }
 

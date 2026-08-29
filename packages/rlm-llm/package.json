@@ -1,7 +1,7 @@
 {
   "name": "@rlm/llm",
-  "version": "0.8.0",
-  "description": "rlm LLM service — wraps pi-ai stream functions, registers omniroute provider",
+  "version": "0.1.0",
+  "description": "rlm LLM service — OmniRoute-only OpenAI-compatible client",
   "type": "module",
   "main": "./src/index.ts",
   "exports": {
@@ -10,7 +10,6 @@
     }
   },
   "dependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@earendil-works/pi-ai": "^0.8.0"
+    "@deepseek-ai/cordis": "^4.0.1"
   }
 }

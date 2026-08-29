@@ -1,83 +1,92 @@
 # rlm
 
-Self-evolving terminal agent — **modified Cordis host + prime-agent brain, DSH philosophy**.
+Self-evolving terminal agent. Modified Cordis host, DeepSeek Harness philosophy, no prime-agent code.
 
-`rlm` is a modified [Cordis](https://github.com/deepseek-ai/cordis) plugin host that decomposes a prime-agent-derived agent runtime into small, hot-swappable Cordis plugins. The architecture follows [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) philosophy: everything is a plugin, the core is just the host, HMR reloads any plugin at runtime.
-
-## What you get
-
-- **Cordis plugin host** — modified to run prime-agent subsystems as Services
-- **12 plugins** — llm, session, kernel, agent, subagent, refinement, wound, reflect, memory, extensions, skills, tui (each a separate package under `packages/rlm-*`)
-- **Terminal UI** — prime-agent's full differential-rendering TUI, wrapped as a Cordis plugin (the direct analog of DSH's `dsh-host-frontend-static` web GUI plugin)
-- **IPython / RLM kernel** — real ZMQ + Jupyter comm protocol, wrapped as a Cordis plugin
-- **Recursive subagents** — real `AgentSession` child sessions via `rlm.run`, with depth limits and inter-agent messaging
-- **Model-backed refinement** — LLM-proposed edits to persistent prompt notes, memories, skills, and subagent specs
-- **Memory & harness state** — on-disk persistent store under `~/.prime/agent`
-- **Wound detection & self-healing** — failure-triggered refinement proposes fixes
-- **Hot reload / hot swap** — Cordis HMR watches plugin source dirs and reloads plugins in-process
-- **Foreground-only** — no daemon survives the terminal. Session/memory/harness data persists on disk.
+Everything is a plugin. The host boots Cordis, loads plugins from `config/profile.yml`, and runs a terminal UI. HMR watches plugin source dirs — any plugin can be hot-swapped at runtime without restarting the process.
 
 ## Architecture
 
-```
-cordis-shell.mjs          ← Modified Cordis host (loader + timer + include + HMR)
-  └─ mounts config/profile.yml  ← Entry-list composing all plugins
-       ├─ @rlm/llm         ← pi-ai stream/complete, omniroute provider
-       ├─ @rlm/session     ← SessionManager
-       ├─ @rlm/kernel      ← KernelManager (IPython/ZMQ)
-       ├─ @rlm/memory      ← Persistent memory on disk
-       ├─ @rlm/agent       ← AgentSession (injects: session, llm)
-       ├─ @rlm/subagent    ← Recursive subagent spawn (injects: agent, kernel)
-       ├─ @rlm/refinement  ← refineHarness (injects: agent, llm)
-       ├─ @rlm/wound       ← Failure detection (injects: agent)
-       ├─ @rlm/reflect     ← Periodic reflection (injects: agent, memory)
-       ├─ @rlm/extensions  ← Extension loader (injects: agent)
-       ├─ @rlm/skills      ← Skill discovery (injects: agent)
-       └─ @rlm/tui         ← TUI renderer (injects: agent)
-  └─ spawns → packages/coding-agent/dist/bundle/cli.js  ← agent brain
-```
+- **Host** (`cordis-shell.mjs`): boots Cordis Context, installs Loader + Timer, starts HMR watcher, loads plugins from profile YAML, runs TUI or print mode.
+- **Plugins** (`packages/rlm-*`): each is a Cordis `Service` that owns a runtime subsystem.
 
-The Cordis host owns process lifecycle and HMR; the plugin tree owns all agent capabilities. Each plugin is a Cordis `Service` with dependency injection. HMR can reload any plugin at runtime — that's the hot-swap primitive.
+### Plugins
+
+| Plugin | Service | Owns |
+|--------|---------|------|
+| `@rlm/llm` | `rlmLlm` | OmniRoute OpenAI-compatible client (stream + complete) |
+| `@rlm/agent` | `rlmAgent` | Agent loop (system prompt → model → tools → repeat) |
+| `@rlm/subagent` | `rlmSubagent` | Recursive subagent spawning with depth limits |
+| `@rlm/session` | `rlmSession` | JSONL session persistence on disk |
+| `@rlm/memory` | `rlmMemory` | Persistent key-value memory on disk |
+| `@rlm/kernel` | `rlmKernel` | IPython/ZMQ kernel (Jupyter protocol 5.3) |
+| `@rlm/tui` | `rlmTui` | Terminal UI (interactive + print mode) |
+| `@rlm/wound` | `rlmWound` | Failure detection / self-healing triggers |
+| `@rlm/refinement` | `rlmRefinement` | LLM-backed self-improvement proposals |
+| `@rlm/reflect` | `rlmReflect` | Periodic reflection / self-learning |
+| `@rlm/extensions` | `rlmExtensions` | Extension loader from `~/.rlm/extensions` |
+| `@rlm/skills` | `rlmSkills` | Skill discovery from `~/.rlm/skills` |
+
+### Data paths
+
+- Sessions: `~/.rlm/sessions/`
+- Memory: `~/.rlm/memory/`
+- Extensions: `~/.rlm/extensions/`
+- Skills: `~/.rlm/skills/`
+- Kernel connections: `~/.rlm/kernel-connections/`
 
 ## Install
 
 ```bash
-npm install -g .          # installs the `rlm` binary
+npm install -g .
 ```
 
-## Build
+## Usage
 
 ```bash
-npm install
-npm run build             # builds tui → ai → agent → coding-agent in order
+# Interactive TUI
+rlm
+
+# Print mode (one-shot, exit)
+rlm -p "Say only the word OK"
+
+# Verbose (show tool calls)
+rlm --verbose
+
+# Help
+rlm --help
 ```
 
-## Run
+## HMR
 
-```bash
-rlm                       # interactive TUI
-rlm -p "message"          # print mode
-rlm --help                # full options
-```
+Plugin source files are watched. Editing any `packages/rlm-*/src/index.ts` while the host is running triggers:
 
-## Project layout
+1. File change detected by chokidar
+2. Old plugin service disposed (via Cordis fiber disposal)
+3. Module re-imported with cache-busting query param
+4. New plugin instance registered with same config
+5. Agent continues using the new service
 
-- `packages/rlm-*` — Cordis plugins (each wraps a prime-agent subsystem as a Service)
-- `packages/tui` — terminal UI library
-- `packages/ai` — model provider abstractions
-- `packages/agent` — agent core loop
-- `packages/coding-agent` — CLI, kernel, refinement, sessions, extensions
-- `prime-agent-runtime` — Python `rlm` module loaded into the IPython kernel
-- `cordis-shell.mjs` — modified Cordis lifecycle host
-- `config/profile.yml` — plugin composition (entry-list YAML)
-- `cordis-scaffold/` — earlier Cordis-only scaffold (kept for reference)
+No restart required. The process stays foreground — exits when terminal closes.
 
-## Notes
+## Model
 
-- The `rlm` binary is the only installed command. There is no `pi` binary.
-- Internal workspace package names (`@earendil-works/pi-*`) and env var prefixes (`PRIME_AGENT_*`) are preserved from the upstream codebase for compatibility. The config dir remains `~/.prime/agent`.
-- The Python kernel venv is auto-provisioned under `~/.prime/agent/kernel-venv` on first run (requires `uv`).
-- OmniRoute (`localhost:20128`) is the default model provider, configured via `~/.prime/agent/models.json`.
+OmniRoute-only. Default endpoint: `http://localhost:20128/v1`. Default model: `auto/best-free`. Configured in `config/profile.yml`.
+
+## Recursive subagents
+
+The `subagent` tool is registered with `rlmAgent` by `rlmSubagent`. The LLM can call it to spawn a child agent loop with incremented depth. Depth limit (default 10) prevents infinite recursion.
+
+## Self-healing
+
+- `rlmWound` monitors `rlm/agent-error` events. After N failures on the same plugin, emits `rlm/wound-detected`.
+- `rlmRefinement` listens for wounds and asks the LLM to propose a fix.
+- `rlmReflect` runs every N turns, consolidating insights into persistent memory.
+
+## References
+
+- **Cordis** (`@deepseek-ai/cordis`): plugin runtime and dependency injection.
+- **DeepSeek Harness (DSH)**: architectural philosophy — the host is minimal, every capability is a plugin.
+- **Prime-agent**: behavioral reference for TUI, recursive subagents, memory, refinement, and reflection concepts. No prime-agent code is used.
 
 ## License
 

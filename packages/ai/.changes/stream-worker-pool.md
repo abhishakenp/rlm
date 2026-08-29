@@ -1,1 +1,0 @@
-- Added optional worker_threads stream offload (PI_STREAM_WORKERS=1) to move SSE parsing and JSON.parse off the main event loop for concurrent RLM subagent streams.

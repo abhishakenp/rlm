@@ -1,69 +1,84 @@
 /**
- * @rlm/refinement — LLM-backed refinement service.
+ * @rlm/refinement — LLM-backed self-improvement.
  *
- * Wraps prime-agent's refineHarness as a Cordis Service.
- * Drives LLM-proposed edits to persistent prompt notes, memories, skills,
- * and subagent specs. Subscribes to failure/wound events to trigger
- * self-improvement.
+ * When wounds are detected, proposes improvements to system prompt,
+ * tools, or memory. Subscribes to rlm/wound-detected events.
  *
- * On disposal (HMR): flushes pending proposals.
- * On reload: swaps the refinement strategy mid-session.
+ * Reference: prime-agent's refinement engine — LLM-proposed edits to
+ * persistent state. DSH's dsh-compaction for context management.
  */
 import { Service } from "@deepseek-ai/cordis";
 
 export interface RlmRefinementConfig {
-	/** Max proposals per refinement cycle (default: 5). */
 	maxProposals?: number;
-	/** Whether to auto-apply proposals (default: false — requires approval). */
 	autoApply?: boolean;
 }
 
 export class RlmRefinementService extends Service {
-	static inject = ["rlmAgent", "rlmLlm"];
+	static inject = ["rlmAgent", "rlmLlm", "rlmMemory"] as const;
+	static provide = "rlmRefinement" as const;
 
 	declare config: RlmRefinementConfig;
-	private pendingProposals: any[] = [];
+	private proposals: any[] = [];
 
 	constructor(ctx: any, config: RlmRefinementConfig = {}) {
-		super(ctx, config);
+		super(ctx, "rlmRefinement");
 		this.config = config;
 	}
 
-	get [Symbol.name]() {
-		return "rlmRefinement";
-	}
-
 	async [Service.init]() {
-		this.ctx.logger?.info("rlm-refinement: refinement service ready");
-		// Subscribe to wound/failure events from rlm-wound
-		this.ctx.on("rlm/wound-detected", (event: any) => {
-			this.triggerRefinement(event).catch((error) => {
-				this.ctx.logger?.warn(`rlm-refinement: auto-refine failed: ${error}`);
-			});
+		this.ctx.on("rlm/wound-detected", (event: { plugin: string; count: number; event: any }) => {
+			this.triggerRefinement(event).catch((e) =>
+				this.ctx.logger?.warn(`rlm-refinement: ${e}`),
+			);
 		});
+		this.ctx.logger?.info("rlm-refinement: self-improvement ready");
 	}
 
-	/** Trigger a refinement cycle for a failure event. */
-	async triggerRefinement(event: any) {
-		const { refineHarness } = await import("@earendil-works/pi-coding-agent");
-		this.ctx.logger?.info(`rlm-refinement: triggered for ${event?.kind ?? "unknown"}`);
-		// refineHarness is called with the harness state + event context.
-		// The actual call depends on the prime-agent refinement API shape.
-		return refineHarness;
+	async triggerRefinement(event: { plugin: string; count: number; event: any }): Promise<void> {
+		const llm = this.ctx.get("rlmLlm");
+		const memory = this.ctx.get("rlmMemory");
+		if (!llm) return;
+
+		this.ctx.logger?.info(`rlm-refinement: triggered for ${event.plugin} (${event.count} wounds)`);
+
+		const proposal = await llm.ask(
+			`Plugin "${event.plugin}" has failed ${event.count} times. ` +
+			`Last error: ${JSON.stringify(event.event)}. ` +
+			`Propose a concrete fix in 1-2 sentences. Be specific.`,
+			{ temperature: 0.3 },
+		);
+
+		this.proposals.push({
+			timestamp: Date.now(),
+			plugin: event.plugin,
+			proposal,
+			event: event.event,
+		});
+
+		if (this.proposals.length > (this.config.maxProposals ?? 5)) {
+			this.proposals.shift();
+		}
+
+		if (this.config.autoApply && memory) {
+			const existing = memory.get("refinement-proposals") ?? [];
+			existing.push({ timestamp: Date.now(), plugin: event.plugin, proposal });
+			memory.set("refinement-proposals", existing);
+		}
+
+		this.ctx.emit("rlm/refinement-proposed", { plugin: event.plugin, proposal });
 	}
 
-	/** Get pending proposals. */
-	get proposals() {
-		return this.pendingProposals;
+	get pendingProposals() {
+		return this.proposals;
 	}
 
 	async [Symbol.dispose]() {
-		// Flush pending proposals to disk before disposal.
-		this.pendingProposals = [];
+		this.proposals = [];
 	}
 }
 
 export default RlmRefinementService;
 export const name = "rlm-refinement";
-export const inject = ["rlmAgent", "rlmLlm"] as const;
+export const inject = ["rlmAgent", "rlmLlm", "rlmMemory"] as const;
 export { RlmRefinementService as RlmRefinement };

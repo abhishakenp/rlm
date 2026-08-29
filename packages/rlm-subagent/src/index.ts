@@ -1,78 +1,125 @@
 /**
  * @rlm/subagent — recursive subagent service.
  *
- * Wraps prime-agent's recursive subagent creation as a Cordis Service.
- * Depends on rlm-agent (for AgentSession) and rlm-kernel (for rlm.run).
- * Enforces rlmMaxDepth and manages child session lifecycle.
+ * Clean Cordis Service. No prime-agent code.
+ * Spawns child agent runs with depth enforcement.
  *
- * This is the recursion primitive: rlm.run creates a child AgentSession
- * with inherited runtime behavior and explicit depth metadata.
+ * Reference: DSH's dsh-subagent exposes a SubagentRuntime service.
+ * rlm-subagent does the same — spawns child agents via rlm-agent.run()
+ * with incremented depth. Depth limit prevents infinite recursion.
+ *
+ * The subagent tool is registered with rlm-agent so the LLM can call it.
  */
 import { Service } from "@deepseek-ai/cordis";
+import type { ToolDefinition, AgentRunContext } from "@rlm/agent";
 
 export interface RlmSubagentConfig {
-	/** Maximum recursion depth (default: 10). */
 	maxDepth?: number;
 }
 
 export class RlmSubagentService extends Service {
-	static inject = ["rlmAgent", "rlmKernel"];
+	static inject = ["rlmAgent"] as const;
+	static provide = "rlmSubagent" as const;
 
 	declare config: RlmSubagentConfig;
-	private activeChildren: Map<string, any> = new Map();
+	private activeChildren: Map<string, AbortController> = new Map();
 
 	constructor(ctx: any, config: RlmSubagentConfig = {}) {
-		super(ctx, config);
+		super(ctx, "rlmSubagent");
 		this.config = config;
 	}
 
-	get [Symbol.name]() {
-		return "rlmSubagent";
-	}
-
 	async [Service.init]() {
-		this.ctx.logger?.info(`rlm-subagent: recursive subagent service ready (maxDepth=${this.config.maxDepth ?? 10})`);
+		// Register the subagent tool with rlm-agent.
+		const agent = this.ctx.get("rlmAgent");
+		if (agent) {
+			agent.registerTool(this.getToolDefinition());
+		}
+		this.ctx.logger?.info(`rlm-subagent: recursive subagent ready (maxDepth=${this.config.maxDepth ?? 10})`);
 	}
 
-	/** Spawn a recursive child agent. */
+	private getToolDefinition(): ToolDefinition {
+		return {
+			name: "subagent",
+			description: `Spawn a recursive subagent to handle a subtask.
+The subagent runs its own agent loop with the same tools.
+Use this for complex subtasks that benefit from focused attention.
+The subagent inherits the current depth + 1.`,
+			parameters: {
+				type: "object",
+				properties: {
+					prompt: {
+						type: "string",
+						description: "The prompt for the subagent.",
+					},
+				},
+				required: ["prompt"],
+			},
+			execute: async (args: { prompt: string }, runCtx: AgentRunContext) => {
+				return this.spawn({
+					prompt: args.prompt,
+					depth: runCtx.depth + 1,
+					maxDepth: runCtx.maxDepth,
+					cwd: runCtx.cwd,
+				});
+			},
+		};
+	}
+
+	/** Spawn a recursive subagent. Returns the subagent's final response. */
 	async spawn(opts: {
 		prompt: string;
-		parentSession: any;
-		rlmDepth: number;
-		model?: any;
+		depth: number;
+		maxDepth?: number;
 		cwd?: string;
-	}) {
-		const maxDepth = this.config.maxDepth ?? 10;
-		if (opts.rlmDepth >= maxDepth) {
-			throw new Error(`rlm-subagent: max depth ${maxDepth} exceeded (current: ${opts.rlmDepth})`);
+	}): Promise<string> {
+		const maxDepth = opts.maxDepth ?? this.config.maxDepth ?? 10;
+		if (opts.depth >= maxDepth) {
+			return `subagent: max depth ${maxDepth} exceeded (current: ${opts.depth})`;
 		}
-		// The actual spawn uses AgentSession._createInlineRlmSubagentRuntime
-		// which creates a child SessionManager, Agent, and AgentSession.
-		this.ctx.logger?.info(`rlm-subagent: spawning child at depth ${opts.rlmDepth + 1}`);
-		// Return the prime-agent AgentSession class for the caller to construct.
-		const { AgentSession } = await import("@earendil-works/pi-coding-agent");
-		return AgentSession;
+
+		const childId = `child-${opts.depth}-${Date.now()}`;
+		const controller = new AbortController();
+		this.activeChildren.set(childId, controller);
+
+		this.ctx.logger?.info(`rlm-subagent: spawning ${childId} at depth ${opts.depth}`);
+		this.ctx.emit("rlm/subagent-spawn", { id: childId, depth: opts.depth, prompt: opts.prompt });
+
+		try {
+			const agent = this.ctx.get("rlmAgent");
+			if (!agent) throw new Error("rlm-subagent: rlmAgent service not available");
+
+			const result = await agent.run({
+				prompt: opts.prompt,
+				cwd: opts.cwd,
+				depth: opts.depth,
+				maxDepth,
+				abortSignal: controller.signal,
+				systemPrompt: `You are a recursive subagent of rlm (depth ${opts.depth}/${maxDepth}).
+Be concise. Complete the subtask and return the result.`,
+			});
+
+			this.ctx.emit("rlm/subagent-complete", { id: childId, depth: opts.depth, result });
+			return result;
+		} finally {
+			this.activeChildren.delete(childId);
+		}
 	}
 
-	/** Get active child sessions. */
-	get children() {
-		return this.activeChildren;
+	/** Cancel all active children. */
+	cancelAll() {
+		for (const [, controller] of this.activeChildren) {
+			controller.abort();
+		}
+		this.activeChildren.clear();
 	}
 
 	async [Symbol.dispose]() {
-		// Dispose all active child sessions.
-		for (const [id, child] of this.activeChildren) {
-			try {
-				if (child?.dispose) await child.dispose();
-			} catch {
-				// Best-effort cleanup.
-			}
-		}
-		this.activeChildren.clear();
+		this.cancelAll();
 	}
 }
 
 export default RlmSubagentService;
 export const name = "rlm-subagent";
-export const inject = ["rlmAgent", "rlmKernel"] as const;
+export const inject = ["rlmAgent"] as const;
 export { RlmSubagentService as RlmSubagent };

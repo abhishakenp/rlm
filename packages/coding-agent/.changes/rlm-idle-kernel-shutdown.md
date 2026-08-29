@@ -1,1 +1,0 @@
-- Added idle kernel shutdown for settled RLM child sessions (PI_KERNEL_IDLE_MS, default 5min) to free CPU and memory from retained-but-inactive subagent kernels.

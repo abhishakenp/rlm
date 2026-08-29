@@ -1,66 +1,64 @@
 /**
- * @rlm/reflect — reflection / self-learning service.
+ * @rlm/reflect — periodic reflection / self-learning.
  *
- * Periodically consolidates learning from recent sessions into persistent
- * memory. Subscribes to agent turn events; every N turns, triggers a
- * reflection cycle that writes insights to rlm-memory.
+ * Every N turns, consolidates recent session insights into persistent memory.
+ *
+ * Reference: prime-agent's reflection concept — periodic LLM-backed
+ * consolidation of learning into memory.
  */
 import { Service } from "@deepseek-ai/cordis";
 
 export interface RlmReflectConfig {
-	/** Turns between reflection cycles (default: 10). */
 	intervalTurns?: number;
 }
 
 export class RlmReflectService extends Service {
-	static inject = ["rlmAgent", "rlmMemory"];
+	static inject = ["rlmAgent", "rlmMemory", "rlmLlm"] as const;
+	static provide = "rlmReflect" as const;
 
 	declare config: RlmReflectConfig;
-	private turnCount: number = 0;
+	private turnCount = 0;
 
 	constructor(ctx: any, config: RlmReflectConfig = {}) {
-		super(ctx, config);
+		super(ctx, "rlmReflect");
 		this.config = config;
 	}
 
-	get [Symbol.name]() {
-		return "rlmReflect";
-	}
-
 	async [Service.init]() {
-		this.ctx.logger?.info(`rlm-reflect: reflection service ready (interval=${this.config.intervalTurns ?? 10})`);
-		// Subscribe to agent turn events.
 		this.ctx.on("rlm/agent-turn-end", () => {
-			this.tick();
+			this.turnCount++;
+			const interval = this.config.intervalTurns ?? 10;
+			if (this.turnCount >= interval) {
+				this.turnCount = 0;
+				this.reflect().catch((e) => this.ctx.logger?.warn(`rlm-reflect: ${e}`));
+			}
 		});
+		this.ctx.logger?.info(`rlm-reflect: reflection ready (interval=${this.config.intervalTurns ?? 10})`);
 	}
 
-	/** Increment turn counter and trigger reflection if needed. */
-	private tick() {
-		this.turnCount++;
-		const interval = this.config.intervalTurns ?? 10;
-		if (this.turnCount >= interval) {
-			this.turnCount = 0;
-			this.reflect().catch((error) => {
-				this.ctx.logger?.warn(`rlm-reflect: reflection failed: ${error}`);
-			});
-		}
-	}
+	private async reflect(): Promise<void> {
+		const llm = this.ctx.get("rlmLlm");
+		const memory = this.ctx.get("rlmMemory");
+		if (!llm || !memory) return;
 
-	/** Run a reflection cycle. */
-	private async reflect() {
 		this.ctx.logger?.info("rlm-reflect: starting reflection cycle");
-		// The reflection uses the LLM to consolidate recent session insights
-		// into persistent memory entries.
-		// Actual implementation delegates to prime-agent's reflection logic.
+		const existing = memory.get("reflections") ?? [];
+		const result = await llm.ask(
+			"Reflect on recent interactions. What patterns did you notice? " +
+			"What could be improved? Be concise (2-3 sentences).",
+			{ temperature: 0.7 },
+		);
+		existing.push({ timestamp: Date.now(), insight: result });
+		memory.set("reflections", existing);
+		this.ctx.logger?.info("rlm-reflect: stored reflection");
 	}
 
 	async [Symbol.dispose]() {
-		// Nothing to dispose — reflection is stateless.
+		// Stateless.
 	}
 }
 
 export default RlmReflectService;
 export const name = "rlm-reflect";
-export const inject = ["rlmAgent", "rlmMemory"] as const;
+export const inject = ["rlmAgent", "rlmMemory", "rlmLlm"] as const;
 export { RlmReflectService as RlmReflect };

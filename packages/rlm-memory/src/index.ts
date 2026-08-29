@@ -1,86 +1,73 @@
 /**
  * @rlm/memory — persistent memory service.
  *
- * Wraps prime-agent's memory/harness state as a Cordis Service.
- * Stores session memory, learning data, and harness state on disk.
+ * Clean Cordis Service. No prime-agent code.
+ * Stores key-value memories on disk as JSON files.
  * Survives process exit; loaded on next boot.
+ *
+ * Reference: DSH uses dsh-storage + dsh-session-persistence for state.
+ * rlm-memory is simpler — flat JSON files in ~/.rlm/memory/.
  */
 import { Service } from "@deepseek-ai/cordis";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync } from "node:fs";
 
 export interface RlmMemoryConfig {
-	/** Memory directory (default: ~/.prime/agent/memory). */
 	memoryDir?: string;
 }
 
 export class RlmMemoryService extends Service {
-	static inject = [];
+	static inject = [] as const;
+	static provide = "rlmMemory" as const;
 
 	declare config: RlmMemoryConfig;
 	private memoryDir: string;
 	private cache: Map<string, any> = new Map();
 
 	constructor(ctx: any, config: RlmMemoryConfig = {}) {
-		super(ctx, config);
+		super(ctx, "rlmMemory");
 		this.config = config;
-		this.memoryDir = config.memoryDir ?? join(homedir(), ".prime", "agent", "memory");
-	}
-
-	get [Symbol.name]() {
-		return "rlmMemory";
+		this.memoryDir = config.memoryDir ?? join(homedir(), ".rlm", "memory");
 	}
 
 	async [Service.init]() {
 		if (!existsSync(this.memoryDir)) {
 			mkdirSync(this.memoryDir, { recursive: true });
 		}
-		// Load all memories into cache.
 		try {
 			for (const file of readdirSync(this.memoryDir)) {
 				if (file.endsWith(".json")) {
 					const key = file.replace(/\.json$/, "");
-					const data = JSON.parse(readFileSync(join(this.memoryDir, file), "utf-8"));
-					this.cache.set(key, data);
+					this.cache.set(key, JSON.parse(readFileSync(join(this.memoryDir, file), "utf-8")));
 				}
 			}
 		} catch {
-			// Empty memory dir — fine.
+			// Empty memory dir.
 		}
 		this.ctx.logger?.info(`rlm-memory: loaded ${this.cache.size} memories`);
 	}
 
-	/** Get a memory by key. */
-	get(key: string) {
+	get(key: string): any {
 		return this.cache.get(key);
 	}
 
-	/** Set a memory by key (persists to disk). */
-	set(key: string, value: any) {
+	set(key: string, value: any): void {
 		this.cache.set(key, value);
 		writeFileSync(join(this.memoryDir, `${key}.json`), JSON.stringify(value, null, 2), "utf-8");
 	}
 
-	/** Delete a memory by key. */
-	delete(key: string) {
+	delete(key: string): void {
 		this.cache.delete(key);
-		const path = join(this.memoryDir, `${key}.json`);
-		try {
-			const { unlinkSync } = require("node:fs");
-			unlinkSync(path);
-		} catch {
-			// Already gone.
-		}
+		try { unlinkSync(join(this.memoryDir, `${key}.json`)); } catch { /* already gone */ }
 	}
 
-	/** List all memory keys. */
-	keys() {
+	keys(): string[] {
 		return [...this.cache.keys()];
 	}
 
 	async [Symbol.dispose]() {
-		// All writes are immediate — nothing to flush.
+		// All writes are immediate.
 	}
 }
 
@@ -89,4 +76,21 @@ export const name = "rlm-memory";
 export const inject = [] as const;
 export { RlmMemoryService as RlmMemory };
 
-// HMR test touch 1788018497057
+// HMR touch 1788020789499
+
+// HMR touch 1788020811020
+
+// HMR touch 1788020842209
+
+// HMR touch 1788020863995
+
+// chokidar touch 1788020887981
+
+// HMR touch 1788020909238
+
+// HMR touch 1788020961923
+
+// touch 1788021058677
+// HMR touch Sat Aug 29 22:17:46 +0545 2026
+// touch 1788021186836
+// HMR touch Sat Aug 29 22:18:32 +0545 2026

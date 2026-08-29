@@ -1,7 +1,7 @@
 {
   "name": "@rlm/agent",
-  "version": "0.8.0",
-  "description": "rlm agent service — Cordis plugin wrapping prime-agent agent",
+  "version": "0.1.0",
+  "description": "rlm agent service \u2014 agent loop, tool dispatch, model cycling",
   "type": "module",
   "main": "./src/index.ts",
   "exports": {
@@ -10,6 +10,7 @@
     }
   },
   "dependencies": {
-    "@deepseek-ai/cordis": "^4.0.1"
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@rlm/llm": "^0.1.0"
   }
 }
