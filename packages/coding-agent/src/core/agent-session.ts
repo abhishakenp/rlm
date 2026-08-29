@@ -4344,8 +4344,21 @@ export class AgentSession {
 			rlmParentAgent: this._rlmParentAgent,
 			harnessState: this._loadMergedHarnessState(),
 			genericMcpServers: this._mcpManager?.getEnabledGenericServers(),
+			contextSummary: this._getContextSummary(),
 		};
 		return buildSystemPrompt(this._baseSystemPromptOptions);
+	}
+
+	private _getContextSummary(): string | undefined {
+		const proxy = (globalThis as any).__rlmContextProxy;
+		if (!proxy) return undefined;
+		try {
+			const summary = proxy.summarize();
+			if (!summary || summary === "(no context variables)") return undefined;
+			return summary;
+		} catch {
+			return undefined;
+		}
 	}
 
 	private _refreshExtensionSystemPrompt(extensionPrompt: string, baseSnapshot: string): string {
@@ -4778,6 +4791,21 @@ export class AgentSession {
 	}
 
 	private async _prompt(text: string, options?: InternalPromptOptions): Promise<void> {
+		// Auto-capture the user prompt as a const context variable.
+		if (options?.internalPrompt !== true && (globalThis as any).__rlmContextProxy) {
+			try {
+				const ctx = (globalThis as any).__rlmContextProxy;
+				if (ctx.get("user.prompt") === undefined) {
+					ctx.set("user.prompt", text, {
+						type: "prompt",
+						mutable: false,
+						description: "The original user prompt for this session",
+						source: "user",
+						scope: "session",
+					});
+				}
+			} catch { /* best effort */ }
+		}
 		const resumeSuspendedInput = options?.resumeIfIdle !== false;
 		if (!this.isStreaming) {
 			if (resumeSuspendedInput) this._resumeSessionInputAdmission();

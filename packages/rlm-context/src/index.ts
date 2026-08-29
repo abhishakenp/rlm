@@ -1,36 +1,38 @@
 /**
  * @rlm/context — persistent typed variable registry for agent working memory.
  *
- * Cordis Service. Provides a 3-scope context registry:
+ * The prime-agent philosophy: everything the AI has is a variable.
+ * The user prompt is a const variable. Skills are variables. The system
+ * prompt is a variable. The model config is a variable. Everything is
+ * inspectable, transferable, and mutable (or immutable).
+ *
+ * 3 scopes:
  *   - project: survives all sessions, lives in .rlm/context.json
  *   - session: lives for one session, in session artifact dir
  *   - task:    lives for one subagent invocation, passed via rlm.spawn()
  *
- * Variables are typed so the agent knows how to use them:
- *   - path/paths: file system locations
- *   - string/number/boolean: scalars
- *   - object/array: structured data
- *   - pattern: regex/glob patterns
- *   - decision: architectural choices (immutable by default)
+ * const/let semantics:
+ *   - const: immutable after creation (e.g. user.prompt, architecture decisions)
+ *   - let:   mutable, can be updated (e.g. explored.files, current.task)
+ *
+ * Copy/move:
+ *   - context.copy(["auth.*"]) → returns snapshot, variables STAY in this scope (default)
+ *   - context.move(["auth.*"]) → returns snapshot AND deletes from this scope (explicit offload)
+ *   - rlm.spawn("task", { context: ["auth.*"] }) → copies matching vars to child's task scope
+ *   - Use move only when you're sure you won't need the context anymore
  *
  * The agent interacts via `context` in the code kernel:
- *   context.set("auth.files", [...], { type: "paths", mutable: true })
+ *   context.set("auth.files", [...], { type: "paths", let: true })
  *   context.get("auth.files")
  *   context.list("auth.*")
- *   context.delete("auth.files")
- *   context.send(childAgent, ["auth.*"])  // pass to subagent
- *
- * Persistence:
- *   - project scope: .rlm/context.json in project root
- *   - session scope: <session-dir>/context.json
- *   - task scope: in-memory only, passed via rlm.spawn()
+ *   context.copy(["auth.*"])  // snapshot for passing to subagent (non-destructive)
+ *   context.move(["auth.*"])  // transfer to subagent, lose locally (destructive)
  *
  * Hot-reloadable: part of the Cordis plugin system.
  */
 import { Service } from "@deepseek-ai/cordis";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir } from "node:os";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -45,33 +47,34 @@ export type ContextType =
 	| "path"
 	| "paths"
 	| "pattern"
-	| "decision";
+	| "decision"
+	| "prompt"
+	| "skill"
+	| "model"
+	| "tool"
+	| "config";
 
 export interface ContextVariable {
-	/** Variable name, dot-namespaced (e.g. "auth.files", "db.schema"). */
 	name: string;
-	/** The value — any JSON-serializable data. */
 	value: any;
-	/** Whether the agent can update this after creation. */
+	/** false = const (immutable), true = let (mutable). */
 	mutable: boolean;
-	/** Type hint for the agent. */
 	type: ContextType;
-	/** Human-readable description of what this variable represents. */
 	description?: string;
-	/** Who set this variable. */
-	source: "user" | "agent" | "discovery";
-	/** Timestamps. */
+	source: "user" | "agent" | "discovery" | "system";
 	createdAt: number;
 	updatedAt: number;
-	/** Scope this variable lives in. */
 	scope: ContextScope;
+	/** If true, this variable was moved from a parent scope. */
+	transferred?: boolean;
 }
 
 export interface ContextSetOptions {
+	/** false = const (immutable), true = let (mutable). Default: true unless type is "decision" or "prompt". */
 	mutable?: boolean;
 	type?: ContextType;
 	description?: string;
-	source?: "user" | "agent" | "discovery";
+	source?: "user" | "agent" | "discovery" | "system";
 }
 
 export interface ContextSnapshot {
@@ -80,39 +83,27 @@ export interface ContextSnapshot {
 		mutable: boolean;
 		type: ContextType;
 		description?: string;
-		source: "user" | "agent" | "discovery";
+		source: "user" | "agent" | "discovery" | "system";
 		createdAt: number;
 		updatedAt: number;
+		transferred?: boolean;
 	};
 }
 
 // ─── Context Registry ────────────────────────────────────────────────────────
 
-/**
- * RlmContextService — the context registry as a Cordis service.
- *
- * Other plugins (code tool, sdk, workflow) inject this service and use it
- * to read/write/share agent working memory.
- */
 export class RlmContextService extends Service {
 	static inject = [] as const;
 	static provide = "rlmContext" as const;
 
 	declare config: RlmContextConfig;
 
-	/** Project-scope variables — persisted to .rlm/context.json. */
 	private projectVars: Map<string, ContextVariable> = new Map();
-	/** Session-scope variables — persisted to session artifact dir. */
 	private sessionVars: Map<string, ContextVariable> = new Map();
-	/** Task-scope variables — in-memory only, passed to subagents. */
 	private taskVars: Map<string, ContextVariable> = new Map();
 
-	/** Project root for project-scope persistence. */
 	private projectRoot: string = process.cwd();
-	/** Session artifact dir for session-scope persistence. */
 	private sessionDir: string | null = null;
-	/** Whether project context has been loaded from disk. */
-	private projectLoaded: boolean = false;
 
 	constructor(ctx: any, config: RlmContextConfig = {}) {
 		super(ctx, undefined as any);
@@ -129,13 +120,11 @@ export class RlmContextService extends Service {
 
 	// ─── Project scope ────────────────────────────────────────────────────────
 
-	/** Set the project root and reload project context. */
 	setProjectRoot(root: string): void {
 		this.projectRoot = root;
 		this.loadProject();
 	}
 
-	/** Load project-scope variables from .rlm/context.json. */
 	private loadProject(): void {
 		const file = this.getProjectContextFile();
 		if (!existsSync(file)) return;
@@ -155,7 +144,6 @@ export class RlmContextService extends Service {
 					scope: "project",
 				});
 			}
-			this.projectLoaded = true;
 		} catch (error) {
 			this.ctx.logger?.warn(
 				`rlm-context: failed to load project context: ${error instanceof Error ? error.message : error}`,
@@ -163,22 +151,13 @@ export class RlmContextService extends Service {
 		}
 	}
 
-	/** Save project-scope variables to .rlm/context.json. */
 	saveProject(): void {
 		const file = this.getProjectContextFile();
 		const dir = dirname(file);
 		if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 		const snapshot: ContextSnapshot = {};
 		for (const [name, v] of this.projectVars) {
-			snapshot[name] = {
-				value: v.value,
-				mutable: v.mutable,
-				type: v.type,
-				description: v.description,
-				source: v.source,
-				createdAt: v.createdAt,
-				updatedAt: v.updatedAt,
-			};
+			snapshot[name] = toSnapshotEntry(v);
 		}
 		writeFileSync(file, JSON.stringify(snapshot, null, 2), "utf8");
 	}
@@ -189,13 +168,11 @@ export class RlmContextService extends Service {
 
 	// ─── Session scope ────────────────────────────────────────────────────────
 
-	/** Set the session artifact dir and load session context. */
 	setSessionDir(dir: string): void {
 		this.sessionDir = dir;
 		this.loadSession();
 	}
 
-	/** Load session-scope variables from <session-dir>/context.json. */
 	private loadSession(): void {
 		if (!this.sessionDir) return;
 		const file = join(this.sessionDir, "context.json");
@@ -223,29 +200,19 @@ export class RlmContextService extends Service {
 		}
 	}
 
-	/** Save session-scope variables to <session-dir>/context.json. */
 	saveSession(): void {
 		if (!this.sessionDir) return;
 		const file = join(this.sessionDir, "context.json");
 		if (!existsSync(this.sessionDir)) mkdirSync(this.sessionDir, { recursive: true });
 		const snapshot: ContextSnapshot = {};
 		for (const [name, v] of this.sessionVars) {
-			snapshot[name] = {
-				value: v.value,
-				mutable: v.mutable,
-				type: v.type,
-				description: v.description,
-				source: v.source,
-				createdAt: v.createdAt,
-				updatedAt: v.updatedAt,
-			};
+			snapshot[name] = toSnapshotEntry(v);
 		}
 		writeFileSync(file, JSON.stringify(snapshot, null, 2), "utf8");
 	}
 
 	// ─── Task scope ───────────────────────────────────────────────────────────
 
-	/** Load task-scope variables from a snapshot (received from parent). */
 	loadTaskSnapshot(snapshot: ContextSnapshot): void {
 		this.taskVars.clear();
 		for (const [name, v] of Object.entries(snapshot)) {
@@ -259,50 +226,26 @@ export class RlmContextService extends Service {
 				createdAt: v.createdAt ?? Date.now(),
 				updatedAt: v.updatedAt ?? Date.now(),
 				scope: "task",
+				transferred: true,
 			});
 		}
 	}
 
-	/** Export a snapshot of variables matching patterns for passing to subagent. */
-	toSnapshot(patterns?: string[]): ContextSnapshot {
-		const snapshot: ContextSnapshot = {};
-		const all = this.getAll();
-		for (const v of all) {
-			if (!patterns || patterns.length === 0 || matchesAny(v.name, patterns)) {
-				snapshot[v.name] = {
-					value: v.value,
-					mutable: v.mutable,
-					type: v.type,
-					description: v.description,
-					source: v.source,
-					createdAt: v.createdAt,
-					updatedAt: v.updatedAt,
-				};
-			}
-		}
-		return snapshot;
-	}
-
 	// ─── Core API ─────────────────────────────────────────────────────────────
 
-	/**
-	 * Get a variable by name. Searches task → session → project scope.
-	 * Returns undefined if not found.
-	 */
 	get(name: string): ContextVariable | undefined {
 		return this.taskVars.get(name) ?? this.sessionVars.get(name) ?? this.projectVars.get(name);
 	}
 
-	/**
-	 * Get a variable's value. Shorthand for `context.get(name)?.value`.
-	 */
 	value(name: string): any {
 		return this.get(name)?.value;
 	}
 
 	/**
 	 * Set a variable. Default scope is "session".
-	 * Throws if the variable exists and is immutable.
+	 * const semantics: if mutable is false (or type is "decision"/"prompt"), the variable
+	 * cannot be updated or deleted after creation.
+	 * let semantics: if mutable is true (default), the variable can be updated.
 	 */
 	set(
 		name: string,
@@ -311,15 +254,23 @@ export class RlmContextService extends Service {
 	): ContextVariable {
 		const scope = opts.scope ?? "session";
 		const existing = this.get(name);
+
+		// Enforce const — cannot reassign an immutable variable.
 		if (existing && !existing.mutable) {
-			throw new Error(`context: "${name}" is immutable (set as ${existing.type})`);
+			throw new Error(`context: "${name}" is const (immutable, set as ${existing.type})`);
 		}
+
+		// Determine mutability:
+		// - Explicit opts.mutable takes priority
+		// - "decision" and "prompt" types default to const (immutable)
+		// - Everything else defaults to let (mutable)
+		const isConst = opts.mutable === false || (!opts.mutable && (opts.type === "decision" || opts.type === "prompt"));
 
 		const now = Date.now();
 		const variable: ContextVariable = {
 			name,
 			value,
-			mutable: opts.mutable ?? (opts.type === "decision" ? false : true),
+			mutable: !isConst,
 			type: opts.type ?? inferType(value),
 			description: opts.description,
 			source: opts.source ?? "agent",
@@ -331,22 +282,38 @@ export class RlmContextService extends Service {
 		const map = this.getScopeMap(scope);
 		map.set(name, variable);
 
-		// Auto-persist project and session scopes.
 		if (scope === "project") this.saveProject();
 		else if (scope === "session") this.saveSession();
 
-		this.ctx.emit("rlm/context-set", { name, scope, type: variable.type });
+		this.ctx.emit("rlm/context-set", { name, scope, type: variable.type, mutable: variable.mutable });
 		return variable;
 	}
 
 	/**
-	 * Delete a variable. Returns true if it existed.
+	 * Update a let (mutable) variable. Throws if the variable is const.
+	 * This is an alias for set() but semantically clearer for updates.
+	 */
+	update(name: string, value: any): ContextVariable {
+		const existing = this.get(name);
+		if (!existing) throw new Error(`context: "${name}" does not exist`);
+		if (!existing.mutable) throw new Error(`context: "${name}" is const and cannot be updated`);
+		return this.set(name, value, {
+			mutable: true,
+			type: existing.type,
+			description: existing.description,
+			source: existing.source,
+			scope: existing.scope,
+		});
+	}
+
+	/**
+	 * Delete a variable. Throws if the variable is const.
 	 */
 	delete(name: string): boolean {
 		const existing = this.get(name);
 		if (!existing) return false;
 		if (!existing.mutable) {
-			throw new Error(`context: "${name}" is immutable and cannot be deleted`);
+			throw new Error(`context: "${name}" is const and cannot be deleted`);
 		}
 		const map = this.getScopeMap(existing.scope);
 		const deleted = map.delete(name);
@@ -358,20 +325,12 @@ export class RlmContextService extends Service {
 		return deleted;
 	}
 
-	/**
-	 * List all variable names matching a glob pattern (e.g. "auth.*").
-	 * If no pattern, lists all variables.
-	 */
 	list(pattern?: string): string[] {
 		const all = this.getAll();
 		if (!pattern) return all.map((v) => v.name);
 		return all.filter((v) => matchesPattern(v.name, pattern)).map((v) => v.name);
 	}
 
-	/**
-	 * Get all variables (task + session + project, merged).
-	 * Task scope overrides session, session overrides project.
-	 */
 	getAll(): ContextVariable[] {
 		const merged = new Map<string, ContextVariable>();
 		for (const v of this.projectVars.values()) merged.set(v.name, v);
@@ -381,31 +340,146 @@ export class RlmContextService extends Service {
 	}
 
 	/**
+	 * Export a snapshot of variables matching patterns.
+	 * This is a COPY — the variables stay in this scope.
+	 */
+	toSnapshot(patterns?: string[]): ContextSnapshot {
+		const snapshot: ContextSnapshot = {};
+		const all = this.getAll();
+		for (const v of all) {
+			if (!patterns || patterns.length === 0 || matchesAny(v.name, patterns)) {
+				snapshot[v.name] = toSnapshotEntry(v);
+			}
+		}
+		return snapshot;
+	}
+
+	/**
+	 * MOVE variables matching patterns — returns a snapshot AND deletes them from this scope.
+	 * This is a TRANSFER: the parent loses the variables, the child receives them.
+	 *
+	 * Use this when a parent delegates work to a child and doesn't need the context anymore.
+	 * The child gets full ownership.
+	 *
+	 * Cannot move const variables (they're locked to their scope).
+	 * Exception: const variables in task scope CAN be moved (they were transferred in).
+	 */
+	move(patterns: string[]): ContextSnapshot {
+		const snapshot: ContextSnapshot = {};
+		const all = this.getAll();
+		for (const v of all) {
+			if (matchesAny(v.name, patterns)) {
+				// Can't move const variables from project/session scope.
+				if (!v.mutable && v.scope !== "task") {
+					// Copy const variables instead of moving them.
+					snapshot[v.name] = toSnapshotEntry(v);
+					continue;
+				}
+				snapshot[v.name] = toSnapshotEntry(v);
+				// Delete from the source scope.
+				const map = this.getScopeMap(v.scope);
+				map.delete(v.name);
+				if (v.scope === "project") this.saveProject();
+				else if (v.scope === "session") this.saveSession();
+			}
+		}
+		this.ctx.emit("rlm/context-move", { patterns, count: Object.keys(snapshot).length });
+		return snapshot;
+	}
+
+	/**
 	 * Get a summary of all context for the system prompt.
-	 * Returns a formatted string the agent can read.
 	 */
 	summarize(): string {
 		const all = this.getAll();
-		if (all.length === 0) return "(no context variables set)";
+		if (all.length === 0) return "(no context variables)";
 		const lines: string[] = [];
 		for (const v of all.sort((a, b) => a.name.localeCompare(b.name))) {
 			const valueStr = formatValue(v.value);
-			const mutStr = v.mutable ? "" : " [immutable]";
+			const kind = v.mutable ? "let" : "const";
 			const descStr = v.description ? ` — ${v.description}` : "";
-			lines.push(`  ${v.name} (${v.type}, ${v.scope}${mutStr})${descStr}: ${valueStr}`);
+			const transferStr = v.transferred ? " [transferred]" : "";
+			lines.push(`  ${v.name} (${kind} ${v.type}, ${v.scope}${transferStr})${descStr}: ${valueStr}`);
 		}
 		return lines.join("\n");
 	}
 
 	/**
-	 * Clear all variables in a scope.
+	 * Clear all variables in a scope. Cannot clear project/session if they contain const vars.
+	 * Use force=true to clear everything including const vars.
 	 */
-	clear(scope: ContextScope): void {
+	clear(scope: ContextScope, force?: boolean): void {
 		const map = this.getScopeMap(scope);
+		if (!force) {
+			for (const v of map.values()) {
+				if (!v.mutable) throw new Error(`context: cannot clear ${scope} scope — "${v.name}" is const`);
+			}
+		}
 		map.clear();
 		if (scope === "project") this.saveProject();
 		else if (scope === "session") this.saveSession();
 		this.ctx.emit("rlm/context-clear", { scope });
+	}
+
+	/**
+	 * Auto-capture the user prompt as a const variable.
+	 * Called by the agent session when a new prompt arrives.
+	 */
+	captureUserPrompt(prompt: string): void {
+		this.set("user.prompt", prompt, {
+			type: "prompt",
+			mutable: false,
+			description: "The original user prompt for this session",
+			source: "user",
+			scope: "session",
+		});
+	}
+
+	/**
+	 * Auto-capture session metadata as variables.
+	 */
+	captureSessionMeta(meta: {
+		model?: string;
+		cwd?: string;
+		tools?: string[];
+		depth?: number;
+	}): void {
+		if (meta.model) {
+			this.set("session.model", meta.model, {
+				type: "model",
+				mutable: false,
+				description: "Model used for this session",
+				source: "system",
+				scope: "session",
+			});
+		}
+		if (meta.cwd) {
+			this.set("session.cwd", meta.cwd, {
+				type: "path",
+				mutable: false,
+				description: "Working directory for this session",
+				source: "system",
+				scope: "session",
+			});
+		}
+		if (meta.tools) {
+			this.set("session.tools", meta.tools, {
+				type: "tool",
+				mutable: false,
+				description: "Tools available in this session",
+				source: "system",
+				scope: "session",
+			});
+		}
+		if (meta.depth !== undefined) {
+			this.set("session.depth", meta.depth, {
+				type: "number",
+				mutable: false,
+				description: "Recursion depth (0 = root, 1+ = child)",
+				source: "system",
+				scope: "session",
+			});
+		}
 	}
 
 	// ─── Helpers ──────────────────────────────────────────────────────────────
@@ -419,7 +493,6 @@ export class RlmContextService extends Service {
 	}
 
 	async [Symbol.dispose]() {
-		// Persist on dispose.
 		this.saveProject();
 		this.saveSession();
 	}
@@ -430,49 +503,81 @@ export class RlmContextService extends Service {
 /**
  * Create a proxy object for the code kernel's VM context.
  * The agent interacts with this via `context.set()`, `context.get()`, etc.
+ *
+ * This is the agent's primary interface to its working memory.
  */
 export function createContextProxy(service: RlmContextService): any {
 	return {
 		/** Get a variable's value (undefined if not found). */
 		get: (name: string) => service.value(name),
+
 		/** Get the full variable metadata. */
 		meta: (name: string) => service.get(name),
-		/** Set a variable. */
+
+		/** Set a new variable. Default is let (mutable). Use { mutable: false } for const. */
 		set: (
 			name: string,
 			value: any,
 			opts?: ContextSetOptions & { scope?: ContextScope },
 		) => service.set(name, value, opts),
-		/** Delete a variable. */
+
+		/** Update an existing let variable. Throws if const. */
+		update: (name: string, value: any) => service.update(name, value),
+
+		/** Delete a variable. Throws if const. */
 		delete: (name: string) => service.delete(name),
-		/** List variable names matching a pattern. */
+
+		/** List variable names matching a glob pattern. */
 		list: (pattern?: string) => service.list(pattern),
+
 		/** Get all variables. */
 		all: () => service.getAll(),
+
 		/** Get a formatted summary for the prompt. */
 		summarize: () => service.summarize(),
-		/** Export a snapshot for passing to a subagent. */
+
+		/** Export a COPY of variables matching patterns. Variables stay in this scope. Default for subagent passing. */
+		copy: (patterns?: string[]) => service.toSnapshot(patterns),
+
+		/** Alias for copy — same non-destructive snapshot. */
 		snapshot: (patterns?: string[]) => service.toSnapshot(patterns),
-		/** Clear a scope. */
-		clear: (scope: ContextScope) => service.clear(scope),
+
+		/**
+		 * MOVE variables matching patterns — returns a snapshot AND removes them from this scope.
+		 * Destructive: you lose the variables. Use only when you're sure you won't need them.
+		 * Const variables in project/session scope are copied (not moved).
+		 */
+		move: (patterns: string[]) => service.move(patterns),
+
+		/** Clear a scope. Throws if const variables exist (use force=true to override). */
+		clear: (scope: ContextScope, force?: boolean) => service.clear(scope, force),
 	};
 }
 
 // ─── Utilities ───────────────────────────────────────────────────────────────
 
-/** Infer a ContextType from a JS value. */
+function toSnapshotEntry(v: ContextVariable): ContextSnapshot[string] {
+	return {
+		value: v.value,
+		mutable: v.mutable,
+		type: v.type,
+		description: v.description,
+		source: v.source,
+		createdAt: v.createdAt,
+		updatedAt: v.updatedAt,
+		transferred: v.transferred,
+	};
+}
+
 function inferType(value: any): ContextType {
 	if (typeof value === "string") {
-		// Check if it looks like a file path.
 		if (value.startsWith("/") || value.startsWith("./") || value.startsWith("../")) return "path";
-		// Check if it looks like a glob/regex pattern.
 		if (/[*?\[\]{}()|+\\]/.test(value) && value.length < 200) return "pattern";
 		return "string";
 	}
 	if (typeof value === "number") return "number";
 	if (typeof value === "boolean") return "boolean";
 	if (Array.isArray(value)) {
-		// Check if it's an array of paths.
 		if (value.every((v) => typeof v === "string" && (v.startsWith("/") || v.startsWith("./")))) return "paths";
 		return "array";
 	}
@@ -480,22 +585,22 @@ function inferType(value: any): ContextType {
 	return "string";
 }
 
-/** Match a variable name against a glob pattern (supports * wildcard). */
 function matchesPattern(name: string, pattern: string): boolean {
 	if (pattern === "*") return true;
-	// Convert glob to regex: * → .*, . → \.
 	const regex = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
 	return new RegExp(`^${regex}$`).test(name);
 }
 
-/** Match a variable name against any of multiple patterns. */
 function matchesAny(name: string, patterns: string[]): boolean {
 	return patterns.some((p) => matchesPattern(name, p));
 }
 
-/** Format a value for display in the summary. */
 function formatValue(value: any): string {
-	if (typeof value === "string") return JSON.stringify(value);
+	if (typeof value === "string") {
+		// Truncate long strings.
+		if (value.length > 100) return JSON.stringify(value.slice(0, 100) + "...");
+		return JSON.stringify(value);
+	}
 	if (Array.isArray(value)) {
 		if (value.length <= 3) return `[${value.map(formatValue).join(", ")}]`;
 		return `[${value.slice(0, 3).map(formatValue).join(", ")}, ...${value.length} items]`;

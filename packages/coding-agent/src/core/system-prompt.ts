@@ -35,6 +35,8 @@ export interface BuildSystemPromptOptions {
 	harnessState?: HarnessState;
 	/** Enabled user-configured servers available through the generic kernel MCP API. */
 	genericMcpServers?: string[];
+	/** Context registry summary — shows the agent what variables it has. */
+	contextSummary?: string;
 }
 
 /** Build the system prompt with tools, guidelines, and context */
@@ -50,6 +52,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		skills: providedSkills,
 		allowRecursion,
 		harnessState,
+		contextSummary,
 	} = options;
 	const promptCwd = cwd.replace(/\\/g, "/");
 	const promptMessagesPath = (messagesPath ?? "not persisted").replace(/\\/g, "/");
@@ -108,6 +111,10 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			prompt += `\n\n${formatHarnessStateForPrompt(harnessState, { includeCodeExamples: true, includeShellExamples: hasBash, includeRefineExamples: hasRefineSkill })}`;
 		}
 
+		if (contextSummary) {
+			prompt += `\n\n# Context Registry\n\nYou have the following context variables available. Use \`context.get(name)\` to read them, \`context.set(name, value, opts)\` to create new ones, \`context.copy(["pattern.*"])\` to snapshot for subagent passing.\n\n${contextSummary}`;
+		}
+
 		if (genericMcpSection) {
 			prompt += `\n\n${genericMcpSection}`;
 		}
@@ -145,6 +152,10 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	if (harnessState) {
 		prompt += `\n\n${formatHarnessStateForPrompt(harnessState, { includeCodeExamples: true, includeShellExamples: hasBash, includeRefineExamples: hasRefineSkill })}`;
+	}
+
+	if (contextSummary) {
+		prompt += `\n\n# Context Registry\n\nYou have the following context variables available. Use \`context.get(name)\` to read them, \`context.set(name, value, opts)\` to create new ones, \`context.copy(["pattern.*"])\` to snapshot for subagent passing, \`context.move(["pattern.*"])\` to transfer (destructive).\n\n${contextSummary}`;
 	}
 
 	if (genericMcpSection) {
