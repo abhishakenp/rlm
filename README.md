@@ -1,79 +1,77 @@
 # rlm
 
-Self-evolving terminal agent — Cordis plugin kernel + prime-agent brain.
+Self-evolving terminal agent — **Cordis plugin kernel + prime-agent brain**.
 
-## What it is
+`rlm` is a verbatim fork of [prime-agent](https://github.com/PrimeIntellect-ai/prime-agent) rebranded and wrapped in a [Cordis](https://github.com/deepseek-ai/cordis) lifecycle shell. It keeps prime-agent's complete terminal-native UX and agent runtime, and adds Cordis as the outer plugin host with hot-module replacement.
 
-A terminal-native agent harness where everything is a hot-swappable plugin and the system can modify, heal, and learn from itself at runtime.
+## What you get
 
-- **Cordis kernel** (from DeepSeek Harness) — plugin mount/unmount/restart, services, events, session log, HMR hot-swap
-- **prime-agent brain** — TUI, ipython kernel, subagent control, refinement, memory
-- **Self-evolving loop** — wound detection → refinement → HMR hot-swap → reflection → memory
+- **Terminal UI** — prime-agent's full differential-rendering TUI (`packages/tui`), not a simplified renderer.
+- **IPython / RLM kernel** — real ZMQ + Jupyter comm protocol (`packages/coding-agent/src/core/kernel`), with namespace snapshot/restore across sessions.
+- **Recursive subagents** — real `AgentSession` child sessions via `rlm.run`, with depth limits and inter-agent messaging.
+- **Model-backed refinement** — `refinement.ts` drives LLM-proposed edits to persistent prompt notes, memories, skills, and subagent specs.
+- **Memory & harness state** — on-disk persistent store under `~/.prime/agent` (revived across runs).
+- **Wound detection & self-healing** — failure-triggered refinement proposes fixes; reflection periodically consolidates learning.
+- **Hot reload / hot swap** — Cordis HMR watches `packages/` and reloads plugins in-process.
+- **Foreground-only** — no daemon survives the terminal. Session/memory/harness data persists on disk.
 
 ## Architecture
 
 ```
-Cordis Kernel (bedrock)
-├── plugin-tui          — terminal UI (raw ANSI renderer)
-├── plugin-kernel        — ipython + ZMQ + RLM (persistent Python kernel)
-├── plugin-subagent      — recursive subagent delegation (depth-limited)
-├── plugin-refine        — self-evolution engine (HarnessState + plugin source edits)
-├── plugin-memory        — HarnessState storage + refinement history
-├── plugin-wound         — failure detection → triggers refine
-├── plugin-reflect       — open-ended reflection → learns from outcomes
-├── plugin-peers         — peer mesh (Tailscale discovery, no daemon)
-└── plugin-extensions    — prime-agent ExtensionAPI compatibility
+cordis-shell.mjs          ← Cordis outer lifecycle (loader + timer + include + HMR)
+  └─ spawns → packages/coding-agent/dist/bundle/cli.js   ← prime-agent agent brain
+                ├─ TUI (packages/tui)
+                ├─ Kernel (ZMQ + ipykernel)
+                ├─ Refinement (LLM-backed)
+                ├─ AgentSession + recursive rlm.run
+                ├─ Memory / harness state
+                └─ Extension API
 ```
 
-### The self-evolving loop
-
-```
-wound detects failure → refine plans edit → sandbox test → HMR hot-swap
-  → session log records → reflect evaluates outcome → memory learns
-  → next failure gets better fix → peers sync the fix
-  → repeat. system improves every cycle.
-```
-
-### Two philosophies
-
-**Cordis:** Everything is a plugin. Swappable at runtime. Compose via config. Communicate via services + events.
-
-**Recursive:** The system operates on itself. Self-modification (refine rewrites refine). Self-healing (wound detects wound). Self-learning (memory stores which fixes worked). Recursive delegation (subagents spawn subagents).
+The Cordis host owns process lifecycle and HMR; the coding-agent CLI owns everything user-visible. The shell degrades gracefully — if Cordis fails to boot, the agent brain runs directly.
 
 ## Install
 
 ```bash
-git clone https://github.com/abhishakenp/rlm.git
-cd rlm
-bun install
-bun src/cli/index.ts
+npm install -g .          # installs `rlm` and `pi` binaries from packages/coding-agent
 ```
 
-## Commands
-
-| Command | Description |
-|---|---|
-| `/refine [plugin]` | Trigger refinement (manual) |
-| `/reflect` | Trigger reflection |
-| `/wounds` | Show detected wounds |
-| `/memory` | Show stored memories |
-| `/plugins` | Show loaded plugins |
-| `/exit` | Shut down |
-
-## Development
+Or run the Cordis-wrapped entry directly:
 
 ```bash
-bun test          # run tests (8 tests, all passing)
-bun src/cli/index.ts  # start the agent
+node cordis-shell.mjs --help
 ```
 
-## Tech stack
+## Build
 
-- **Runtime:** Bun
-- **Kernel:** @deepseek-ai/cordis 4.0.1
-- **Hot-swap:** @deepseek-ai/cordis-plugin-hmr 1.0.16
-- **Language:** TypeScript
-- **Python:** ipython kernel (lazy-started, in-process, no daemon)
+```bash
+npm install
+npm run build             # builds tui → ai → agent → coding-agent in order
+```
+
+## Run
+
+```bash
+rlm                       # interactive TUI
+rlm -p "message"          # print mode
+rlm --help                # full options
+```
+
+## Project layout
+
+- `packages/tui` — terminal UI library (verbatim from prime-agent)
+- `packages/ai` — model provider abstractions
+- `packages/agent` — agent core loop
+- `packages/coding-agent` — CLI, kernel, refinement, sessions, extensions
+- `prime-agent-runtime` — Python `rlm` module loaded into the IPython kernel
+- `cordis-shell.mjs` — Cordis lifecycle wrapper
+- `cordis-scaffold/` — earlier Cordis-only scaffold (kept for reference)
+
+## Notes
+
+- Internal workspace package names (`@earendil-works/pi-*`) and env var prefixes (`PRIME_AGENT_*`) are preserved verbatim from prime-agent. The config dir remains `~/.prime/agent`.
+- The Python kernel venv is auto-provisioned under `~/.prime/agent/kernel-venv` on first run (requires `uv`).
+- This is a fork for personal use; upstream credit goes to the prime-agent authors.
 
 ## License
 
