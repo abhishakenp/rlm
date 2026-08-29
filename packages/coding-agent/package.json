@@ -8,7 +8,6 @@
 		"configDir": ".prime/agent"
 	},
 	"bin": {
-		"pi": "dist/bundle/cli.js",
 		"rlm": "dist/bundle/cli.js"
 	},
 	"main": "./dist/index.js",
