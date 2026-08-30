@@ -165,11 +165,13 @@ export class RlmSdkService extends Service {
 				(globalThis as any).__rlmTaskContextSnapshot = snapshot;
 			}
 
+			const resolvedModel = opts.model ?? this.config.defaultModel;
 			const { session } = await this.createAgentSessionFn({
 				cwd: opts.cwd ?? process.cwd(),
 				rlmDepth: depth,
 				rlmMaxDepth: maxDepth,
 				...(Object.keys(baseToolsOverride).length > 0 ? { baseToolsOverride } : {}),
+				...(resolvedModel ? { model: resolvedModel } : {}),
 			});
 			this.childSessions.set(id, session);
 

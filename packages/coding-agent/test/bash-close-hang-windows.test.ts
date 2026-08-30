@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { executeBashWithOperations } from "../src/core/bash-executor.js";
-import { createBashTool, createLocalBashOperations } from "../src/core/tools/bash.js";
+import { createLocalBashOperations } from "../src/core/bash-operations.js";
 
 function toBashSingleQuotedArg(value: string): string {
 	return `'${value.replace(/\\/g, "/").replace(/'/g, `'"'"'`)}'`;
@@ -60,15 +60,6 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => 
 	});
 }
 
-function getTextOutput(result: { content?: Array<{ type: string; text?: string }> }): string {
-	return (
-		result.content
-			?.filter((block) => block.type === "text")
-			.map((block) => block.text ?? "")
-			.join("\n") ?? ""
-	);
-}
-
 describe.skipIf(process.platform !== "win32")("Windows child-process close handling", () => {
 	let testDir: string;
 
@@ -100,24 +91,6 @@ describe.skipIf(process.platform !== "win32")("Windows child-process close handl
 			expect(result.output).toContain("child-exiting");
 			expect(result.exitCode).toBe(0);
 			expect(result.cancelled).toBe(false);
-		} finally {
-			controller.abort();
-			cleanupDetachedChild(pidFile);
-		}
-	});
-
-	it("bash tool resolves after the shell exits even if inherited stdio handles stay open", async () => {
-		const pidFile = join(testDir, "tool-grandchild.pid");
-		const command = createInheritedStdioCommand(pidFile);
-		const controller = new AbortController();
-		const bashTool = createBashTool(testDir);
-
-		try {
-			const result = await withTimeout(bashTool.execute("test-call", { command }, controller.signal), 3000, () => {
-				controller.abort();
-			});
-
-			expect(getTextOutput(result)).toContain("child-exiting");
 		} finally {
 			controller.abort();
 			cleanupDetachedChild(pidFile);

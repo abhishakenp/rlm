@@ -8,7 +8,6 @@ import { Type } from "typebox";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.js";
 import type { ToolDefinition } from "../src/core/extensions/types.js";
-import { type BashOperations, createBashTool, createBashToolDefinition } from "../src/core/tools/bash.js";
 import { createEditToolDefinition } from "../src/core/tools/edit.js";
 import { createAgentConnectionToolDefinition } from "../src/modes/agent-connection/tool-definition.js";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
@@ -340,18 +339,6 @@ describe("ToolExecutionComponent parity", () => {
 	});
 
 	test("uses legacy replay renderers for metadata-only built-in definitions", () => {
-		const bashComponent = new ToolExecutionComponent(
-			"bash",
-			"tool-3b",
-			{ command: "echo hello" },
-			{},
-			createMetadataOnlyToolDefinition(createBashToolDefinition(process.cwd())),
-			createFakeTui(),
-			process.cwd(),
-		);
-		bashComponent.updateResult({ content: [{ type: "text", text: "hello" }], isError: false }, false);
-		expect(stripAnsi(bashComponent.render(120).join("\n"))).toContain("$ echo hello");
-
 		const legacyEditMetadata = {
 			...createMetadataOnlyToolDefinition(createEditToolDefinition(process.cwd())),
 			description: "Legacy edit metadata from an older session.",
@@ -392,26 +379,6 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).toContain("edit · done");
 		expect(rendered).not.toContain("README.md");
 		expect(rendered).not.toContain("+1 after");
-	});
-
-	test("bash execute emits an initial empty partial update before output arrives", async () => {
-		const updates: Array<{ content: Array<{ type: string; text?: string }>; details?: unknown }> = [];
-		const operations: BashOperations = {
-			exec: async () => {
-				await new Promise((resolve) => setTimeout(resolve, 10));
-				return { exitCode: 0 };
-			},
-		};
-		const tool = createBashToolDefinition(process.cwd(), { operations });
-		const promise = tool.execute(
-			"tool-bash-1",
-			{ command: "sleep 10" },
-			undefined,
-			(update) => updates.push(update as { content: Array<{ type: string; text?: string }>; details?: unknown }),
-			{} as never,
-		);
-		expect(updates).toEqual([{ content: [], details: undefined }]);
-		await promise;
 	});
 
 	test("does not duplicate built-in headers when passed the active built-in definition", () => {
@@ -657,50 +624,6 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).not.toContain("echo hello");
 	});
 
-	test("uses custom renderers for built-in overrides that reuse built-in definition parameters", () => {
-		const builtInDefinition = createBashToolDefinition(process.cwd());
-		const component = new ToolExecutionComponent(
-			"bash",
-			"tool-4d",
-			{ command: "echo hello" },
-			{},
-			{
-				...builtInDefinition,
-				renderCall: () => new Text("override call", 0, 0),
-				renderResult: () => new Text("override result", 0, 0),
-			},
-			createFakeTui(),
-			process.cwd(),
-		);
-		component.updateResult({ content: [{ type: "text", text: "hello" }], details: undefined, isError: false }, false);
-		const rendered = stripAnsi(component.render(120).join("\n"));
-		expect(rendered).toContain("override call");
-		expect(rendered).toContain("override result");
-		expect(rendered).not.toContain("bash echo hello");
-	});
-
-	test("uses custom renderers for built-in overrides that reuse wrapped built-in tool parameters", () => {
-		const builtInTool = createBashTool(process.cwd());
-		const component = new ToolExecutionComponent(
-			"bash",
-			"tool-4e",
-			{ command: "echo hello" },
-			{},
-			{
-				...createBaseToolDefinition("bash"),
-				parameters: builtInTool.parameters,
-				renderCall: () => new Text("wrapped override call", 0, 0),
-				renderResult: () => new Text("wrapped override result", 0, 0),
-			},
-			createFakeTui(),
-			process.cwd(),
-		);
-		component.updateResult({ content: [{ type: "text", text: "hello" }], details: undefined, isError: false }, false);
-		const rendered = stripAnsi(component.render(120).join("\n"));
-		expect(rendered).toContain("wrapped override call");
-		expect(rendered).toContain("wrapped override result");
-	});
-
 	test("shares renderer state across custom call and result slots", () => {
 		type RenderState = { token?: string };
 		const toolDefinition: ToolDefinition<any, unknown, RenderState> = {
@@ -775,7 +698,7 @@ describe("ToolExecutionComponent parity", () => {
 		const lines = component.render(100);
 		const rendered = stripAnsi(lines.join("\n"));
 		expect(rendered).toContain("bash · done");
-		expect(rendered).toContain("$ echo hello");
+		expect(rendered).toContain("echo hello");
 		expect(rendered).toContain("hello");
 
 		// Panel lines carry the neutral panel background across the full width.

@@ -60,11 +60,9 @@ import type {
 import type { SlashCommandInfo } from "../slash-commands.js";
 import type { SourceInfo } from "../source-info.js";
 import type { BuildSystemPromptOptions } from "../system-prompt.js";
-import type { BashOperations } from "../tools/bash.js";
+import type { BashOperations } from "../bash-operations.js";
 import type { EditToolDetails } from "../tools/edit.js";
 import type {
-	BashToolDetails,
-	BashToolInput,
 	EditToolInput,
 	CodeToolDetails,
 	CodeToolInput,
@@ -769,11 +767,6 @@ interface ToolCallEventBase {
 	toolCallId: string;
 }
 
-export interface BashToolCallEvent extends ToolCallEventBase {
-	toolName: "bash";
-	input: BashToolInput;
-}
-
 export interface EditToolCallEvent extends ToolCallEventBase {
 	toolName: "edit";
 	input: EditToolInput;
@@ -795,7 +788,7 @@ export interface CustomToolCallEvent extends ToolCallEventBase {
  * `event.input` is mutable. Mutate it in place to patch tool arguments before execution.
  * Later `tool_call` handlers see earlier mutations. No re-validation is performed after mutation.
  */
-export type ToolCallEvent = BashToolCallEvent | EditToolCallEvent | CodeToolCallEvent | CustomToolCallEvent;
+export type ToolCallEvent = EditToolCallEvent | CodeToolCallEvent | CustomToolCallEvent;
 
 interface ToolResultEventBase {
 	type: "tool_result";
@@ -803,11 +796,6 @@ interface ToolResultEventBase {
 	input: Record<string, unknown>;
 	content: (TextContent | ImageContent)[];
 	isError: boolean;
-}
-
-export interface BashToolResultEvent extends ToolResultEventBase {
-	toolName: "bash";
-	details: BashToolDetails | undefined;
 }
 
 export interface EditToolResultEvent extends ToolResultEventBase {
@@ -827,14 +815,10 @@ export interface CustomToolResultEvent extends ToolResultEventBase {
 
 /** Fired after a tool executes. Can modify result. */
 export type ToolResultEvent =
-	| BashToolResultEvent
 	| EditToolResultEvent
 	| CodeToolResultEvent
 	| CustomToolResultEvent;
 
-export function isBashToolResult(e: ToolResultEvent): e is BashToolResultEvent {
-	return e.toolName === "bash";
-}
 export function isEditToolResult(e: ToolResultEvent): e is EditToolResultEvent {
 	return e.toolName === "edit";
 }
@@ -859,10 +843,9 @@ export function isCodeToolResult(e: ToolResultEvent): e is CodeToolResultEvent {
  * }
  * ```
  *
- * Note: Direct narrowing via `event.toolName === "bash"` doesn't work because
+ * Note: Direct narrowing via `event.toolName === "edit"` doesn't work because
  * CustomToolCallEvent.toolName is `string` which overlaps with all literals.
  */
-export function isToolCallEventType(toolName: "bash", event: ToolCallEvent): event is BashToolCallEvent;
 export function isToolCallEventType(toolName: "edit", event: ToolCallEvent): event is EditToolCallEvent;
 export function isToolCallEventType(toolName: "code", event: ToolCallEvent): event is CodeToolCallEvent;
 export function isToolCallEventType<TName extends string, TInput extends Record<string, unknown>>(

@@ -1,15 +1,4 @@
 export {
-	type BashOperations,
-	type BashSpawnContext,
-	type BashSpawnHook,
-	type BashToolDetails,
-	type BashToolInput,
-	type BashToolOptions,
-	createBashTool,
-	createBashToolDefinition,
-	createLocalBashOperations,
-} from "./bash.js";
-export {
 	createEditTool,
 	createEditToolDefinition,
 	type EditOperations,

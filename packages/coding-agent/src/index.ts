@@ -53,7 +53,6 @@ export type {
 	AgentToolUpdateCallback,
 	AppKeybinding,
 	AutocompleteProviderFactory,
-	BashToolCallEvent,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
 	BeforeProviderRequestEvent,
@@ -131,7 +130,6 @@ export {
 	defineTool,
 	discoverAndLoadExtensions,
 	ExtensionRunner,
-	isBashToolResult,
 	isEditToolResult,
 	isCodeToolResult,
 	isToolCallEventType,
@@ -180,7 +178,6 @@ export {
 	createAgentSessionFromServices,
 	createAgentSessionRuntime,
 	createAgentSessionServices,
-	createBashTool,
 	// Tool factories (for custom cwd)
 	createEditTool,
 	createCodeTool,
@@ -238,18 +235,18 @@ export {
 	type SkillKind,
 } from "./core/skills.js";
 export { createSyntheticSourceInfo } from "./core/source-info.js";
-// Tools
+// Bash execution infrastructure (used by the interactive `!`/`!!` shell prefix
+// and the `user_bash` extension event — not an LLM-facing bash tool).
 export {
 	type BashOperations,
 	type BashSpawnContext,
 	type BashSpawnHook,
-	type BashToolDetails,
-	type BashToolInput,
-	type BashToolOptions,
-	createBashToolDefinition,
+	createLocalBashOperations,
+} from "./core/bash-operations.js";
+// Tools
+export {
 	createEditToolDefinition,
 	createCodeToolDefinition,
-	createLocalBashOperations,
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	type EditOperations,

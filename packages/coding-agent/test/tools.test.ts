@@ -3,13 +3,12 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { executeBashWithOperations } from "../src/core/bash-executor.js";
-import { type BashOperations, createBashTool, createLocalBashOperations } from "../src/core/tools/bash.js";
+import { createLocalBashOperations } from "../src/core/bash-operations.js";
 import { computeEditsDiff } from "../src/core/tools/edit-diff.js";
 import { createEditTool } from "../src/index.js";
 import * as shellModule from "../src/utils/shell.js";
 
 const editTool = createEditTool(process.cwd());
-const bashTool = createBashTool(process.cwd());
 
 // Helper to extract text from content blocks
 function getTextOutput(result: any): string {
@@ -241,169 +240,7 @@ describe("Coding Agent Tools", () => {
 		});
 	});
 
-	describe("bash tool", () => {
-		it("should execute simple commands", async () => {
-			const result = await bashTool.execute("test-call-8", { command: "echo 'test output'" });
-
-			expect(getTextOutput(result)).toContain("test output");
-			expect(result.details).toBeUndefined();
-		});
-
-		it("should handle command errors", async () => {
-			await expect(bashTool.execute("test-call-9", { command: "exit 1" })).rejects.toThrow(
-				/(Command failed|code 1)/,
-			);
-		});
-
-		it("should respect timeout", async () => {
-			await expect(bashTool.execute("test-call-10", { command: "sleep 5", timeout: 1 })).rejects.toThrow(
-				/timed out/i,
-			);
-		});
-
-		it("should include full output path for truncated timeout and abort errors", async () => {
-			for (const testCase of [
-				{ error: "timeout:5", expected: "Command timed out after 5 seconds" },
-				{ error: "aborted", expected: "Command aborted" },
-			]) {
-				const operations: BashOperations = {
-					exec: async (_command, _cwd, { onData }) => {
-						for (let i = 1; i <= 3000; i++) {
-							onData(Buffer.from(`${i}\n`, "utf-8"));
-						}
-						throw new Error(testCase.error);
-					},
-				};
-				const bash = createBashTool(testDir, { operations });
-
-				let error: unknown;
-				try {
-					await bash.execute(`test-call-${testCase.error}`, { command: "chatty-fail" });
-				} catch (err) {
-					error = err;
-				}
-
-				expect(error).toBeInstanceOf(Error);
-				const message = (error as Error).message;
-				expect(message).toContain(testCase.expected);
-				expect(message).toMatch(/\[Showing lines \d+-\d+ of \d+\. Full output: /);
-				expect(message).not.toContain("Full output: undefined");
-				const fullOutputPath = message.match(/Full output: ([^\]\n]+)/)?.[1];
-				expect(fullOutputPath).toBeDefined();
-				expect(existsSync(fullOutputPath!)).toBe(true);
-				const fullOutput = readFileSync(fullOutputPath!, "utf-8");
-				expect(fullOutput).toContain("1\n2\n3");
-				expect(fullOutput).toContain("2998\n2999\n3000");
-			}
-		});
-
-		it("should throw error when cwd does not exist", async () => {
-			const nonexistentCwd = "/this/directory/definitely/does/not/exist/12345";
-
-			const bashToolWithBadCwd = createBashTool(nonexistentCwd);
-
-			await expect(bashToolWithBadCwd.execute("test-call-11", { command: "echo test" })).rejects.toThrow(
-				/Working directory does not exist/,
-			);
-		});
-
-		it("should handle process spawn errors", async () => {
-			vi.spyOn(shellModule, "getShellConfig").mockReturnValueOnce({
-				shell: "/nonexistent-shell-path-xyz123",
-				args: ["-c"],
-			});
-
-			const bashWithBadShell = createBashTool(testDir);
-
-			await expect(bashWithBadShell.execute("test-call-12", { command: "echo test" })).rejects.toThrow(/ENOENT/);
-		});
-
-		it("should pass shellPath through to shell resolution", async () => {
-			// vi.spyOn returns the spy created by the previous test, including its
-			// recorded calls; clear them so the assertions only see this test's calls.
-			const getShellConfigSpy = vi.spyOn(shellModule, "getShellConfig");
-			getShellConfigSpy.mockClear();
-			const bashWithCustomShell = createBashTool(testDir, {
-				shellPath: "/custom/bash",
-				operations: {
-					exec: async () => ({ exitCode: 0 }),
-				},
-			});
-
-			await bashWithCustomShell.execute("test-call-12b", { command: "echo test" });
-
-			expect(getShellConfigSpy).not.toHaveBeenCalled();
-
-			const ops = createLocalBashOperations({ shellPath: "/custom/bash" });
-			await expect(
-				ops.exec("echo test", testDir, {
-					onData: () => {},
-				}),
-			).rejects.toThrow("Custom shell path not found: /custom/bash");
-			expect(getShellConfigSpy).toHaveBeenCalledWith("/custom/bash");
-		});
-
-		it("should prepend command prefix when configured", async () => {
-			const bashWithPrefix = createBashTool(testDir, {
-				commandPrefix: "export TEST_VAR=hello",
-			});
-
-			const result = await bashWithPrefix.execute("test-prefix-1", { command: "echo $TEST_VAR" });
-			expect(getTextOutput(result).trim()).toBe("hello");
-		});
-
-		it("should include output from both prefix and command", async () => {
-			const bashWithPrefix = createBashTool(testDir, {
-				commandPrefix: "echo prefix-output",
-			});
-
-			const result = await bashWithPrefix.execute("test-prefix-2", { command: "echo command-output" });
-			expect(getTextOutput(result).trim()).toBe("prefix-output\ncommand-output");
-		});
-
-		it("should work without command prefix", async () => {
-			const bashWithoutPrefix = createBashTool(testDir, {});
-
-			const result = await bashWithoutPrefix.execute("test-prefix-3", { command: "echo no-prefix" });
-			expect(getTextOutput(result).trim()).toBe("no-prefix");
-		});
-
-		it("should coalesce streaming updates for chatty output", async () => {
-			const operations: BashOperations = {
-				exec: async (_command, _cwd, { onData }) => {
-					for (let i = 0; i < 5000; i++) {
-						onData(Buffer.from(`line ${i}\n`, "utf-8"));
-					}
-					return { exitCode: 0 };
-				},
-			};
-			const updates: Array<{ content: Array<{ type: string; text?: string }>; details?: unknown }> = [];
-			const bash = createBashTool(testDir, { operations });
-
-			const result = await bash.execute("test-call-chatty-updates", { command: "chatty" }, undefined, (update) =>
-				updates.push(update),
-			);
-
-			expect(updates.length).toBeLessThan(25);
-			expect(getTextOutput(result)).toContain("line 4999");
-		});
-
-		it("should decode UTF-8 characters split across output chunks", async () => {
-			const euro = Buffer.from("€\n", "utf-8");
-			const operations: BashOperations = {
-				exec: async (_command, _cwd, { onData }) => {
-					onData(euro.subarray(0, 1));
-					onData(euro.subarray(1));
-					return { exitCode: 0 };
-				},
-			};
-			const bash = createBashTool(testDir, { operations });
-
-			const result = await bash.execute("test-call-split-utf8", { command: "split-utf8" });
-
-			expect(getTextOutput(result).trim()).toBe("€");
-		});
-
+	describe("bash operations", () => {
 		it("should expose local bash operations for extension reuse", async () => {
 			const ops = createLocalBashOperations();
 			const chunks: Buffer[] = [];
@@ -428,27 +265,17 @@ describe("Coding Agent Tools", () => {
 			expect(result.output).toBe("red\n");
 		});
 
-		it("should persist full output when truncation happens by line count only", async () => {
-			const bash = createBashTool(testDir);
-			const result = await bash.execute("test-call-line-truncation", { command: "seq 3000" });
-			const output = getTextOutput(result);
-			const fullOutputPath = result.details?.fullOutputPath;
+		it("should pass shellPath through to shell resolution", async () => {
+			const getShellConfigSpy = vi.spyOn(shellModule, "getShellConfig");
+			getShellConfigSpy.mockClear();
 
-			expect(result.details?.truncation?.truncated).toBe(true);
-			expect(result.details?.truncation?.truncatedBy).toBe("lines");
-			expect(fullOutputPath).toBeDefined();
-			expect(output).toMatch(/\[Showing lines \d+-\d+ of \d+\. Full output: /);
-			expect(output).not.toContain("Full output: undefined");
-
-			for (let i = 0; i < 20 && (!fullOutputPath || !existsSync(fullOutputPath)); i++) {
-				await new Promise((resolve) => setTimeout(resolve, 10));
-			}
-
-			expect(fullOutputPath).toBeDefined();
-			expect(existsSync(fullOutputPath!)).toBe(true);
-			const fullOutput = readFileSync(fullOutputPath!, "utf-8");
-			expect(fullOutput).toContain("1\n2\n3");
-			expect(fullOutput).toContain("2998\n2999\n3000");
+			const ops = createLocalBashOperations({ shellPath: "/custom/bash" });
+			await expect(
+				ops.exec("echo test", testDir, {
+					onData: () => {},
+				}),
+			).rejects.toThrow("Custom shell path not found: /custom/bash");
+			expect(getShellConfigSpy).toHaveBeenCalledWith("/custom/bash");
 		});
 
 		it("executeBash should persist full output when truncation happens by line count only", async () => {

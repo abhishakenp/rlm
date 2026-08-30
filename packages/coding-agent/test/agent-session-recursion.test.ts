@@ -35,7 +35,7 @@ import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager, type SettingsStorage } from "../src/core/settings-manager.js";
 import type { Skill } from "../src/core/skills.js";
 import { createSyntheticSourceInfo } from "../src/core/source-info.js";
-import type { BashOperations } from "../src/core/tools/bash.js";
+import type { BashOperations } from "../src/core/bash-operations.js";
 import { type ActiveSessionState, resolveActiveSessionState } from "../src/modes/daemon/active-session-state.js";
 import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
 import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.js";

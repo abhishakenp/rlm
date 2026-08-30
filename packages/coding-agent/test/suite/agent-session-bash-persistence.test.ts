@@ -3,7 +3,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import type { BashOperations } from "../../src/core/tools/bash.js";
+import type { BashOperations } from "../../src/core/bash-operations.js";
 import { createHarness, getMessageText, type Harness } from "./harness.js";
 
 function getEntryTypes(harness: Harness): string[] {

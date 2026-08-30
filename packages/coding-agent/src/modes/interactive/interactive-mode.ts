@@ -1243,7 +1243,12 @@ export class InteractiveMode {
 	}
 
 	private isRecognizedSlashCommand(name: string): boolean {
-		return isBuiltinSlashCommandName(name) || this.connectionCommands.some((command) => command.name === name);
+		if (isBuiltinSlashCommandName(name) || this.connectionCommands.some((command) => command.name === name)) {
+			return true;
+		}
+		// rlm-tui slash commands from Cordis plugins.
+		const tuiService = (globalThis as any).__rlmTui;
+		return tuiService?.getSlashCommand?.(name) !== undefined;
 	}
 
 	private createBaseAutocompleteProvider(): AutocompleteProvider {
@@ -1314,8 +1319,21 @@ export class InteractiveMode {
 			}
 		}
 
+		// rlm-tui slash commands from Cordis plugins.
+		const tuiService = (globalThis as any).__rlmTui;
+		const tuiSlashCommands: SlashCommand[] = [];
+		if (tuiService?.getSlashCommands) {
+			for (const cmd of tuiService.getSlashCommands()) {
+				tuiSlashCommands.push({
+					name: cmd.name,
+					description: cmd.description,
+					sourceTag: cmd.pluginId ? `rlm:${cmd.pluginId}` : "rlm",
+				});
+			}
+		}
+
 		return new CombinedAutocompleteProvider(
-			[...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList],
+			[...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList, ...tuiSlashCommands],
 			this.getCurrentCwd(),
 			this.fdPath,
 		);
@@ -4935,6 +4953,24 @@ export class InteractiveMode {
 					this.editor.setText("");
 					return;
 				}
+				// rlm-tui slash commands from Cordis plugins.
+				const tuiService = (globalThis as any).__rlmTui;
+				if (tuiService?.getSlashCommand) {
+					const tuiCmd = tuiService.getSlashCommand(commandName);
+					if (tuiCmd?.handler) {
+						this.editor.setText("");
+						try {
+							const result = await tuiCmd.handler({ args: commandArgs, ctx: this });
+							if (typeof result === "string" && result.length > 0) {
+								this.echoLocalCommand(result);
+							}
+						} catch (error) {
+							this.showError(error instanceof Error ? error.message : String(error));
+						}
+						return;
+					}
+				}
+
 				if (text === "/arminsayshi") {
 					this.handleArminSaysHi();
 					this.editor.setText("");

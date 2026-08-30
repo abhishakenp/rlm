@@ -33,8 +33,6 @@ export type {
 	AppendEntryHandler,
 	AppKeybinding,
 	AutocompleteProviderFactory,
-	BashToolCallEvent,
-	BashToolResultEvent,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
 	BeforeProviderRequestEvent,
@@ -140,7 +138,6 @@ export type {
 } from "./types.js";
 export {
 	defineTool,
-	isBashToolResult,
 	isEditToolResult,
 	isCodeToolResult,
 	isToolCallEventType,

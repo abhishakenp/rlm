@@ -8,7 +8,7 @@ import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtim
 import type { AgentCronJob, AgentCronJobStore, AgentCronScheduler } from "../../../src/core/cron-jobs.js";
 import { type CustomMessage, createSessionSlashCommandMessage } from "../../../src/core/messages.js";
 import { parseSessionSlashCommand } from "../../../src/core/slash-commands.js";
-import type { BashOperations } from "../../../src/core/tools/bash.js";
+import type { BashOperations } from "../../../src/core/bash-operations.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../../../src/modes/daemon/active-session-state.js";
 import { AgentDaemon } from "../../../src/modes/daemon/daemon-mode.js";
 import type { DaemonUpdateRestartManifest } from "../../../src/modes/daemon/daemon-protocol.js";

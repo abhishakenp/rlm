@@ -68,7 +68,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const contextFiles = providedContextFiles ?? [];
 	const skills = providedSkills ?? [];
 	const tools = selectedTools ?? ["code"];
-	const hasBash = tools.includes("bash");
+	const hasBash = false; // bash tool removed — shell via !/%%bash in code tool
 	const visibleSkills = skills.filter((skill) => !skill.disableModelInvocation);
 	const hasRefineSkill = visibleSkills.some((skill) => skill.name === REFINE_SKILL_NAME);
 	const genericMcpSection = formatGenericMcpGuidance(options.genericMcpServers);
@@ -127,7 +127,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	let prompt = buildRlmPrompt({
 		cwd: promptCwd,
 		messagesPath: promptMessagesPath,
-		activeTools: tools.filter((name) => name === "code" || name === "bash" || name === "edit"),
+		activeTools: tools.filter((name) => name === "code" || name === "edit"),
 		allowRecursion,
 		depth: options.rlmDepth,
 		parentAgent: options.rlmParentAgent,
@@ -169,7 +169,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	}
 
 	// Append skills section only when the model has a way to inspect skill files.
-	const hasFileAccess = tools.includes("code") || tools.includes("bash");
+	const hasFileAccess = tools.includes("code");
 	if (hasFileAccess && skills.length > 0) {
 		prompt += formatSkillsForPrompt(skills);
 	}

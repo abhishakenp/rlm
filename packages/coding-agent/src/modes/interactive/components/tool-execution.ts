@@ -2,7 +2,6 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { type Component, Container, Image, Text, type TUI } from "@earendil-works/pi-tui";
 import type { ToolDefinition, ToolRenderContext, ToolRenderResultOptions } from "../../../core/extensions/types.js";
 import type { KernelSentAgentMessage } from "../../../core/kernel/index.js";
-import { createBashToolDefinition } from "../../../core/tools/bash.js";
 import { createEditToolDefinition } from "../../../core/tools/edit.js";
 import { createAllToolDefinitions } from "../../../core/tools/index.js";
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.js";
@@ -53,10 +52,6 @@ function createReplayBuiltInToolDefinition(
 		return createAllToolDefinitions(cwd).code;
 	}
 	switch (toolName) {
-		case "bash": {
-			const builtInDefinition = createBashToolDefinition(cwd);
-			return matchesBuiltInReplayMetadata(toolName, toolDefinition) ? builtInDefinition : undefined;
-		}
 		case "edit": {
 			const builtInDefinition = createEditToolDefinition(cwd);
 			return matchesBuiltInReplayMetadata(toolName, toolDefinition) ? builtInDefinition : undefined;

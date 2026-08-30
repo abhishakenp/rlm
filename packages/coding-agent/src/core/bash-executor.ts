@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import stripAnsi from "strip-ansi";
 import { sanitizeBinaryOutput } from "../utils/shell.js";
-import type { BashOperations } from "./tools/bash.js";
+import type { BashOperations } from "./bash-operations.js";
 import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate.js";
 export interface BashExecutorOptions {
 	/** Callback for streaming output chunks (already sanitized) */
