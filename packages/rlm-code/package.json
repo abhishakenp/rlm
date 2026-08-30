@@ -1,13 +1,27 @@
 {
-  "name": "@rlm/code",
+  "name": "rlm-code",
   "version": "0.1.0",
   "description": "rlm persistent JS code execution tool — vm.Context + shell + rlm SDK",
+  "license": "MIT",
   "type": "module",
   "main": "./src/index.ts",
   "exports": {
     ".": {
       "default": "./src/index.ts"
     }
+  },
+  "keywords": [
+    "rlm",
+    "code-tool",
+    "javascript",
+    "vm",
+    "persistent",
+    "agent",
+    "cordis"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/abhishakenp/rlm"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "^4.0.1"

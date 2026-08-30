@@ -1,6 +1,6 @@
 # rlm
 
-Self-evolving terminal agent. Modified Cordis host, DeepSeek Harness philosophy, no prime-agent code.
+Self-evolving terminal agent. JavaScript-native. Cordis plugin architecture. No Python.
 
 Everything is a plugin. The host boots Cordis, loads plugins from `config/profile.yml`, and runs a terminal UI. HMR watches plugin source dirs — any plugin can be hot-swapped at runtime without restarting the process.
 
@@ -11,28 +11,52 @@ Everything is a plugin. The host boots Cordis, loads plugins from `config/profil
 
 ### Plugins
 
-| Plugin | Service | Owns |
-|--------|---------|------|
-| `@rlm/llm` | `rlmLlm` | OmniRoute OpenAI-compatible client (stream + complete) |
-| `@rlm/agent` | `rlmAgent` | Agent loop (system prompt → model → tools → repeat) |
-| `@rlm/subagent` | `rlmSubagent` | Recursive subagent spawning with depth limits |
-| `@rlm/session` | `rlmSession` | JSONL session persistence on disk |
-| `@rlm/memory` | `rlmMemory` | Persistent key-value memory on disk |
-| `@rlm/kernel` | `rlmKernel` | IPython/ZMQ kernel (Jupyter protocol 5.3) |
-| `@rlm/tui` | `rlmTui` | Terminal UI (interactive + print mode) |
-| `@rlm/wound` | `rlmWound` | Failure detection / self-healing triggers |
-| `@rlm/refinement` | `rlmRefinement` | LLM-backed self-improvement proposals |
-| `@rlm/reflect` | `rlmReflect` | Periodic reflection / self-learning |
-| `@rlm/extensions` | `rlmExtensions` | Extension loader from `~/.rlm/extensions` |
-| `@rlm/skills` | `rlmSkills` | Skill discovery from `~/.rlm/skills` |
+| Plugin | npm package | Service | Owns |
+|--------|-------------|---------|------|
+| `@rlm/tui` | `rlm-tui` | `rlmTui` | Terminal UI (interactive + print mode) |
+| `@rlm/context` | `rlm-context` | `rlmContext` | Persistent typed variable registry (agent working memory) |
+| `@rlm/code` | `rlm-code` | `rlmCode` | Persistent JS code execution (vm.Context + `!` shell + `%%bash`) |
+| `@rlm/sdk` | `rlm-sdk` | `rlmSdk` | In-process subagent spawning, goal management |
+| `@rlm/workflow` | `rlm-workflow` | `rlmWorkflow` | Hot-swappable TS workflows from `~/.prime/agent/workflows/` |
+| `@rlm/learn` | `rlm-learn` | `rlmLearn` | Self-evolution — tracks outcomes, proposes modifications |
+
+### Code tool
+
+The code tool is JavaScript-only. No Python, no IPython, no kernel process.
+
+- `!command` → shell out (line magic)
+- `%%bash` cell → multi-line shell block
+- Persistent variables across calls (`vm.Context` = kernel namespace)
+- `console.log()` output captured as stdout
+- Last expression value captured as result
+- `rlm.run()` for in-process subagent spawning
+- `fs`, `path`, `os`, `child_process`, `fetch`, `import()` all available
+
+### Context registry
+
+All agent knowledge lives in typed variables — `const` (immutable) or `let` (mutable).
+
+- `context.set(name, value, { type, mutable, description, scope })`
+- `context.get(name)`
+- `context.update(name, value)` — mutable only
+- `context.list("auth.*")` — glob filter
+- `context.copy(["auth.*"])` — copy to subagent
+- `context.move(["auth.*"])` — transfer to subagent
+- `context.delete(name)`
+- `context.summarize()`
+
+Scopes: `project` (persists to `.rlm/context.json`), `session`, `task` (in-memory, passed to children).
+
+System-generated: `runtime.*` (model, tools, skills, depth, maxDepth, systemPrompt), `skill.*` (each installed skill).
+LLM-generated: task-specific variables (user prompts, findings, decisions, tool results).
 
 ### Data paths
 
 - Sessions: `~/.rlm/sessions/`
-- Memory: `~/.rlm/memory/`
+- Settings: `~/.rlm/settings.json`
+- Context: `.rlm/context.json` (project-scoped)
 - Extensions: `~/.rlm/extensions/`
 - Skills: `~/.rlm/skills/`
-- Kernel connections: `~/.rlm/kernel-connections/`
 
 ## Install
 
@@ -70,17 +94,23 @@ No restart required. The process stays foreground — exits when terminal closes
 
 ## Model
 
-OmniRoute-only. Default endpoint: `http://localhost:20128/v1`. Default model: `auto/best-free`. Configured in `config/profile.yml`.
+OmniRoute-only. Default model: `auto/best-free`. Configured in `config/profile.yml` and `~/.rlm/settings.json`.
 
 ## Recursive subagents
 
-The `subagent` tool is registered with `rlmAgent` by `rlmSubagent`. The LLM can call it to spawn a child agent loop with incremented depth. Depth limit (default 10) prevents infinite recursion.
+The SDK plugin spawns child agent loops with incremented depth. Depth limit (default 10) prevents infinite recursion. Context variables are copied to children by default; `context.move()` transfers ownership.
 
-## Self-healing
+## Self-evolution
 
-- `rlmWound` monitors `rlm/agent-error` events. After N failures on the same plugin, emits `rlm/wound-detected`.
-- `rlmRefinement` listens for wounds and asks the LLM to propose a fix.
-- `rlmReflect` runs every N turns, consolidating insights into persistent memory.
+- **Auto-refine**: detects repeated tool errors (shell-as-JS, Python-in-JS, top-level return) and schedules refinement to add prompt notes + memories so mistakes never repeat.
+- **Learn plugin**: tracks workflow outcomes, proposes modifications, learns over time.
+- **HMR**: every plugin, config, skill, and system prompt is hot-swappable without interrupting active work.
+
+## npm packages
+
+| Package | Description |
+|---------|-------------|
+| [`rlm-code`](https://www.npmjs.com/package/rlm-code) | Persistent JS code execution tool — vm.Context + shell + rlm SDK |
 
 ## References
 
