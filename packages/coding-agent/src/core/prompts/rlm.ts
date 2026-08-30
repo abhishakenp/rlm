@@ -26,15 +26,15 @@ const SIMPLIFIED_TECHNICAL_ENGLISH_PROMPT = [
 ].join("\n");
 
 const CODE_CONTROL_PROMPT = [
-	"The `code` tool is the agent's long-lived notebook: a persistent JavaScript execution environment for reasoning, context management, state, tool orchestration, and recursive subcalls. Use it to keep intermediate variables, inspect and transform outputs, and write small helper functions. The code tool ONLY executes JavaScript — it does not run Python, Ruby, or any other language directly.",
+	"The `code` tool is the agent's long-lived notebook: a persistent JavaScript execution environment for reasoning, context management, state, tool orchestration, and recursive subcalls. Use it to keep intermediate variables, inspect and transform outputs, and write small helper functions. The code tool executes JavaScript natively. Other languages use cell magic: `%%python` for Python, `%%bash` for shell — same as `!command`.",
 	"",
-	"When the user asks for code in a non-JavaScript language (e.g. 'write binary search in Python'), you MUST use the code tool to write the code to a file using `fs.writeFileSync('solution.py', code)` then run it with `!python solution.py` to verify it works. Never paste Python/Ruby/etc syntax directly into the code tool — it will fail with a syntax error. Never just output code as text — always write it to a file and run it.",
+	"When the user asks for code in Python (e.g. 'write binary search in Python'), use `%%python` as the first line of the code cell, then the Python code. The code tool runs it and returns the output. Never paste Python syntax directly as JS — always use `%%python` cell magic. Never just output code as text — always run it in the code tool.",
 	"",
 	"MANDATORY: Use the code tool for ANY task — including writing code, computation, file inspection, shell commands, variable inspection, context operations, or subagent spawning. When the user asks you to 'write' code in any language, you MUST use the code tool to write it to a file and run it — never just output code as text. Do not answer from memory when you can verify by running code. Do not describe what you would do — do it in the code tool and report the result.",
 	"",
 	"Do not assume JavaScript is the native runtime of the external thing being investigated. A repository, package, service, dataset, paper, website, benchmark, or API may have its own environment and normal interface. Evaluate external systems through their own interface, then use the code tool to coordinate the process and analyze what comes back.",
 	"",
-	"When running shell commands from the code tool, use `%%bash` cells or `!command` syntax. If you use `%%bash`, it must be the first line of the code cell. `!command` runs a single shell command and captures its output. Multi-line shell blocks use `%%bash` as the first line followed by shell commands.",
+	"When running shell commands from the code tool, use `%%bash` cells or `!command` syntax. For Python, use `%%python` cells. If you use `%%bash` or `%%python`, it must be the first line of the code cell. `!command` runs a single shell command and captures its output. Multi-line shell blocks use `%%bash` as the first line followed by shell commands. Multi-line Python blocks use `%%python` as the first line followed by Python code.",
 	"",
 	"Important: do not install dependencies into the code kernel just to make an external project import or run there. If a project import, test, script, CLI, or dependency check is needed, run it through that project's own environment and normal command interface. Treat failures from that native environment as the relevant result.",
 	"",

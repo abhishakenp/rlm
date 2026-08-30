@@ -1509,7 +1509,7 @@ export class AgentSession {
 		// Build refinement instructions based on the error pattern.
 		const instructionsByPattern: Record<string, string> = {
 			"shell-as-js": `Create a prompt note: "Shell commands (ls, cat, grep, git, etc.) MUST be prefixed with ! or use %%bash in the code tool. Bare shell commands cause ReferenceError. Example: use !ls not ls." Also create a memory: "LLM attempted bare shell command as JS. Always use ! prefix."`,
-			"python-in-js": `Create a prompt note: "The code tool ONLY runs JavaScript. When user asks for Python code, write it to a file with fs.writeFileSync('solution.py', code) then run with !python solution.py. Never paste Python syntax (def, print(), import, f-strings) directly into the code tool." Also create a memory: "LLM wrote Python in JS kernel. Must write to file and run with !python."`,
+			"python-in-js": `Create a prompt note: "The code tool runs JavaScript natively. For Python, use %%python cell magic — first line %%python, then Python code. Never paste Python syntax (def, print(), import, f-strings) directly as JS." Also create a memory: "LLM wrote Python in JS kernel. Must use %%python cell magic."`,
 			"top-level-return": `Create a prompt note: "Do not use top-level return in the code tool. Assign the result to a variable and use console.log() to output it."`,
 		};
 

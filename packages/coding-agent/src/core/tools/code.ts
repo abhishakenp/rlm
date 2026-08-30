@@ -45,10 +45,11 @@ function detectPythonInJsError(code: string, ename: string, evalue: string): str
 	// If at least 30% of non-empty lines look like Python, it's Python.
 	if (pythonLines === 0 || pythonLines / lines.length < 0.3) return undefined;
 
-	return `[HINT] This looks like Python code, but the code tool ONLY runs JavaScript. To run Python:
-1. Write the code to a file: fs.writeFileSync("solution.py", \`...your python code...\`)
-2. Run it: !python solution.py
-Never paste Python syntax (def, print(), import, f-strings) directly into the code tool.`;
+	return `[HINT] This looks like Python code, but the code tool runs JavaScript. To run Python, use %%python cell magic — put %%python as the first line, then your Python code. Example:
+%%python
+def hello():
+    print("hi")
+hello()`;
 }
 
 // ─── Schema ──────────────────────────────────────────────────────────────────
@@ -382,9 +383,10 @@ export class CodeKernelProvisioner {
 	}
 
 	/**
-	 * Pre-process code — transform shell syntax to JS:
+	 * Pre-process code — transform shell/python syntax to JS:
 	 *   !command        →  execSync("command").toString()
 	 *   %%bash\n...     →  execSync("...").toString()
+	 *   %%python\n...   →  execSync("python -c '...'").toString()
 	 *
 	 * Applies commandPrefix and shellPath from options to all shell cells.
 	 */
@@ -397,6 +399,17 @@ export class CodeKernelProvisioner {
 			execOptsParts.push(`shell: ${JSON.stringify(shellPath)}`);
 		}
 		const execOpts = `{ ${execOptsParts.join(", ")} }`;
+
+		// %%python cell magic — entire block is Python, run via python -c.
+		const pythonMatch = code.match(/^([ \t]*)%%python\b[^\n]*\n([\s\S]*)/);
+		if (pythonMatch) {
+			const indent = pythonMatch[1] ?? "";
+			const body = (pythonMatch[2] ?? "").trim();
+			// Write to a temp file and run — avoids shell escaping issues.
+			const tmpFile = `/tmp/.rlm-python-${Date.now()}.py`;
+			const js = `((() => { fs.writeFileSync(${JSON.stringify(tmpFile)}, ${JSON.stringify(body)}); const out = execSync(${JSON.stringify(`python3 ${tmpFile}`)}, ${execOpts}); try { fs.unlinkSync(${JSON.stringify(tmpFile)}); } catch {} return out.toString(); })())`;
+			return `${indent}${js}`;
+		}
 
 		// %%bash cell magic — entire block is shell.
 		const bashMatch = code.match(/^([ \t]*)%%bash\b[^\n]*\n([\s\S]*)/);
