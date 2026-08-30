@@ -508,7 +508,7 @@ export class CodeCellComponent implements Component {
 		const isBashCell = parseCodeBashCell(code) !== undefined;
 		const rawLines = code.split("\n");
 		// Highlight the whole cell at once so multi-line strings keep their color.
-		const highlightedLines = isBashCell ? [] : highlightCode(code, "python");
+		const highlightedLines = isBashCell ? [] : highlightCode(code, "js");
 		for (const [index, rawLine] of rawLines.entries()) {
 			const prefix = index === 0 ? theme.fg("dim", "› ") : theme.fg("dim", "  ");
 			const highlighted =
@@ -525,7 +525,7 @@ export class CodeCellComponent implements Component {
 		if (isBashCell || MAGIC_LINE_PATTERN.test(line) || parseCodeBashCell(line) !== undefined) {
 			return theme.fg("bashMode", line);
 		}
-		const highlighted = highlightCode(line, "python");
+		const highlighted = highlightCode(line, "js");
 		return highlighted[0] ?? theme.fg("mdCodeBlock", line);
 	}
 

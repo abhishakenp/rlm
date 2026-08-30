@@ -1,7 +1,7 @@
 /**
  * code — persistent JS code execution tool.
  *
- * Replaces the old Python kernel tool entirely. No kernel process.
+ * Persistent JS execution via vm.Context.
  * Uses Node's vm.Context for persistent variable state across calls.
  *
  * Same UX as prime-agent's code tool:
@@ -27,25 +27,6 @@ import type { ExtensionContext, ToolDefinition } from "../extensions/types.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 
 const require = createRequire(import.meta.url);
-
-/**
- * Detect non-JS syntax in a failed code execution and return a hint.
- * Teaches the LLM within-turn: use console.log(), not print(). Use JS syntax.
- */
-function detectNonJsSyntaxError(code: string, ename: string, evalue: string): string | undefined {
-	const lines = code.split("\n").map((l) => l.trim()).filter(Boolean);
-	for (const line of lines) {
-		// print() — most common mistake. Trigger on first match.
-		if (/^print\(/.test(line)) {
-			return `[HINT] The code tool runs JavaScript. Use console.log() instead of print().`;
-		}
-		// Other non-JS syntax patterns.
-		if (/^(def |class |import |from |elif |self\.|__init__|__name__)/.test(line)) {
-			return `[HINT] The code tool runs JavaScript. This is not valid JS syntax. Use JS equivalents (function, class, import(), etc).`;
-		}
-	}
-	return undefined;
-}
 
 // ─── Schema ──────────────────────────────────────────────────────────────────
 
@@ -77,8 +58,8 @@ export interface CodeToolOptions {
 	sessionId?: string;
 	/** Host request handlers for rlm.run, goal.*, etc. */
 	hostHandlers?: HostRequestHandlers;
-	/** Python skills — kept for compatibility, ignored by JS code tool. */
-	pythonSkills?: readonly any[];
+	/** Legacy skill stubs — ignored by JS code tool. */
+	legacySkills?: readonly any[];
 	/** Per-session artifact dir where namespace snapshot would be stored. Ignored by JS code tool. */
 	snapshotDir?: string;
 	/** Resolves before this kernel starts — ignored by JS code tool (no async boot). */
@@ -353,15 +334,8 @@ export class CodeKernelProvisioner {
 			let stderr = this.outputCapture.stderr.join("");
 
 			const ename = error instanceof Error ? error.name : "Error";
-			let evalue = error instanceof Error ? error.message : String(error);
+			const evalue = error instanceof Error ? error.message : String(error);
 			const traceback = error instanceof Error ? (error.stack ?? "").split("\n") : [String(error)];
-
-			// Detect non-JS syntax in errors and add a hint.
-			// Teaches the LLM within-turn (not just via auto-refine).
-			const syntaxHint = detectNonJsSyntaxError(code, ename, evalue);
-			if (syntaxHint) {
-				evalue = `${evalue}\n\n${syntaxHint}`;
-			}
 
 			return {
 				stdout,

@@ -22,16 +22,11 @@ function skill(name: string): Skill {
 	};
 }
 
-function pythonSkill(name: string, importName = name.replaceAll("-", "_")): Skill {
+function testSkill(name: string): Skill {
 	const base = skill(name);
 	return {
 		...base,
-		kind: "python",
-		python: {
-			importName,
-			packagePath: `/skills/${name}`,
-			pyprojectPath: `/skills/${name}/pyproject.toml`,
-		},
+		kind: "markdown",
 	};
 }
 
@@ -74,7 +69,7 @@ describe("buildRlmPrompt", () => {
 		expect(prompt).toContain("`<skill> --help`");
 	});
 
-	test("gates agent messaging and observation doctrine on installed Python skills", () => {
+	test("gates agent messaging and observation doctrine on installed skills", () => {
 		const withoutCapabilities = buildRlmPrompt({
 			cwd: "/repo",
 			messagesPath: "/repo/session.jsonl",
@@ -309,7 +304,7 @@ describe("buildSystemPrompt", () => {
 		const prompt = buildSystemPrompt({
 			selectedTools: ["code"],
 			contextFiles: [],
-			skills: [pythonSkill("refine"), pythonSkill("agent-message"), pythonSkill("agent-observe")],
+			skills: [testSkill("refine"), testSkill("agent-message"), testSkill("agent-observe")],
 			cwd: "/repo",
 			messagesPath: "/repo/.pi/sessions/session.jsonl",
 			harnessState,
@@ -320,8 +315,8 @@ describe("buildSystemPrompt", () => {
 		expect(prompt).toContain("The continual harness entries below are compact summaries, not full descriptions");
 		expect(prompt).toContain("Use global continual harness refinement only for stable cross-session lessons");
 		expect(prompt).toContain("When to call `await refine.run()`");
-		expect(prompt).toContain("Call contract: read each installed Python skill's SKILL.md");
-		expect(prompt).toContain("Continual harness skill entries are Python REPL skills");
+		expect(prompt).toContain("Call contract: read each installed skill's SKILL.md");
+		expect(prompt).toContain("Continual harness skill entries are JS skills");
 		expect(prompt).toContain("Spawn a continual harness subagent spec by composing a concise task prompt");
 		expect(prompt).toContain("handle = await rlm('sub-task')");
 		expect(prompt).toContain("admission returns immediately");
@@ -395,7 +390,7 @@ describe("buildSystemPrompt", () => {
 		const prompt = buildSystemPrompt({
 			selectedTools: ["code"],
 			contextFiles: [],
-			skills: [pythonSkill("refine"), pythonSkill("agent-message"), pythonSkill("agent-observe")],
+			skills: [testSkill("refine"), testSkill("agent-message"), testSkill("agent-observe")],
 			cwd: "/repo",
 			messagesPath: "/repo/.pi/sessions/session.jsonl",
 		});
@@ -450,7 +445,7 @@ describe("buildSystemPrompt", () => {
 
 		expect(prompt).toContain("You are a general purpose agent that uses code to solve tasks.");
 		expect(prompt).toContain("# Continual Harness State");
-		expect(prompt).toContain("Call contract: read each installed Python skill's SKILL.md");
+		expect(prompt).toContain("Call contract: read each installed skill's SKILL.md");
 		expect(prompt).toContain("subagent: 1");
 		expect(prompt).toContain("The `code` tool is the agent's long-lived notebook");
 		expect(prompt).not.toContain("Default to non-blocking subagents");
@@ -496,7 +491,7 @@ describe("buildSystemPrompt", () => {
 		});
 
 		expect(prompt).toContain("# Continual Harness State");
-		expect(prompt).toContain("Call contract: read each installed Python skill's SKILL.md");
+		expect(prompt).toContain("Call contract: read each installed skill's SKILL.md");
 		expect(prompt).not.toContain("use installed skills as shell commands");
 		expect(prompt).not.toContain("asyncio.create_task");
 		expect(prompt).not.toContain("await <skill_import>");
@@ -557,7 +552,7 @@ describe("buildSystemPrompt", () => {
 			customPrompt: "custom body",
 			selectedTools: ["code"],
 			contextFiles: [],
-			skills: [pythonSkill("agent-message")],
+			skills: [testSkill("agent-message")],
 			cwd: "/repo",
 			rlmDepth: 1,
 			rlmParentAgent: "orchestrator",
@@ -580,7 +575,7 @@ describe("buildSystemPrompt", () => {
 
 		expect(build(["code"], [])).toContain("You are a child agent spawned by your parent agent");
 		expect(build(["code"], [])).not.toContain("agent_message.send");
-		expect(build(["bash"], [pythonSkill("agent-message")])).not.toContain("agent_message.send");
+		expect(build(["bash"], [testSkill("agent-message")])).not.toContain("agent_message.send");
 	});
 
 	test("append system prompt content is included after the rlm harness prompt", () => {
@@ -618,24 +613,23 @@ describe("buildSystemPrompt", () => {
 			cwd: "/repo",
 		});
 
-		expect(prompt).not.toContain("Installed Python skill modules (pre-imported)");
+		expect(prompt).not.toContain("Installed skill modules");
 		expect(prompt).toContain("<available_skills>");
 		expect(prompt).toContain("<name>websearch</name>");
 		expect(prompt).toContain("<type>markdown</type>");
 		expect(prompt).toContain("<location>/skills/websearch/SKILL.md</location>");
 	});
 
-	test("Python skills are configured for Code and included in skill metadata", () => {
+	test("Skills are configured for Code and included in skill metadata", () => {
 		const prompt = buildSystemPrompt({
 			selectedTools: ["code"],
 			contextFiles: [],
-			skills: [pythonSkill("web-search")],
+			skills: [testSkill("web-search")],
 			cwd: "/repo",
 		});
 
 		expect(prompt).toContain("<name>web-search</name>");
-		expect(prompt).toContain("<type>python</type>");
-		expect(prompt).toContain("<python_import>web_search</python_import>");
+		expect(prompt).toContain("<type>markdown</type>");
 	});
 
 	test("prompt guidelines are appended and deduplicated", () => {

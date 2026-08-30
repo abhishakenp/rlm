@@ -1,4 +1,4 @@
-// Host side of MCP integrations. The protocol itself runs Python-side in the kernel; the host
+// Host side of MCP integrations. The protocol itself runs in the code tool; the host
 // only registers OAuth providers, gates integration skills by auth, and serves mcp.* host-requests.
 
 import {
@@ -151,7 +151,7 @@ export class McpManager {
 			"mcp.refresh": async (payload) => {
 				const server = String(payload.server ?? "");
 				if (!server) throw new Error("mcp.refresh requires a server");
-				// getApiKey refreshes + rewrites auth.json under lock; Python re-reads.
+				// getApiKey refreshes + rewrites auth.json under lock; code tool re-reads.
 				// Surface failure (throw) instead of a false success so the kernel can
 				// report a refresh error rather than a misleading "not enabled".
 				const key = await this.authStorage.getApiKey(this.providerId(server));

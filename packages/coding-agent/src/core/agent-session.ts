@@ -176,7 +176,7 @@ import {
 	createSessionSlashCommandResultMessage,
 	HEARTBEAT_PROMPT_CUSTOM_TYPE,
 	HEARTBEAT_PROMPT_PREVIEW_LABEL,
-	IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
+	CODE_STATE_RESTORED_CUSTOM_TYPE,
 	isSessionSlashCommandMessage,
 	RLM_CHILD_FAILURE_CUSTOM_TYPE,
 	RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
@@ -255,7 +255,7 @@ import {
 } from "./session-manager.js";
 import type { SessionStats } from "./session-stats.js";
 import type { SettingsManager } from "./settings-manager.js";
-import { getPythonSkillRuntimeInfo, type Skill } from "./skills.js";
+import { type Skill } from "./skills.js";
 import {
 	parseRefineCommandOptions,
 	parseSessionSlashCommand,
@@ -417,7 +417,7 @@ export interface AgentSessionConfig {
 	 */
 	includeCompactSkill?: boolean;
 	/**
-	 * Optional host-side controller for the bundled rlm-heartbeat Python skill.
+	 * Optional host-side controller for the bundled rlm-heartbeat skill.
 	 * When omitted, rlm_heartbeat.* host requests are unavailable.
 	 */
 	rlmHeartbeatController?: AgentRlmHeartbeatController;
@@ -1467,11 +1467,6 @@ export class AgentSession {
 					description: "Shell command used as bare JS — must use ! or %%bash prefix",
 				},
 				{
-					key: "non-js-syntax",
-					test: /^\s*(def |print\(|import |from |elif |f"|f'|None\b|True\b|False\b|self\.|__init__|__name__)/,
-					description: "Non-JS syntax in code tool — use console.log() not print(), use JS syntax",
-				},
-				{
 					key: "top-level-return",
 					test: /^return\s/,
 					description: "Top-level return in code tool — assign to result and console.log instead",
@@ -1509,7 +1504,6 @@ export class AgentSession {
 		// Build refinement instructions based on the error pattern.
 		const instructionsByPattern: Record<string, string> = {
 			"shell-as-js": `Create a prompt note: "Shell commands (ls, cat, grep, git, etc.) MUST be prefixed with ! or use %%bash in the code tool. Bare shell commands cause ReferenceError. Example: use !ls not ls." Also create a memory: "LLM attempted bare shell command as JS. Always use ! prefix."`,
-			"non-js-syntax": `Create a prompt note: "The code tool runs JavaScript only. Use console.log() not print(). Use JS syntax (function, class, import()) not other languages." Also create a memory: "LLM used non-JS syntax in code tool. Must use JavaScript only."`,
 			"top-level-return": `Create a prompt note: "Do not use top-level return in the code tool. Assign the result to a variable and use console.log() to output it."`,
 		};
 
@@ -7451,7 +7445,7 @@ export class AgentSession {
 		lines.push("</code_state_restored>");
 		void this.sendCustomMessage(
 			{
-				customType: IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
+				customType: CODE_STATE_RESTORED_CUSTOM_TYPE,
 				content: lines.join("\n"),
 				display: true,
 				details: { restored: result.restored.length > 0 },
@@ -9099,7 +9093,6 @@ export class AgentSession {
 		flagValues?: Map<string, boolean | string>;
 		includeAllExtensionTools?: boolean;
 	}): void {
-		const pythonSkills = getPythonSkillRuntimeInfo(this._modelVisibleSkills());
 		let configuredBaseToolDefinitions: Record<string, ToolDefinition>;
 		if (this._baseToolsOverride) {
 			configuredBaseToolDefinitions = Object.fromEntries(
@@ -9123,7 +9116,6 @@ export class AgentSession {
 				env: this._rlmKernelEnv(),
 				sessionId: this.sessionId,
 				hostHandlers: this._createKernelHostHandlers(),
-				pythonSkills,
 				snapshotDir: this._codeKernelSnapshotDir,
 				readyGate: previousDispose,
 				onRestore: notifyRestore ? (result) => this._onCodeStateRestored(result) : undefined,

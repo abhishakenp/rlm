@@ -25,7 +25,7 @@ export interface GoalState {
 	lastError?: string;
 }
 
-/** Goal payload returned to the kernel-side goal skill. Keys are Python-conventional snake_case. */
+/** Goal payload returned to the kernel-side goal skill. Keys are snake_case. */
 export type SerializedGoal = {
 	goal_id?: string;
 	objective: string;

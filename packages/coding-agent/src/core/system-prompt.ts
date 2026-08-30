@@ -4,7 +4,7 @@
 
 import { buildChildAgentDoctrine, buildRlmPrompt, buildSubagentGuidance } from "./prompts/index.js";
 import { formatHarnessStateForPrompt, type HarnessState, REFINE_SKILL_NAME } from "./refinement/index.js";
-import { formatSkillsForPrompt, getPythonSkillRuntimeInfo, type Skill } from "./skills.js";
+import { formatSkillsForPrompt, type Skill } from "./skills.js";
 
 export interface BuildSystemPromptOptions {
 	/** Custom system prompt (replaces default). */
@@ -70,7 +70,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const tools = selectedTools ?? ["code"];
 	const hasBash = tools.includes("bash");
 	const visibleSkills = skills.filter((skill) => !skill.disableModelInvocation);
-	const visibleSkillImportNames = getPythonSkillRuntimeInfo(visibleSkills).map((skill) => skill.importName);
 	const hasRefineSkill = visibleSkills.some((skill) => skill.name === REFINE_SKILL_NAME);
 	const genericMcpSection = formatGenericMcpGuidance(options.genericMcpServers);
 
@@ -100,7 +99,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		const childDoctrine = buildChildAgentDoctrine({
 			depth: options.rlmDepth,
 			parentAgent: options.rlmParentAgent,
-			installedSkills: visibleSkillImportNames,
 			activeTools: tools,
 		});
 		if (childDoctrine) {
@@ -129,7 +127,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	let prompt = buildRlmPrompt({
 		cwd: promptCwd,
 		messagesPath: promptMessagesPath,
-		installedSkills: visibleSkillImportNames,
 		activeTools: tools.filter((name) => name === "code" || name === "bash" || name === "edit"),
 		allowRecursion,
 		depth: options.rlmDepth,
@@ -140,13 +137,8 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	// menu, so the model reads when/why to delegate and then sees the concrete subagent
 	// specs it can match against — the same ordering as Claude Code's Agent tool.
 	if (allowRecursion ?? true) {
-		const visibleSkillNames = new Set(
-			getPythonSkillRuntimeInfo(visibleSkills).map((skill) => skill.importName),
-		);
 		prompt += `\n\n${buildSubagentGuidance({
 			includeRefineExamples: hasRefineSkill,
-			hasAgentMessage: visibleSkillNames.has("agent_message"),
-			hasAgentObserve: visibleSkillNames.has("agent_observe"),
 		})}`;
 	}
 

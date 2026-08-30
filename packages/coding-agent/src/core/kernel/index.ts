@@ -1,6 +1,6 @@
 /**
  * Kernel types — minimal stubs.
- * The old Python kernel has been fully replaced by the JS code tool
+ * The JS code tool replaces the old kernel
  * (packages/coding-agent/src/core/tools/code.ts). These type definitions
  * remain for compatibility with agent-session.ts which references them.
  */

@@ -26,7 +26,7 @@ const SIMPLIFIED_TECHNICAL_ENGLISH_PROMPT = [
 ].join("\n");
 
 const CODE_CONTROL_PROMPT = [
-	"The `code` tool is the agent's long-lived notebook: a persistent JavaScript execution environment for reasoning, context management, state, tool orchestration, and recursive subcalls. Use it to keep intermediate variables, inspect and transform outputs, and write small helper functions. The code tool ONLY runs JavaScript. If you need to run another language, use `!command` or `%%bash` to shell out — e.g. `!python -m script.py`.",
+	"The `code` tool is the agent's long-lived notebook: a persistent JavaScript execution environment for reasoning, context management, state, tool orchestration, and recursive subcalls. Use it to keep intermediate variables, inspect and transform outputs, and write small helper functions. The code tool ONLY runs JavaScript. If you need to run another language, use `!command` or `%%bash` to shell out.",
 	"",
 	"MANDATORY: Use the code tool for ANY task — including writing code, computation, file inspection, shell commands, variable inspection, context operations, or subagent spawning. When the user asks you to 'write' code in any language, you MUST use the code tool to write it to a file and run it — never just output code as text. Do not answer from memory when you can verify by running code. Do not describe what you would do — do it in the code tool and report the result.",
 	"",
@@ -40,7 +40,7 @@ const CODE_CONTROL_PROMPT = [
 	"",
 	"Each `%%bash` cell runs in a throw-away subshell, so shell-level state (`cd`, `export`, `source`, shell variables) does NOT carry to later cells. Keep dependent shell steps inside one `%%bash` cell when they need shared shell state.",
 	"",
-	"JavaScript state in the kernel persists across cells via `globalThis`: named variables assigned with `globalThis.x = ...`, helper functions, imports, notes, parsed outputs, and helper data structures all remain available in every later turn. The last expression's value is returned as the result. `console.log()` output is captured as stdout. `console.error()` and `console.warn()` are captured as stderr. Always use `console.log()` — never `print()`.",
+	"JavaScript state in the kernel persists across cells via `globalThis`: named variables assigned with `globalThis.x = ...`, helper functions, imports, notes, parsed outputs, and helper data structures all remain available in every later turn. The last expression's value is returned as the result. `console.log()` output is captured as stdout. `console.error()` and `console.warn()` are captured as stderr.",
 	"",
 	"Available globals: `fs`, `path`, `os`, `exec`, `execSync`, `fetch`, `import()` (dynamic ESM), `require` (CJS), `Buffer`, `URL`, `process`, `setTimeout`, `setInterval`, `TextEncoder`, `TextDecoder`. Top-level `await` is supported.",
 	"",

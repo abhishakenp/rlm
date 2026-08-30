@@ -13,7 +13,7 @@ import {
 	type CustomMessage,
 	HEARTBEAT_PROMPT_CUSTOM_TYPE,
 	type HeartbeatPromptDetails,
-	IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
+	CODE_STATE_RESTORED_CUSTOM_TYPE,
 	type CodeStateRestoredDetails,
 	RLM_CHILD_FAILURE_CUSTOM_TYPE,
 	RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
@@ -36,7 +36,7 @@ export function isInjectedPromptMessage(message: AgentMessage): message is Injec
 		message.role === "custom" &&
 		(message.customType === HEARTBEAT_PROMPT_CUSTOM_TYPE ||
 			message.customType === GOAL_CONTEXT_CUSTOM_TYPE ||
-			message.customType === IPYTHON_STATE_RESTORED_CUSTOM_TYPE ||
+			message.customType === CODE_STATE_RESTORED_CUSTOM_TYPE ||
 			message.customType === RLM_CHILD_FAILURE_CUSTOM_TYPE ||
 			message.customType === RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE)
 	);
@@ -111,7 +111,7 @@ export class InjectedPromptMessageComponent extends Container {
 		this.content.clear();
 		this.header.setText(this.headerText());
 		this.content.addChild(this.header);
-		if (this.expanded && this.message.customType !== IPYTHON_STATE_RESTORED_CUSTOM_TYPE) {
+		if (this.expanded && this.message.customType !== CODE_STATE_RESTORED_CUSTOM_TYPE) {
 			this.content.addChild(
 				new Markdown(readCustomText(this.message), 1, 0, this.markdownTheme, {
 					color: (text: string) => theme.fg("customMessageText", text),
@@ -125,7 +125,7 @@ export class InjectedPromptMessageComponent extends Container {
 		if (this.message.customType === HEARTBEAT_PROMPT_CUSTOM_TYPE) {
 			return this.heartbeatHeaderText();
 		}
-		if (this.message.customType === IPYTHON_STATE_RESTORED_CUSTOM_TYPE) {
+		if (this.message.customType === CODE_STATE_RESTORED_CUSTOM_TYPE) {
 			const details = this.message.details as CodeStateRestoredDetails | undefined;
 			const label = details?.restored === false ? "Started fresh Code kernel" : "Restored Code kernel state";
 			return `${theme.fg("accent", "◆")} ${theme.fg("muted", label)}`;
