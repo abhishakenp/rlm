@@ -927,7 +927,13 @@ function autoRefineInstructions(reason: AutoRefineReason, review: AutoRefineRevi
 		? `
 Reviewer instructions: ${review.instructions}`
 		: "";
-	return `Automatic refine review triggered by ${reason}. Only create/update/delete local harness entries if there is clear evidence that should help this session continue. Prefer an empty edits array over speculative or one-off memories. Do not promote anything global unless explicitly requested. Reviewer rationale: ${review.rationale}${detail}`;
+	const reasonContext: Record<AutoRefineReason, string> = {
+		turn_interval: "Only create/update/delete local harness entries if there is clear evidence that should help this session continue. Prefer an empty edits array over speculative or one-off memories.",
+		compact: "Context was compacted. Persist any important findings that might have been lost.",
+		tool_error: "A tool errored. Learn from the error so it never repeats. Create a prompt note (behavioral fix), memory (durable fact), or skill (repeatable procedure) as appropriate.",
+		tool_discovery: "Significant tool usage this turn. Persist useful discoveries (file locations, API patterns, project structure) so they don't need to be rediscovered. Create memories for facts, prompt notes for behavioral lessons.",
+	};
+	return `Automatic refine review triggered by ${reason}. ${reasonContext[reason] ?? ""} Do not promote anything global unless explicitly requested. Reviewer rationale: ${review.rationale}${detail}`;
 }
 
 function isNonNegativeInteger(value: unknown): value is number {
@@ -1202,8 +1208,10 @@ export class AgentSession {
 	private _baseSystemPrompt = "";
 	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
 	private _assistantTurnsSinceAutoRefine = 0;
-	/** Track tool errors for auto-refine — repeated errors trigger refinement. */
-	private _toolErrorPatterns: Map<string, number> = new Map();
+	/** Tool calls in the current turn — triggers discovery refinement when high. */
+	private _toolCallsThisTurn = 0;
+	/** Tool errors in the current turn — triggers error refinement. */
+	private _toolErrorsThisTurn = 0;
 	private _lastAutoRefineReviewAt = 0;
 	private _autoRefineInProgress = false;
 	private readonly _autoRefineOperations = new Set<Promise<void>>();
@@ -1412,11 +1420,12 @@ export class AgentSession {
 		};
 
 		this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
-			// Track tool errors for auto-refine. When the LLM makes a repeated
-			// mistake (e.g. running `ls` as JS instead of `!ls`), detect the
-			// pattern and trigger refinement so it learns and never repeats.
-			if (isError && toolCall.name === "code") {
-				this._trackToolError(args as Record<string, unknown>, result);
+			// Track all tool calls and errors for auto-refine.
+			// Any error → learn from it. Many tool calls → learn from discoveries.
+			this._toolCallsThisTurn++;
+			if (isError) {
+				this._toolErrorsThisTurn++;
+				this._trackToolErrorDynamic(toolCall.name, args as Record<string, unknown>, result);
 			}
 
 			const runner = this._extensionRunner;
@@ -1447,79 +1456,70 @@ export class AgentSession {
 	}
 
 	/**
-	 * Track tool errors and trigger auto-refine on repeated patterns.
-	 * When the LLM makes the same mistake twice (e.g. running `ls` as JS
-	 * instead of `!ls`), the system learns via refinement and never repeats.
+	 * Track ANY tool error and trigger auto-refine to learn from it.
+	 * No hardcoded patterns — the LLM reviews the error and decides
+	 * what to persist (prompt note, memory, skill) so it never repeats.
 	 */
-	private _trackToolError(args: Record<string, unknown>, result: { content: any[] }): void {
+	private _trackToolErrorDynamic(
+		toolName: string,
+		args: Record<string, unknown>,
+		result: { content: any[] },
+	): void {
 		try {
-			const code = String(args?.code ?? "");
+			const input = String(args?.code ?? args?.command ?? args?.path ?? JSON.stringify(args)).slice(0, 200);
 			const errorText = result.content
 				?.map((c: any) => (typeof c === "string" ? c : c?.text ?? ""))
 				.join(" ")
 				.slice(0, 500) ?? "";
 
-			// Detect common mistake patterns.
-			const patterns: Array<{ key: string; test: RegExp; description: string }> = [
-				{
-					key: "shell-as-js",
-					test: /^(ls|cd|cat|grep|find|rm|cp|mv|mkdir|touch|chmod|echo|pwd|whoami|uname|df|du|ps|kill|head|tail|wc|sort|uniq|diff|tar|gzip|gunzip|ssh|scp|curl|wget|git|npm|yarn|pnpm|bun|node|python|pip|cargo|rustc|make|cmake|docker|kubectl|helm)\b/,
-					description: "Shell command used as bare JS — must use ! or %%bash prefix",
-				},
-				{
-					key: "top-level-return",
-					test: /^return\s/,
-					description: "Top-level return in code tool — assign to result and console.log instead",
-				},
-			];
+			const review: AutoRefineReview = {
+				shouldRefine: true,
+				rationale: `Tool "${toolName}" errored. Input: "${input}". Error: ${errorText.slice(0, 150)}. Review this error and create a prompt note or memory so this mistake is never repeated.`,
+				instructions: `Review the tool error above. Decide what went wrong and create the appropriate harness entries:
+- If the error reveals a behavioral mistake (wrong syntax, wrong approach, wrong API): create a **prompt note** with the correct behavior.
+- If the error reveals a durable fact (API quirk, file location, environment detail): create a **memory**.
+- If the error reveals a repeatable procedure that should be codified: create a **skill**.
+Prefer the smallest effective edit. If the error is trivial and unlikely to recur, create nothing (empty edits array).`,
+			};
 
-			for (const pattern of patterns) {
-				if (pattern.test.test(code.trim())) {
-					const count = (this._toolErrorPatterns.get(pattern.key) ?? 0) + 1;
-					this._toolErrorPatterns.set(pattern.key, count);
-					console.error(`[rlm] tool error pattern detected: ${pattern.key} (count=${count})`);
+			this._pendingAutoRefineReview = {
+				reason: "tool_error" as AutoRefineReason,
+				review,
+			};
 
-					// On first occurrence, immediately schedule auto-refine.
-					// The refinement will add a prompt note so this never repeats.
-					if (count === 1) {
-						this._scheduleAutoRefineForToolError(pattern.key, pattern.description, code, errorText);
-					}
-					break;
-				}
-			}
+			console.error(`[rlm] auto-refine scheduled for tool error on "${toolName}"`);
 		} catch { /* best effort */ }
 	}
 
 	/**
-	 * Schedule auto-refine for a tool error pattern. This creates a refinement
-	 * that adds a prompt note, so the LLM learns from the mistake and never
-	 * repeats it in future turns.
+	 * Track tool call count per turn. When the LLM uses many tool calls
+	 * to discover something (e.g. searching for a login button across 10
+	 * files), trigger auto-refine to persist the finding so it doesn't
+	 * waste time and tokens rediscovering it next time.
 	 */
-	private _scheduleAutoRefineForToolError(
-		patternKey: string,
-		description: string,
-		failedCode: string,
-		errorText: string,
-	): void {
-		// Build refinement instructions based on the error pattern.
-		const instructionsByPattern: Record<string, string> = {
-			"shell-as-js": `Create a prompt note: "Shell commands (ls, cat, grep, git, etc.) MUST be prefixed with ! or use %%bash in the code tool. Bare shell commands cause ReferenceError. Example: use !ls not ls." Also create a memory: "LLM attempted bare shell command as JS. Always use ! prefix."`,
-			"top-level-return": `Create a prompt note: "Do not use top-level return in the code tool. Assign the result to a variable and use console.log() to output it."`,
-		};
+	private _maybeScheduleDiscoveryRefine(): void {
+		// Only trigger if this turn had many tool calls — indicates
+		// significant exploration/discovery worth persisting.
+		const DISCOVERY_THRESHOLD = 5;
+		if (this._toolCallsThisTurn < DISCOVERY_THRESHOLD) return;
+		if (this._toolErrorsThisTurn > 0) return; // error refine already scheduled
 
 		const review: AutoRefineReview = {
 			shouldRefine: true,
-			rationale: `Tool error pattern detected: ${description}. The LLM ran "${failedCode.slice(0, 60)}" which failed with: ${errorText.slice(0, 100)}. This must never repeat.`,
-			instructions: instructionsByPattern[patternKey] ?? `Create a prompt note to prevent: ${description}`,
+			rationale: `This turn used ${this._toolCallsThisTurn} tool calls — significant exploration. Review what was discovered and persist useful findings so they don't need to be rediscovered.`,
+			instructions: `Review the trajectory of this turn. The LLM used ${this._toolCallsThisTurn} tool calls to accomplish the task. Identify what was discovered that would be useful in future sessions:
+- **Memories**: durable facts discovered (file locations, API patterns, project structure, config details, test commands)
+- **Prompt notes**: behavioral lessons (efficient approaches, common pitfalls, shortcuts)
+- **Skills**: repeatable procedures that were figured out step-by-step
+Prefer the smallest effective edit. Only persist genuinely reusable findings — not one-off task details.`,
 		};
 
-		// Schedule the refinement to run after the current turn.
 		this._pendingAutoRefineReview = {
-			reason: "turn_interval" as AutoRefineReason,
+			reason: "tool_discovery" as AutoRefineReason,
 			review,
 		};
 
-		console.error(`[rlm] auto-refine scheduled for tool error: ${patternKey}`);
+		console.error(`[rlm] auto-refine scheduled for discovery (${this._toolCallsThisTurn} tool calls)`);
 	}
 
 	private _installAgentContinuationHook(): void {
@@ -3683,6 +3683,11 @@ export class AgentSession {
 				}
 				if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "aborted") {
 					this._assistantTurnsSinceAutoRefine++;
+					// Check if this turn had significant tool usage → discovery refine.
+					this._maybeScheduleDiscoveryRefine();
+					// Reset per-turn tool counters.
+					this._toolCallsThisTurn = 0;
+					this._toolErrorsThisTurn = 0;
 					// In serialized mode, kick off background refinement planning
 					// immediately after the primary stream finishes, while tools
 					// are still executing. The plan is awaited at shouldStopAfterTurn

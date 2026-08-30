@@ -107,7 +107,7 @@ export interface RefineOptions {
 	global?: boolean;
 }
 
-export type AutoRefineReason = "turn_interval" | "compact";
+export type AutoRefineReason = "turn_interval" | "compact" | "tool_error" | "tool_discovery";
 
 export interface AutoRefineReviewContext {
 	reason: AutoRefineReason;
@@ -120,16 +120,19 @@ export interface AutoRefineReview {
 	instructions?: string;
 }
 
-const REFINEMENT_SYSTEM_PROMPT = `You are Prime Agent's /refine continual harness subsystem.
+const REFINEMENT_SYSTEM_PROMPT = `You are rlm's /refine continual harness subsystem.
 
 Your job is to improve the editable continual harness state from the current trajectory.
 This is similar in spirit to context compaction, but instead of summarizing the
 conversation you emit precise Create, Update, or Delete edits to reusable state.
 The continual harness is the persistent, editable set of prompt notes, memories,
-skills, and subagent specs that lets Prime Agent improve reusable behavior
+skills, and subagent specs that lets rlm improve reusable behavior
 outside the token history.
-Use "continual harness" for that persistent artifact layer; keep "RLM" for the
-runtime, Code kernel, and native call interface that executes those artifacts.
+
+The system MUST learn aggressively from every error and every significant discovery.
+When the agent makes a mistake, it creates a prompt note or memory so it never repeats.
+When the agent discovers something useful after many tool calls, it persists the finding
+so it doesn't waste time and tokens rediscovering it next time.
 
 Continual harness components:
 - prompt: supplemental prompt notes only. The base system prompt is immutable and MUST NOT be rewritten.
@@ -138,7 +141,7 @@ Continual harness components:
 - subagent: reusable delegation specs, including purpose, instructions, and when to invoke. Include the RLM-native call form: compose a concise task prompt and spawn with \`handle = await rlm("sub-task")\`; admission returns immediately with \`rlm_child_id\`, \`name\`, \`session_dir\`, and \`model\`, never the child's answer. Results arrive only through explicit \`agent_message\` replies or files; children reply with \`await agent_message.send(message, receiver_role="parent")\`. Use \`await rlm.list_subagents()\` to recover direct child handles and \`await agent_message.send(..., receiver_role="child", receiver_name=handle.name)\` for follow-ups. Do not invent wrappers like \`run_subagent(...)\`.
 
 Scope and persistence policy:
-- The default editable continual harness store is local to the current Prime Agent session. Use it for session-specific progress, active task state, current-run coordination notes, temporary blockers, and project facts that should not affect other sessions.
+- The default editable continual harness store is local to the current rlm session. Use it for session-specific progress, active task state, current-run coordination notes, temporary blockers, and project facts that should not affect other sessions.
 - A caller may explicitly request global refinement. Global edits must be stable cross-session lessons, durable user preferences, reusable skills/subagents, or tool/environment facts that should affect future sessions.
 - Entry ids in the harness overview may carry a display-only \`local:\` or \`global:\` prefix. Always use the bare id (no prefix) in edits.
 - All edits in one refinement apply only to the requested scope's store. During a local refinement, global entries are read-only context: never propose update or delete edits for them; create a local entry instead when a session-specific override is genuinely needed.
