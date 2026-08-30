@@ -21,7 +21,7 @@ const JS_RLM_SPAWN_PATTERN = /rlm\.(?:spawn|run)\(['"]([^'"]+)['"]/;
 const JS_CONSOLE_PATTERN = /console\.(log|error|warn)\(/;
 const JS_COMMENT_PATTERN = /^\s*\/\//;
 
-export type CodePreviewLanguage = "bash" | "js" | "python";
+export type CodePreviewLanguage = "bash" | "js";
 
 export interface CodePreview {
 	language: CodePreviewLanguage;
@@ -336,13 +336,6 @@ export function previewCodeCode(code: string): CodePreview {
 	const bashCell = parseCodeBashCell(trimmedCode);
 	if (bashCell) {
 		return previewBashCommand(bashCell.body);
-	}
-	// %%python cell magic — preview as python.
-	const pythonMatch = trimmedCode.match(/^([ \t]*)%%python\b[^\n]*\n([\s\S]*)/);
-	if (pythonMatch) {
-		const body = (pythonMatch[2] ?? "").trim();
-		const firstMeaningful = body.split("\n").find((l) => l.trim() && !l.trim().startsWith("#"));
-		return { language: "python", text: firstMeaningful?.trim() ?? "python" };
 	}
 	return previewJsCode(trimmedCode);
 }
