@@ -17,7 +17,7 @@
  *    No bundle import. No static import. Everything is a plugin.
  *
  * Config resolution (DSH-style layering):
- * - Root: cordis.yml at repo root (or config/profile.yml fallback)
+ * - Root: cordis.yml at repo root
  * - Project: .rlm/cordis.yml (if present)
  * - Global: ~/.rlm/cordis.yml (if present)
  * - Patches: ~/.rlm/cordis.patch.yml (applied last)
@@ -38,7 +38,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 // HMR requires --expose-internals for Cordis loader internals.
 // Dev mode: re-exec with tsx so HMR can re-import TS source.
-// Installed mode: run directly — plugins are compiled JS, CLI is bundled JS.
+// Installed mode: run with compiled JS plugins (no tsx, no HMR).
 if (!process.execArgv.includes("--expose-internals")) {
 	const { spawn } = await import("node:child_process");
 
@@ -57,20 +57,14 @@ if (!process.execArgv.includes("--expose-internals")) {
 			else process.exit(code ?? 0);
 		});
 	} else {
-		// Installed mode: no tsx, no HMR — use the compiled bundle directly.
-		// The bundle is still built for published installs; cordis-shell.mjs
-		// is the dev entry point. In prod, the bin entry points to the bundle.
-		const bundlePath = join(here, "packages", "coding-agent", "dist", "bundle", "cli-main.js");
-		if (existsSync(bundlePath)) {
-			const { runCli } = await import(bundlePath);
-			await runCli();
-		} else {
-			// No tsx, no bundle — try main() (will likely fail on TS imports).
-			main().catch((error) => {
-				console.error(error);
-				process.exit(1);
-			});
-		}
+		// Installed mode: no tsx — use compiled JS plugins.
+		// cordis.yml points to src/index.ts but tsx isn't available, so
+		// rewrite paths to dist/index.js at runtime.
+		// HMR is not available in installed mode (no source to watch).
+		main().catch((error) => {
+			console.error(error);
+			process.exit(1);
+		});
 	}
 } else {
 	main().catch((error) => {
@@ -81,7 +75,7 @@ if (!process.execArgv.includes("--expose-internals")) {
 
 /**
  * Resolve the cordis.yml config path using DSH-style layering.
- * Priority: CLI --config > project .rlm/cordis.yml > root cordis.yml > config/profile.yml
+ * Priority: CLI --config > project .rlm/cordis.yml > root cordis.yml
  * Patches: ~/.rlm/cordis.patch.yml (applied after base config)
  */
 function resolveConfigPath() {
@@ -101,12 +95,6 @@ function resolveConfigPath() {
 	const rootConfig = join(here, "cordis.yml");
 	if (existsSync(rootConfig)) {
 		return { path: rootConfig, patches: resolvePatchPath() };
-	}
-
-	// Fallback: config/profile.yml (legacy)
-	const legacyConfig = join(here, "config", "profile.yml");
-	if (existsSync(legacyConfig)) {
-		return { path: legacyConfig, patches: resolvePatchPath() };
 	}
 
 	return { path: null, patches: null };
@@ -144,7 +132,7 @@ async function bootCordis() {
 	// Resolve config path using DSH-style layering.
 	const { path: configPath, patches: patchPath } = resolveConfigPath();
 	if (!configPath) {
-		console.error("[rlm] No cordis.yml found (looked: .rlm/cordis.yml, cordis.yml, config/profile.yml)");
+		console.error("[rlm] No cordis.yml found (looked: .rlm/cordis.yml, cordis.yml)");
 		process.exit(1);
 	}
 
@@ -408,7 +396,6 @@ async function main() {
 	const { ctx, hmrWatchers } = await bootCordis();
 	if (!ctx) process.exit(1);
 
-	// The code tool is now the native built-in — no override injection needed.
 	console.error(`[rlm] code tool is native built-in`);
 
 	// Inject the context registry proxy into the agent session.
@@ -424,45 +411,46 @@ async function main() {
 		console.error(`[rlm] context registry unavailable: ${error?.message ?? error}`);
 	}
 
-	// Launch the agent via Cordis services — no bundle, no static import.
-	// The rlmAgent service provides createSession(), the rlmRenderer service
-	// provides start() for interactive mode.
-	try {
-		const agentService = ctx.get("rlmAgent");
-		const rendererService = ctx.get("rlmRenderer");
+	// Determine mode: --print → print mode, otherwise interactive.
+	const printIdx = process.argv.indexOf("--print");
+	const isPrint = printIdx !== -1 && process.argv[printIdx + 1];
+	const isPiped = !process.stdin.isTTY;
 
-		if (!agentService && !rendererService) {
-			console.error(`[rlm] no agent services available — falling back to source CLI`);
-			const { runCli } = await import("./packages/coding-agent/src/cli-main.ts");
-			await runCli();
-		} else if (rendererService) {
-			// Interactive mode: use the renderer service (hot-swappable).
-			console.error(`[rlm] launching via rlmRenderer (Cordis service)`);
-			await rendererService.start({ cwd: process.cwd() });
-		} else {
-			// Fallback: import the CLI source directly (not hot-swappable, but works).
-			console.error(`[rlm] rlmRenderer unavailable — falling back to source CLI`);
-			const { runCli } = await import("./packages/coding-agent/src/cli-main.ts");
-			await runCli();
+	try {
+		if (isPrint || isPiped) {
+			// Print mode: use the rlmPrint service.
+			const printService = ctx.get("rlmPrint");
+			if (!printService) {
+				throw new Error("rlmPrint service not available — plugin failed to load");
+			}
+			const prompt = isPrint ? process.argv[printIdx + 1] : "";
+			console.error(`[rlm] print mode via rlmPrint (Cordis service)`);
+			const exitCode = await printService.run({
+				mode: "text",
+				initialMessage: prompt,
+			});
+			if (ctx?.fiber?.dispose) await ctx.fiber.dispose();
+			for (const w of hmrWatchers ?? []) { try { w.close(); } catch {} }
+			process.exit(exitCode ?? 0);
 		}
+
+		// Interactive mode: use the rlmRenderer service.
+		const rendererService = ctx.get("rlmRenderer");
+		if (!rendererService) {
+			throw new Error("rlmRenderer service not available — plugin failed to load");
+		}
+		console.error(`[rlm] interactive mode via rlmRenderer (Cordis service)`);
+		await rendererService.start({ cwd: process.cwd() });
 	} catch (error) {
-		console.error(`[rlm] agent failed: ${error?.message ?? error}`);
-		// Last resort: try the source CLI.
-		try {
-			const { runCli } = await import("./packages/coding-agent/src/cli-main.ts");
-			await runCli();
-		} catch (e2) {
-			console.error(`[rlm] CLI fallback also failed: ${e2?.message ?? e2}`);
-			process.exit(1);
-		}
-	} finally {
-		// Dispose Cordis root fiber — all plugin fibers unload.
+		console.error(`[rlm] fatal: ${error?.message ?? error}`);
 		if (ctx?.fiber?.dispose) await ctx.fiber.dispose();
-		// Close HMR watchers.
-		for (const w of hmrWatchers ?? []) {
-			try { w.close(); } catch { /* best effort */ }
-		}
+		for (const w of hmrWatchers ?? []) { try { w.close(); } catch {} }
+		process.exit(1);
 	}
+
+	// Cleanup on normal exit.
+	if (ctx?.fiber?.dispose) await ctx.fiber.dispose();
+	for (const w of hmrWatchers ?? []) { try { w.close(); } catch {} }
 
 	if (!process.stdout.isTTY) {
 		process.exit(0);

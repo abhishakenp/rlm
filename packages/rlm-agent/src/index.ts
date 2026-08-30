@@ -1,9 +1,9 @@
 /**
- * @rlm/agent — AgentSession and session services as a Cordis Service.
+ * @rlm/agent — AgentSession runtime as a Cordis Service.
  *
- * Core plugin — wraps createAgentSessionServices / createAgentSessionFromServices
- * behind a service so other plugins can build agent sessions via dependency
- * injection instead of importing the coding-agent internals directly.
+ * Core plugin — wraps createAgentSessionRuntime behind a service so other
+ * plugins (renderer, print) can build full agent runtimes via dependency
+ * injection instead of importing coding-agent internals directly.
  *
  * Depends on:
  * - @rlm/config (rlmConfig) for settingsManager / modelRegistry / authStorage
@@ -21,6 +21,11 @@ import {
 	type CreateAgentSessionServicesOptions,
 	type CreateAgentSessionFromServicesOptions,
 } from "../../coding-agent/src/core/agent-session-services.js";
+import {
+	createAgentSessionRuntime,
+	type AgentSessionRuntime,
+	type CreateAgentSessionRuntimeFactory,
+} from "../../coding-agent/src/core/agent-session-runtime.js";
 import type { AgentSession } from "../../coding-agent/src/core/agent-session.js";
 import type { SessionManager } from "../../coding-agent/src/core/session-manager.js";
 import type { CreateAgentSessionResult } from "../../coding-agent/src/core/sdk.js";
@@ -66,8 +71,6 @@ export class RlmAgentService extends Service {
 			modelRegistry: rlmConfig?.getModelRegistry?.() as never,
 		});
 
-		// Touch the session manager so the dependency is exercised; the actual
-		// manager is passed into createSession() by callers.
 		void rlmSession?.getSessionManager?.();
 
 		this.ctx.logger?.info(`rlm-agent: ready (cwd=${cwd}, agentDir=${agentDir})`);
@@ -107,6 +110,51 @@ export class RlmAgentService extends Service {
 		});
 	}
 
+	/**
+	 * Create a full AgentSessionRuntime — the complete agent runtime with
+	 * session, services, and runtime metadata. This is what InteractiveMode
+	 * and runPrintMode need.
+	 */
+	async createRuntime(options: {
+		sessionConfig?: Record<string, unknown>;
+		sessionOptions?: Record<string, unknown>;
+	}): Promise<AgentSessionRuntime> {
+		const rlmSession = this.ctx.get("rlmSession") as {
+			getSessionManager: () => SessionManager;
+		};
+		const sessionManager = rlmSession?.getSessionManager?.();
+		if (!sessionManager) {
+			throw new Error("rlm-agent: no SessionManager available");
+		}
+		const cwd = this.services?.cwd ?? this.config.cwd ?? process.cwd();
+		const agentDir = this.services?.agentDir ?? this.config.agentDir ?? getAgentDir();
+
+		const createRuntimeFn: CreateAgentSessionRuntimeFactory = async (runtimeOptions) => {
+			const prepared = await this.createServices({
+				cwd,
+				agentDir,
+			});
+			const created = await this.createSession({
+				services: prepared,
+				sessionManager,
+				...(runtimeOptions.sessionOptions ?? {}),
+			});
+			return {
+				...created,
+				services: prepared,
+				diagnostics: [],
+			};
+		};
+
+		return createAgentSessionRuntime(createRuntimeFn, {
+			cwd,
+			agentDir,
+			sessionManager,
+			sessionConfig: options.sessionConfig as never,
+			sessionOptions: options.sessionOptions as never,
+		});
+	}
+
 	getServices(): AgentSessionServices | undefined {
 		return this.services;
 	}
@@ -116,4 +164,4 @@ export default RlmAgentService;
 export const name = "rlm-agent";
 export const inject = ["rlmConfig", "rlmSession", "rlmTools", "rlmRefine"] as const;
 export { RlmAgentService as RlmAgent };
-export type { AgentSession, AgentSessionServices, CreateAgentSessionResult };
+export type { AgentSession, AgentSessionServices, CreateAgentSessionResult, AgentSessionRuntime };

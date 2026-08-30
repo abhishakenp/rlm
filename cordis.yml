@@ -20,7 +20,8 @@
 #
 #   Presentation layer (depends on agent):
 #    11. renderer — InteractiveMode (terminal rendering, input handling)
-#    12. sdk      — in-process subagent spawning (wraps agent service)
+#    12. print    — Print mode (single-shot prompt → output → exit)
+#    13. sdk      — in-process subagent spawning (wraps agent service)
 #
 # Dependency order: config → context/tui → session/tools/refine/code/workflow/learn
 #                   → agent → renderer/sdk
@@ -85,6 +86,11 @@
 
 - id: renderer
   name: './packages/rlm-tui-renderer/src/index.ts'
+  config:
+    cwd: .
+
+- id: print
+  name: './packages/rlm-print/src/index.ts'
   config:
     cwd: .
 
