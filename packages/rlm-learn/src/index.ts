@@ -7,9 +7,9 @@
  * What it does:
  * - Listens to rlm/workflow-* events from @rlm/workflow
  * - Records every workflow run: name, input, result, duration, success
- * - Writes to ~/.rlm/workflows/learnings.jsonl
+ * - Writes to ~/.rlm/agent/workflows/learnings.jsonl
  * - Periodically reflects: "what patterns led to success?"
- * - Proposes workflow modifications via LLM → ~/.rlm/workflows/proposals/
+ * - Proposes workflow modifications via LLM → ~/.rlm/agent/workflows/proposals/
  * - Operator approves → proposal moves to workflows/ → HMR picks it up
  *
  * The learning loop:
@@ -76,7 +76,7 @@ export class RlmLearnService extends Service {
 	}
 
 	async [Service.init]() {
-		const baseDir = join(homedir(), ".rlm", "workflows");
+		const baseDir = join(homedir(), ".rlm", "agent", "workflows");
 		this.learningsPath = join(baseDir, "learnings.jsonl");
 		this.proposalsDir = join(baseDir, "proposals");
 
@@ -297,7 +297,7 @@ ${summary}`,
 			throw new Error(`rlm-learn: proposal ${filename} not found`);
 		}
 
-		const workflowsDir = join(homedir(), ".rlm", "workflows");
+		const workflowsDir = join(homedir(), ".rlm", "agent", "workflows");
 		const workflowPath = join(workflowsDir, `${workflowName}.ts`);
 		renameSync(proposalPath, workflowPath);
 

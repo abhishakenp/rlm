@@ -42,7 +42,7 @@ function resolvePkgDir(): string {
 		// Unbundled: <pkgDir>/dist/cli/fleet/runtime-operations.js → 4 levels up
 		return dirname(dirname(dirname(dirname(thisFile))));
 	} catch {
-		return join(homedir(), ".rlm");
+		return join(homedir(), ".rlm", "agent");
 	}
 }
 
@@ -53,7 +53,7 @@ export function builtinRuntimesDir(): string {
 	if (existsSync(dir)) return dir;
 	// Fallback: try common install locations
 	const candidates = [
-		join(homedir(), ".rlm", "dist", "plugins", "runtimes"),
+		join(homedir(), ".rlm", "agent", "dist", "plugins", "runtimes"),
 		"/usr/local/lib/prime-agent/dist/plugins/runtimes",
 		"/opt/prime-agent/dist/plugins/runtimes",
 	];
@@ -68,7 +68,7 @@ export function templateRuntimesDir(): string {
 	const pkgDir = resolvePkgDir();
 	const dir = join(pkgDir, "dist", "plugins", "templates");
 	if (existsSync(dir)) return dir;
-	return join(homedir(), ".rlm", "dist", "plugins", "templates");
+	return join(homedir(), ".rlm", "agent", "dist", "plugins", "templates");
 }
 
 export interface RuntimePluginInfo {

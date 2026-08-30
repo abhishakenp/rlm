@@ -117,7 +117,7 @@ export interface BundleManifest {
 /** Assemble a self-contained agent bundle. */
 export async function assembleBundle(spec: BundleSpec): Promise<string> {
 	const bundleId = randomUUID();
-	const bundleDir = join(homedir(), ".rlm", "bundles", bundleId);
+	const bundleDir = join(homedir(), ".rlm", "agent", "bundles", bundleId);
 	mkdirSync(bundleDir, { recursive: true });
 
 	// 1. Copy the runtime (prime-agent bundle)
@@ -185,7 +185,7 @@ export async function assembleBundle(spec: BundleSpec): Promise<string> {
 	writeFileSync(join(agentDir, "identity.json"), JSON.stringify(spec.identity, null, 2), "utf-8");
 
 	// 5. Write settings (model config)
-	const settingsSrc = join(homedir(), ".rlm", "settings.json");
+	const settingsSrc = join(homedir(), ".rlm", "agent", "settings.json");
 	const agentSettings = existsSync(settingsSrc) ? JSON.parse(readFileSync(settingsSrc, "utf-8")) : {};
 	if (spec.model) agentSettings.defaultModel = spec.model;
 	// Don't set defaultProvider — let the CLI find whatever provider has the model + a key.
@@ -196,7 +196,7 @@ export async function assembleBundle(spec: BundleSpec): Promise<string> {
 	writeFileSync(join(agentDir, "settings.json"), JSON.stringify(agentSettings, null, 2), "utf-8");
 
 	// 5b. Copy models.json (registers OmniRoute as a custom provider)
-	const modelsJsonSrc = join(homedir(), ".rlm", "models.json");
+	const modelsJsonSrc = join(homedir(), ".rlm", "agent", "models.json");
 	if (existsSync(modelsJsonSrc)) {
 		copyFileSync(modelsJsonSrc, join(agentDir, "models.json"));
 	}
@@ -288,7 +288,7 @@ export async function assembleBundle(spec: BundleSpec): Promise<string> {
 
 	// 9. Write the entry point script
 	const workDir = spec.workDir ?? `.rlm/sessions/fleet/${spec.identity.agentId}`;
-	const settingsPath = join(homedir(), ".rlm", "settings.json");
+	const settingsPath = join(homedir(), ".rlm", "agent", "settings.json");
 	const settings = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf-8")) : {};
 	const model = spec.model ?? settings.defaultModel ?? "";
 

@@ -85,7 +85,7 @@ export interface FleetConfig {
 	removed?: string[];
 }
 
-const FLEET_CONFIG_PATH = join(homedir(), ".rlm", "fleet.json");
+const FLEET_CONFIG_PATH = join(homedir(), ".rlm", "agent", "fleet.json");
 
 export async function loadFleetConfig(): Promise<FleetConfig> {
 	try {

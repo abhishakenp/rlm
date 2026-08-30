@@ -55,7 +55,7 @@ Scopes: `project` (`.rlm/context.json`), `session`, `task`.
 
 ## Configuration
 
-Settings: `~/.rlm/settings.json`
+Settings: `~/.rlm/agent/settings.json`
 
 ```json
 {

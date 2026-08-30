@@ -53,18 +53,19 @@ LLM-generated: task-specific variables (user prompts, findings, decisions, tool 
 ### Data paths
 
 - **Project-level**: `.rlm/` in the project root (context, sessions, skills)
-- **Global**: `~/.rlm/` (settings, sessions, skills, extensions, runtimes, workflows, memory)
+- **Global**: `~/.rlm/agent/` (settings, sessions, skills, extensions, workflows, memory)
 - **Bundled**: `config/profile.yml` in the rlm repo (plugin composition)
 
 | Path | Level | Contents |
 |------|-------|----------|
-| `~/.rlm/settings.json` | Global | Provider, model, maxDepth, thinking level |
-| `~/.rlm/sessions/` | Global | JSONL session persistence |
-| `~/.rlm/skills/` | Global | Installed skills |
-| `~/.rlm/extensions/` | Global | Installed extensions |
+| `~/.rlm/agent/settings.json` | Global | Provider, model, maxDepth, thinking level |
+| `~/.rlm/agent/sessions/` | Global | JSONL session persistence |
+| `~/.rlm/agent/skills/` | Global | Installed skills |
+| `~/.rlm/agent/extensions/` | Global | Installed extensions |
+| `~/.rlm/agent/workflows/` | Global | Hot-swappable TS workflows |
+| `~/.rlm/agent/memory/` | Global | Persistent key-value memory |
 | `~/.rlm/runtimes/` | Global | User plugin overrides (`.mjs` + `.json`) |
-| `~/.rlm/workflows/` | Global | Hot-swappable TS workflows |
-| `~/.rlm/memory/` | Global | Persistent key-value memory |
+| `~/.rlm/config.json` | Global | Auth config |
 | `.rlm/context.json` | Project | Project-scoped context variables |
 | `config/profile.yml` | Bundled | Cordis plugin composition |
 

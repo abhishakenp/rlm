@@ -5,7 +5,7 @@
   "type": "module",
   "piConfig": {
     "name": "rlm",
-    "configDir": ".rlm"
+    "configDir": ".rlm/agent"
   },
   "bin": {
     "rlm": "dist/bundle/cli.js"

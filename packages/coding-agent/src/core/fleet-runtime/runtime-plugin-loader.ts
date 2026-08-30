@@ -65,7 +65,7 @@ export function builtinRuntimesDir(): string {
 		const installDir = dirname(dirname(dirname(dirname(thisFile))));
 		return join(installDir, "dist", "plugins", "runtimes");
 	} catch {
-		return join(homedir(), ".rlm", "dist", "plugins", "runtimes");
+		return join(homedir(), ".rlm", "agent", "dist", "plugins", "runtimes");
 	}
 }
 
