@@ -20,14 +20,16 @@
  *     }
  *   }));
  *
- * Hot-swap: editing a workflow file triggers chokidar → dispose old → re-import.
- * The new workflow is active immediately — no restart.
+ * Hot-swap: editing a workflow file triggers fs.watch (Node built-in, registered
+ * as a Cordis effect) → dispose old → re-import. The new workflow is active
+ * immediately — no restart. Active work is NEVER interrupted.
  *
  * Reference: Cordis HMR philosophy — plugins are disposable, reloadable fibers.
- * This applies the same principle to workflow definitions.
+ * This applies the same principle to workflow definitions. No chokidar —
+ * only Node built-in fs.watch registered via ctx.effect().
  */
 import { Service } from "@deepseek-ai/cordis";
-import { watch } from "chokidar";
+import { watch as fsWatch, type FSWatcher } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
@@ -71,7 +73,7 @@ export class RlmWorkflowService extends Service {
 	declare config: RlmWorkflowConfig;
 	private workflows: Map<string, Workflow> = new Map();
 	private workflowFactories: Map<string, (api: WorkflowApi) => Workflow> = new Map();
-	private watcher: any = null;
+	private watcher: FSWatcher | null = null;
 
 	constructor(ctx: any, config: RlmWorkflowConfig = {}) {
 		super(ctx, undefined as any);
@@ -161,37 +163,52 @@ export class RlmWorkflowService extends Service {
 		}
 	}
 
-	/** Start chokidar watcher for hot-reload. */
+	/** Start fs.watch watcher for hot-reload (Cordis-native, no chokidar). */
 	private startWatcher() {
 		const dir = this.getWorkflowsDir();
 		if (!existsSync(dir)) return;
 
-		this.watcher = watch(dir, {
-			ignoreInitial: true,
-			ignored: ["**/node_modules", "**/.*"],
-		});
-
-		this.watcher.on("change", (path: string) => {
-			if (path.endsWith(".ts") || path.endsWith(".js") || path.endsWith(".mjs")) {
-				this.ctx.logger?.info(`rlm-workflow: HMR — ${path} changed, reloading...`);
-				this.loadWorkflow(path);
-			}
-		});
-
-		this.watcher.on("add", (path: string) => {
-			if (path.endsWith(".ts") || path.endsWith(".js") || path.endsWith(".mjs")) {
-				this.ctx.logger?.info(`rlm-workflow: new workflow ${path}, loading...`);
-				this.loadWorkflow(path);
-			}
-		});
-
-		this.watcher.on("unlink", (path: string) => {
-			const name = path.split("/").pop()!.replace(/\.(ts|js|mjs)$/, "");
-			this.workflows.delete(name);
-			this.workflowFactories.delete(name);
-			this.ctx.logger?.info(`rlm-workflow: removed "${name}"`);
-			this.ctx.emit("rlm/workflow-removed", { name, path });
-		});
+		try {
+			this.watcher = fsWatch(dir, { recursive: true }, (event, filename) => {
+				if (!filename) return;
+				const path = join(dir, filename);
+				if (path.endsWith(".ts") || path.endsWith(".js") || path.endsWith(".mjs")) {
+					if (event === "rename") {
+						// File deleted — remove from registry.
+						if (!existsSync(path)) {
+							const name = filename.replace(/\.(ts|js|mjs)$/, "");
+							this.workflows.delete(name);
+							this.workflowFactories.delete(name);
+							this.ctx.logger?.info(`rlm-workflow: removed "${name}"`);
+							this.ctx.emit("rlm/workflow-removed", { name, path });
+							return;
+						}
+					}
+					this.ctx.logger?.info(`rlm-workflow: HMR — ${path} changed, reloading...`);
+					this.loadWorkflow(path);
+				}
+			});
+		} catch {
+			// recursive not supported — watch the directory non-recursively
+			try {
+				this.watcher = fsWatch(dir, (event, filename) => {
+					if (!filename) return;
+					const path = join(dir, filename);
+					if (path.endsWith(".ts") || path.endsWith(".js") || path.endsWith(".mjs")) {
+						if (event === "rename" && !existsSync(path)) {
+							const name = filename.replace(/\.(ts|js|mjs)$/, "");
+							this.workflows.delete(name);
+							this.workflowFactories.delete(name);
+							this.ctx.logger?.info(`rlm-workflow: removed "${name}"`);
+							this.ctx.emit("rlm/workflow-removed", { name, path });
+							return;
+						}
+						this.ctx.logger?.info(`rlm-workflow: HMR — ${path} changed, reloading...`);
+						this.loadWorkflow(path);
+					}
+				});
+			} catch { /* best effort */ }
+		}
 	}
 
 	/** Get a workflow by name. */

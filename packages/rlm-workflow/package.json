@@ -11,6 +11,5 @@
   },
   "dependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "chokidar": "^5.0.0"
   }
 }

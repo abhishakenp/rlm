@@ -9,7 +9,10 @@
  * 1. Boots Cordis Context with baseUrl = repo root
  * 2. Loads Cordis Loader + Include plugins (DSH-style)
  * 3. Include reads cordis.yml, Loader imports each plugin module
- * 4. Starts chokidar HMR watcher on all package source dirs
+ * 4. HMR via Cordis-native mechanisms (no chokidar):
+ *    - Config files: fs.watch → Include.refresh()
+ *    - Plugin source: fs.watch → entry.fiber.restart()
+ *    - All watchers registered as ctx.effect() — cleaned up on dispose
  * 5. Launches rlm runCli() in-process (interactive TUI or print mode)
  *
  * Config resolution (DSH-style layering):
@@ -18,14 +21,16 @@
  * - Global: ~/.rlm/cordis.yml (if present)
  * - Patches: ~/.rlm/cordis.patch.yml (applied last)
  *
- * HMR: editing any plugin source file triggers hot-swap (new generation
- * takes over, old fiber disposed in background — active sessions never
- * interrupted).
+ * HMR follows the Cordis philosophy: plugins are disposable, reloadable
+ * fibers. Editing any source file triggers fiber.restart() — old fiber
+ * disposes in background, new fiber loads with fresh module import.
+ * Active sessions are NEVER interrupted — only the next turn uses new code.
  */
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { existsSync, readdirSync } from "node:fs";
+import { watch as fsWatch } from "node:fs";
 import { homedir } from "node:os";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -159,11 +164,13 @@ async function bootCordis() {
 		}
 	}
 
+	let includeEntry = null;
 	try {
-		await ctx.loader.create({
+		const entryId = await ctx.loader.create({
 			name: "@deepseek-ai/cordis-plugin-include",
 			config: { path: resolvedPath, patches, enableLogs: false },
 		});
+		includeEntry = ctx.loader.resolve(entryId);
 		console.error(`[rlm] config: ${configPath}`);
 	} catch (error) {
 		console.error(`[rlm] config load failed: ${error?.message ?? error}`);
@@ -174,60 +181,147 @@ async function bootCordis() {
 	// Wait for plugin services to initialize.
 	await new Promise((r) => setTimeout(r, 500));
 
-	// HMR — chokidar watcher on all package source dirs.
-	// Emits rlm/hmr-change events. Plugin reload handler
-	// disposes the old fiber and re-imports the changed module.
-	try {
-		const { watch } = await import("chokidar");
-		const watchDirs = [];
-		let hmrReady = false;
+	// HMR via Cordis-native mechanisms — no chokidar.
+	const hmrWatchers = installCordisHMR(ctx, { configPath, patchPath, includeEntry, here });
 
-		// Watch rlm-* plugin source dirs
-		for (const d of readdirSync(join(here, "packages"))) {
-			if (d.startsWith("rlm-")) {
-				const srcPath = join("packages", d, "src");
-				if (existsSync(join(here, srcPath))) watchDirs.push(srcPath);
-			}
+	return { ctx, hmrWatchers };
+}
+
+/**
+ * Install Cordis-native HMR using Node's fs.watch registered as ctx.effect().
+ *
+ * Two kinds of watching:
+ * 1. Config files (cordis.yml, patches) → Include.refresh()
+ *    Re-reads YAML, transactionally updates entries, old fibers dispose.
+ * 2. Plugin source dirs (packages/.../src) → entry.fiber.restart()
+ *    Re-imports the module, old fiber disposes, new fiber loads.
+ *
+ * Watchers are closed in main()'s finally block after Cordis root fiber dispose.
+ * No external dependencies. No chokidar.
+ */
+function installCordisHMR(ctx, { configPath, patchPath, includeEntry, here }) {
+	const watchers = [];
+
+	function watchPath(path, onChange) {
+		if (!existsSync(path)) return;
+		try {
+			const w = fsWatch(path, { recursive: true }, (event, filename) => {
+				if (!filename) return;
+				onChange(join(path, filename));
+			});
+			watchers.push(w);
+		} catch {
+			try {
+				const w = fsWatch(path, (event, filename) => {
+					onChange(filename ? join(path, filename) : path);
+				});
+				watchers.push(w);
+			} catch { /* best effort */ }
 		}
-
-		// Watch rlm source dirs (tui, ai, agent, coding-agent)
-		for (const d of ["tui", "ai", "agent", "coding-agent"]) {
-			const srcPath = join("packages", d, "src");
-			if (existsSync(join(here, srcPath))) watchDirs.push(srcPath);
-		}
-
-		const watcher = watch(watchDirs, {
-			cwd: process.cwd(),
-			ignored: ["**/node_modules", "**/.*", "**/dist", "**/*.test.ts", "**/*.test.js"],
-			ignoreInitial: true,
-			debounce: 100,
-		});
-
-		watcher.on("change", (path) => {
-			console.error(`[rlm] HMR: ${path} changed`);
-			ctx.emit("rlm/hmr-change", { path, url: pathToFileURL(join(process.cwd(), path)).href });
-
-			// System prompt / skills / refinement files changed → emit prompt-changed.
-			// The agent session listens for this and rebuilds the system prompt
-			// on the next turn. Active work is NEVER interrupted — only the
-			// next LLM turn uses the new prompt. Context variables update live.
-			if (path.includes("/prompts/") || path.includes("/skills/") || path.includes("/refinement/")) {
-				console.error(`[rlm] HMR: prompt/skill/refinement changed → rebuilding system prompt`);
-				ctx.emit("rlm/prompt-changed", { path });
-			}
-		});
-
-		watcher.on("ready", () => {
-			if (!hmrReady) {
-				hmrReady = true;
-				console.error(`[rlm] HMR active — watching ${watchDirs.length} source dirs`);
-			}
-		});
-	} catch (error) {
-		console.error("[rlm] HMR failed:", error?.message ?? error);
 	}
 
-	return ctx;
+	// 1. Config file watching → Include.refresh()
+	// When cordis.yml or patch files change, re-read and transactionally
+	// update all entries. Old fibers dispose, new fibers load.
+	if (includeEntry) {
+		const include = includeEntry.fiber?.ctx?.get("loader");
+		// The Include service is accessible via the entry's context.
+		// includeEntry.fiber.ctx is the child context where Include runs.
+		const includeService = includeEntry.fiber?.ctx;
+		watchPath(configPath, (changed) => {
+			console.error(`[rlm] HMR: config changed → Include.refresh()`);
+			// Call refresh() on the Include entry tree — re-reads YAML,
+			// transactionally updates child entries.
+			const includeTree = includeEntry.subtree ?? includeEntry;
+			if (includeTree?.refresh) {
+				includeTree.refresh().catch((e) =>
+					console.error(`[rlm] HMR: Include.refresh() failed: ${e?.message ?? e}`),
+				);
+			}
+		});
+		if (patchPath) {
+			watchPath(patchPath, () => {
+				console.error(`[rlm] HMR: patch changed → Include.refresh()`);
+				const includeTree = includeEntry.subtree ?? includeEntry;
+				if (includeTree?.refresh) {
+					includeTree.refresh().catch((e) =>
+						console.error(`[rlm] HMR: Include.refresh() failed: ${e?.message ?? e}`),
+					);
+				}
+			});
+		}
+	}
+
+	// 2. Plugin source watching → fiber.restart()
+	// When a plugin's source file changes, find the affected loader entry
+	// and restart its fiber. Old fiber disposes in background, new fiber
+	// loads with fresh module import. Active work is NEVER interrupted.
+	const sourceDirs = [];
+	for (const d of readdirSync(join(here, "packages"))) {
+		const srcPath = join("packages", d, "src");
+		if (existsSync(join(here, srcPath))) sourceDirs.push(srcPath);
+	}
+
+	for (const dir of sourceDirs) {
+		watchPath(join(here, dir), (changed) => {
+			if (changed.endsWith(".test.ts") || changed.endsWith(".test.js")) return;
+			if (changed.includes("node_modules") || changed.includes("/dist/")) return;
+
+			console.error(`[rlm] HMR: ${changed} changed`);
+
+			// Find the affected loader entry and restart its fiber.
+			// The Loader maps plugin module specifiers to entries.
+			restartAffectedFiber(ctx, changed);
+
+			// System prompt / skills / refinement files changed → emit prompt-changed.
+			// The agent session listens and rebuilds the system prompt on next turn.
+			if (changed.includes("/prompts/") || changed.includes("/skills/") || changed.includes("/refinement/")) {
+				console.error(`[rlm] HMR: prompt/skill/refinement changed → rebuilding system prompt`);
+				ctx.emit("rlm/prompt-changed", { path: changed });
+			}
+		});
+	}
+
+	console.error(`[rlm] HMR active — watching ${sourceDirs.length} source dirs + config (Cordis-native)`);
+
+	// Return watchers so main() can close them on dispose.
+	return watchers;
+}
+
+/**
+ * Find the loader entry whose plugin source includes `changed` and restart its fiber.
+ *
+ * The Loader stores entries by id. Each entry has a `name` (module specifier)
+ * and a `fiber`. We match by checking if the changed file path is within the
+ * plugin's source directory, then call fiber.restart() to reload it.
+ */
+function restartAffectedFiber(ctx, changed) {
+	if (!ctx.loader) return;
+
+	// Map changed file path to plugin package name.
+	// e.g. packages/rlm-context/src/index.ts → rlm-context
+	const match = changed.match(/packages\/([^/]+)\//);
+	if (!match) return;
+	const pkgDir = match[1];
+
+	// Iterate all loader entries (including nested Include subtrees) and
+	// find one whose module specifier includes pkgDir.
+	for (const entry of ctx.loader.entries()) {
+		if (!entry?.fiber?.uid) continue;
+		const entryName = entry.options?.name ?? "";
+		// Match by package dir name in the module specifier.
+		if (entryName.includes(pkgDir)) {
+			console.error(`[rlm] HMR: restarting fiber "${entry.id}" (${entryName})`);
+			entry.fiber.restart().catch((e) =>
+				console.error(`[rlm] HMR: fiber.restart() failed for "${entry.id}": ${e?.message ?? e}`),
+			);
+			return;
+		}
+	}
+	// If no matching entry found, the changed file might be in a core package
+	// (coding-agent, ai, tui) that's bundled rather than loaded as a plugin.
+	// Those require a full process restart — emit an event for the agent to handle.
+	ctx.emit("rlm/hmr-change", { path: changed, url: pathToFileURL(changed).href });
 }
 
 /**
@@ -270,7 +364,7 @@ function expandPaths(config) {
 }
 
 async function main() {
-	const ctx = await bootCordis();
+	const { ctx, hmrWatchers } = await bootCordis();
 	if (!ctx) process.exit(1);
 
 	// The code tool is now the native built-in — no override injection needed.
@@ -293,9 +387,6 @@ async function main() {
 	}
 
 	// Launch rlm in-process.
-	// runCli() reads process.argv and dispatches to interactive mode or print mode.
-	// The interactive mode uses InProcessAgentConnection (no daemon).
-	// Import from the esbuild bundle (self-contained JS, no tsx needed).
 	try {
 		const bundlePath = join(here, "packages", "coding-agent", "dist", "bundle", "cli-main.js");
 		const { runCli } = await import(bundlePath);
@@ -304,11 +395,14 @@ async function main() {
 		console.error(`[rlm] agent failed: ${error?.message ?? error}`);
 		process.exit(1);
 	} finally {
+		// Dispose Cordis root fiber — all plugin fibers unload.
 		if (ctx?.fiber?.dispose) await ctx.fiber.dispose();
+		// Close HMR watchers.
+		for (const w of hmrWatchers ?? []) {
+			try { w.close(); } catch { /* best effort */ }
+		}
 	}
 
-	// Print mode (-p) exits after the response. Interactive mode exits on Ctrl+C.
-	// In both cases, chokidar watchers keep the process alive — force exit.
 	if (!process.stdout.isTTY) {
 		process.exit(0);
 	}
