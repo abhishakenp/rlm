@@ -13,7 +13,8 @@
  *    - Config files: fs.watch → Include.refresh()
  *    - Plugin source: fs.watch → entry.fiber.restart()
  *    - All watchers registered as ctx.effect() — cleaned up on dispose
- * 5. Launches rlm runCli() in-process (interactive TUI or print mode)
+ * 5. Launches the agent via Cordis services (rlmAgent + rlmRenderer)
+ *    No bundle import. No static import. Everything is a plugin.
  *
  * Config resolution (DSH-style layering):
  * - Root: cordis.yml at repo root (or config/profile.yml fallback)
@@ -56,11 +57,20 @@ if (!process.execArgv.includes("--expose-internals")) {
 			else process.exit(code ?? 0);
 		});
 	} else {
-		// Installed mode: no tsx, no HMR — run directly with compiled JS.
-		main().catch((error) => {
-			console.error(error);
-			process.exit(1);
-		});
+		// Installed mode: no tsx, no HMR — use the compiled bundle directly.
+		// The bundle is still built for published installs; cordis-shell.mjs
+		// is the dev entry point. In prod, the bin entry points to the bundle.
+		const bundlePath = join(here, "packages", "coding-agent", "dist", "bundle", "cli-main.js");
+		if (existsSync(bundlePath)) {
+			const { runCli } = await import(bundlePath);
+			await runCli();
+		} else {
+			// No tsx, no bundle — try main() (will likely fail on TS imports).
+			main().catch((error) => {
+				console.error(error);
+				process.exit(1);
+			});
+		}
 	}
 } else {
 	main().catch((error) => {
@@ -319,9 +329,40 @@ function restartAffectedFiber(ctx, changed) {
 		}
 	}
 	// If no matching entry found, the changed file might be in a core package
-	// (coding-agent, ai, tui) that's bundled rather than loaded as a plugin.
-	// Those require a full process restart — emit an event for the agent to handle.
-	ctx.emit("rlm/hmr-change", { path: changed, url: pathToFileURL(changed).href });
+	// (coding-agent, ai) that's referenced by a plugin via relative import.
+	// Restart ALL plugins that inject the affected service, since the import
+	// graph is opaque to the loader. The fiber.restart() will re-import.
+	const affectedPlugins = findPluginsImportingPackage(ctx, pkgDir);
+	for (const entry of affectedPlugins) {
+		console.error(`[rlm] HMR: restarting fiber "${entry.id}" (imports ${pkgDir})`);
+		entry.fiber.restart().catch((e) =>
+			console.error(`[rlm] HMR: fiber.restart() failed for "${entry.id}": ${e?.message ?? e}`),
+		);
+	}
+	if (affectedPlugins.length === 0) {
+		ctx.emit("rlm/hmr-change", { path: changed, url: pathToFileURL(changed).href });
+	}
+}
+
+/**
+ * Find loader entries whose plugin source imports from the given package dir.
+ * Since plugins use relative imports (../../coding-agent/src/...), we check
+ * if the package dir name appears in the entry's module specifier.
+ */
+function findPluginsImportingPackage(ctx, pkgDir) {
+	const entries = [];
+	if (!ctx.loader) return entries;
+	for (const entry of ctx.loader.entries()) {
+		if (!entry?.fiber?.uid) continue;
+		const entryName = entry.options?.name ?? "";
+		// rlm-* plugins import from coding-agent via relative paths.
+		// If coding-agent source changes, restart all rlm-* plugins that
+		// depend on it.
+		if (entryName.includes("rlm-") && pkgDir === "coding-agent") {
+			entries.push(entry);
+		}
+	}
+	return entries;
 }
 
 /**
@@ -371,9 +412,6 @@ async function main() {
 	console.error(`[rlm] code tool is native built-in`);
 
 	// Inject the context registry proxy into the agent session.
-	// The context service is a Cordis plugin — we expose it via globalThis
-	// so agent-session.ts can pass it into the code tool's VM context.
-	// Also expose the Cordis context itself for HMR event listening.
 	globalThis.__rlmCordisContext = ctx;
 	try {
 		const contextService = ctx.get("rlmContext");
@@ -386,14 +424,37 @@ async function main() {
 		console.error(`[rlm] context registry unavailable: ${error?.message ?? error}`);
 	}
 
-	// Launch rlm in-process.
+	// Launch the agent via Cordis services — no bundle, no static import.
+	// The rlmAgent service provides createSession(), the rlmRenderer service
+	// provides start() for interactive mode.
 	try {
-		const bundlePath = join(here, "packages", "coding-agent", "dist", "bundle", "cli-main.js");
-		const { runCli } = await import(bundlePath);
-		await runCli();
+		const agentService = ctx.get("rlmAgent");
+		const rendererService = ctx.get("rlmRenderer");
+
+		if (!agentService && !rendererService) {
+			console.error(`[rlm] no agent services available — falling back to source CLI`);
+			const { runCli } = await import("./packages/coding-agent/src/cli-main.ts");
+			await runCli();
+		} else if (rendererService) {
+			// Interactive mode: use the renderer service (hot-swappable).
+			console.error(`[rlm] launching via rlmRenderer (Cordis service)`);
+			await rendererService.start({ cwd: process.cwd() });
+		} else {
+			// Fallback: import the CLI source directly (not hot-swappable, but works).
+			console.error(`[rlm] rlmRenderer unavailable — falling back to source CLI`);
+			const { runCli } = await import("./packages/coding-agent/src/cli-main.ts");
+			await runCli();
+		}
 	} catch (error) {
 		console.error(`[rlm] agent failed: ${error?.message ?? error}`);
-		process.exit(1);
+		// Last resort: try the source CLI.
+		try {
+			const { runCli } = await import("./packages/coding-agent/src/cli-main.ts");
+			await runCli();
+		} catch (e2) {
+			console.error(`[rlm] CLI fallback also failed: ${e2?.message ?? e2}`);
+			process.exit(1);
+		}
 	} finally {
 		// Dispose Cordis root fiber — all plugin fibers unload.
 		if (ctx?.fiber?.dispose) await ctx.fiber.dispose();

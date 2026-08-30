@@ -1,37 +1,67 @@
 # rlm profile — Cordis entry-list composing all plugins.
 #
-# Six plugins, all hot-swappable via HMR:
-#   1. TUI — extension service (other plugins register slash commands, components)
-#   2. Context — persistent typed variable registry (agent working memory)
-#   3. Code — persistent JS code execution (replaces bash + edit)
-#   4. SDK — in-process subagent spawning (wraps coding-agent runtime)
-#   5. Workflow — hot-swappable TS workflows from ~/.rlm/agent/workflows/
-#   6. Learn — self-evolution (tracks outcomes, proposes modifications)
+# Twelve plugins, ALL hot-swappable via fiber.restart():
 #
-# Order matters: TUI must load first so other plugins can register extensions.
-# Context must load before Code so the context service is available when Code
-# injects it into the VM context. Code must load before SDK so the code service
-# is available when SDK spawns subagents.
+#   Foundation layer (no dependencies):
+#     1. config  — settings, model registry, auth storage
+#     2. context — persistent typed variable registry (agent working memory)
+#     3. tui     — TUI extension service (slash commands, components)
+#
+#   Core layer (depends on foundation):
+#     4. session — session manager + persistence
+#     5. tools   — tool registry (code, edit)
+#     6. refine  — refinement + auto-refine
+#     7. code    — persistent JS code execution (replaces bash + edit)
+#     8. workflow — hot-swappable TS workflows from ~/.rlm/agent/workflows/
+#     9. learn   — self-evolution (tracks outcomes, proposes modifications)
+#
+#   Agent layer (depends on core):
+#    10. agent   — AgentSession (the LLM loop, tool dispatch, subagent spawning)
+#
+#   Presentation layer (depends on agent):
+#    11. renderer — InteractiveMode (terminal rendering, input handling)
+#    12. sdk      — in-process subagent spawning (wraps agent service)
+#
+# Dependency order: config → context/tui → session/tools/refine/code/workflow/learn
+#                   → agent → renderer/sdk
+#
+# HMR: editing ANY plugin source triggers fiber.restart() on that plugin.
+#      Active work continues on old fiber; new work uses reloaded plugin.
 
-- id: tui
-  name: './packages/rlm-tui/src/index.ts'
+# ─── Foundation ──────────────────────────────────────────────────────────────
+
+- id: config
+  name: './packages/rlm-config/src/index.ts'
+  config:
+    cwd: .
 
 - id: context
   name: './packages/rlm-context/src/index.ts'
   config:
     projectRoot: .
 
+- id: tui
+  name: './packages/rlm-tui/src/index.ts'
+
+# ─── Core ────────────────────────────────────────────────────────────────────
+
+- id: session
+  name: './packages/rlm-session/src/index.ts'
+
+- id: tools
+  name: './packages/rlm-tools/src/index.ts'
+  config:
+    timeout: 60000
+    maxOutputChars: 65536
+
+- id: refine
+  name: './packages/rlm-refine/src/index.ts'
+
 - id: code
   name: './packages/rlm-code/src/index.ts'
   config:
     timeout: 60000
     maxOutputChars: 65536
-
-- id: sdk
-  name: './packages/rlm-sdk/src/index.ts'
-  config:
-    maxDepth: 10
-    defaultModel: auto/best-free
 
 - id: workflow
   name: './packages/rlm-workflow/src/index.ts'
@@ -43,3 +73,23 @@
   config:
     reflectInterval: 60000
     maxLearningsBeforeReflect: 10
+
+# ─── Agent ───────────────────────────────────────────────────────────────────
+
+- id: agent
+  name: './packages/rlm-agent/src/index.ts'
+  config:
+    cwd: .
+
+# ─── Presentation ────────────────────────────────────────────────────────────
+
+- id: renderer
+  name: './packages/rlm-tui-renderer/src/index.ts'
+  config:
+    cwd: .
+
+- id: sdk
+  name: './packages/rlm-sdk/src/index.ts'
+  config:
+    maxDepth: 10
+    defaultModel: auto/best-free
