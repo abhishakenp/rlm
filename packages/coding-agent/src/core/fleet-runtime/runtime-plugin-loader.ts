@@ -6,7 +6,7 @@
  * loaded from two directories:
  *
  *   1. <installDir>/dist/plugins/runtimes/  ← built-in plugins (self-contained .mjs)
- *   2. ~/.prime/runtimes/                   ← user plugins (override built-ins)
+ *   2. ~/.rlm/runtimes/                   ← user plugins (override built-ins)
  *
  * User plugins take precedence: if a user plugin has the same platform name
  * as a built-in plugin, the user's version wins.
@@ -19,13 +19,13 @@
  *
  * A companion `*.json` file (same basename) can provide config + enable/disable:
  *
- *   ~/.prime/runtimes/my-runtime.mjs       ← plugin code
- *   ~/.prime/runtimes/my-runtime.json      ← optional: { "config": {...}, "enabled": true }
+ *   ~/.rlm/runtimes/my-runtime.mjs       ← plugin code
+ *   ~/.rlm/runtimes/my-runtime.json      ← optional: { "config": {...}, "enabled": true }
  *
  * Plugins are fully self-contained — no imports from prime-agent internals.
  * Built-in plugins are bundled via esbuild (scripts/bundle-runtimes.mjs).
  *
- * Example custom plugin (~/.prime/runtimes/my-runtime.mjs):
+ * Example custom plugin (~/.rlm/runtimes/my-runtime.mjs):
  *
  *   export function createRuntime({ config }) {
  *     return {
@@ -46,9 +46,9 @@ import { fileURLToPath } from "node:url";
 import type { AgentRuntime } from "./agent-runtime.js";
 import { RuntimeRegistry } from "./agent-runtime.js";
 
-/** User plugin directory: ~/.prime/runtimes/ */
+/** User plugin directory: ~/.rlm/runtimes/ */
 export function userRuntimesDir(): string {
-	return join(homedir(), ".prime", "runtimes");
+	return join(homedir(), ".rlm", "runtimes");
 }
 
 /** Built-in plugin directory: <installDir>/dist/plugins/runtimes/ */
@@ -65,7 +65,7 @@ export function builtinRuntimesDir(): string {
 		const installDir = dirname(dirname(dirname(dirname(thisFile))));
 		return join(installDir, "dist", "plugins", "runtimes");
 	} catch {
-		return join(homedir(), ".prime", "agent", "dist", "plugins", "runtimes");
+		return join(homedir(), ".rlm", "dist", "plugins", "runtimes");
 	}
 }
 
@@ -222,7 +222,7 @@ async function loadPlugin(pluginPath: string, isUserPlugin: boolean): Promise<Lo
  *
  * Scans:
  *   1. <installDir>/dist/plugins/runtimes/  (built-in, self-contained)
- *   2. ~/.prime/runtimes/                   (user plugins — override built-ins)
+ *   2. ~/.rlm/runtimes/                   (user plugins — override built-ins)
  *
  * User plugins with the same platform name as a built-in replace it.
  */
@@ -276,7 +276,7 @@ export async function runPluginSetup(pluginPath: string, prompt: SetupPrompt): P
  * Build a complete RuntimeRegistry:
  *   1. Register LocalRuntime (always first — default)
  *   2. Load built-in plugins from <installDir>/dist/plugins/runtimes/
- *   3. Load user plugins from ~/.prime/runtimes/ (override built-ins)
+ *   3. Load user plugins from ~/.rlm/runtimes/ (override built-ins)
  *
  * No hardcoded fallbacks. Everything except LocalRuntime is a plugin.
  */

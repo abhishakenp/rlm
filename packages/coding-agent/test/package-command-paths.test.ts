@@ -189,7 +189,7 @@ describe("package commands", () => {
 		const recordPath = join(tempDir, "self-update.json");
 		const tarballUrl = "https://downloads.example.test/prime-agent/prime-agent-current.tgz";
 		mkdirSync(selfPackageDir, { recursive: true });
-		mkdirSync(join(projectDir, ".prime", "agent"), { recursive: true });
+		mkdirSync(join(projectDir, ".rlm"), { recursive: true });
 		writeFileSync(
 			fakeNpmPath,
 			`const fs=require("node:fs"),path=require("node:path"),args=process.argv.slice(2),prefix=args[args.indexOf("--prefix")+1];
@@ -202,7 +202,7 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 			JSON.stringify({ npmCommand: [originalExecPath, fakeNpmPath, "--prefix", globalPrefix] }, null, 2),
 		);
 		writeFileSync(
-			join(projectDir, ".prime", "agent", "settings.json"),
+			join(projectDir, ".rlm", "settings.json"),
 			JSON.stringify({ npmCommand: [originalExecPath, fakeNpmPath, "--prefix", projectPrefix] }, null, 2),
 		);
 		process.env.PI_PACKAGE_DIR = selfPackageDir;

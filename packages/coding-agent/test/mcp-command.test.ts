@@ -143,10 +143,10 @@ describe("MCP management commands", () => {
 	it("atomically persists only user settings while preserving concurrent fields", async () => {
 		const agentDir = join(testDir, "agent");
 		const projectDir = join(testDir, "project");
-		mkdirSync(join(projectDir, ".prime", "agent"), { recursive: true });
+		mkdirSync(join(projectDir, ".rlm"), { recursive: true });
 		mkdirSync(agentDir, { recursive: true });
 		writeFileSync(
-			join(projectDir, ".prime", "agent", "settings.json"),
+			join(projectDir, ".rlm", "settings.json"),
 			JSON.stringify({ mcpServers: { project: {} } }),
 		);
 		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ theme: "dark" }));
@@ -161,7 +161,7 @@ describe("MCP management commands", () => {
 			quietStartup: true,
 			mcpServers: { remote: { type: "http", url: "https://example.com/mcp" } },
 		});
-		expect(readFileSync(join(projectDir, ".prime", "agent", "settings.json"), "utf8")).toContain("project");
+		expect(readFileSync(join(projectDir, ".rlm", "settings.json"), "utf8")).toContain("project");
 		expect(() => readFileSync(`${join(agentDir, "settings.json")}.tmp`, "utf8")).toThrow();
 	});
 

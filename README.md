@@ -52,11 +52,21 @@ LLM-generated: task-specific variables (user prompts, findings, decisions, tool 
 
 ### Data paths
 
-- Sessions: `~/.rlm/sessions/`
-- Settings: `~/.rlm/settings.json`
-- Context: `.rlm/context.json` (project-scoped)
-- Extensions: `~/.rlm/extensions/`
-- Skills: `~/.rlm/skills/`
+- **Project-level**: `.rlm/` in the project root (context, sessions, skills)
+- **Global**: `~/.rlm/` (settings, sessions, skills, extensions, runtimes, workflows, memory)
+- **Bundled**: `config/profile.yml` in the rlm repo (plugin composition)
+
+| Path | Level | Contents |
+|------|-------|----------|
+| `~/.rlm/settings.json` | Global | Provider, model, maxDepth, thinking level |
+| `~/.rlm/sessions/` | Global | JSONL session persistence |
+| `~/.rlm/skills/` | Global | Installed skills |
+| `~/.rlm/extensions/` | Global | Installed extensions |
+| `~/.rlm/runtimes/` | Global | User plugin overrides (`.mjs` + `.json`) |
+| `~/.rlm/workflows/` | Global | Hot-swappable TS workflows |
+| `~/.rlm/memory/` | Global | Persistent key-value memory |
+| `.rlm/context.json` | Project | Project-scoped context variables |
+| `config/profile.yml` | Bundled | Cordis plugin composition |
 
 ## Install
 

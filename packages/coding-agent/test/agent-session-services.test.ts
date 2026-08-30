@@ -107,7 +107,7 @@ describe("createAgentSessionFromServices", () => {
 		const tempDir = join(tmpdir(), `pi-session-mcp-prompt-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		const projectDir = join(tempDir, "project");
 		const agentDir = join(tempDir, "agent");
-		mkdirSync(join(projectDir, ".prime", "agent"), { recursive: true });
+		mkdirSync(join(projectDir, ".rlm"), { recursive: true });
 		mkdirSync(agentDir, { recursive: true });
 		cleanupPaths.push(tempDir);
 
@@ -129,7 +129,7 @@ describe("createAgentSessionFromServices", () => {
 			}),
 		);
 		writeFileSync(
-			join(projectDir, ".prime", "agent", "settings.json"),
+			join(projectDir, ".rlm", "settings.json"),
 			JSON.stringify({ mcpServers: { projectOnly: { type: "stdio", command: "project-secret" } } }),
 		);
 

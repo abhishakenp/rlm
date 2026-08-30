@@ -53,7 +53,7 @@ export class SSHRuntime implements AgentRuntime {
 		}
 
 		const agentId = crypto.randomUUID();
-		const sessionDir = request.workDir ?? `.prime/agent/sessions/fleet/${agentId}`;
+		const sessionDir = request.workDir ?? `.rlm/sessions/fleet/${agentId}`;
 		const target = fleetHost.address;
 		const user = fleetHost.user ? `${fleetHost.user}@` : "";
 

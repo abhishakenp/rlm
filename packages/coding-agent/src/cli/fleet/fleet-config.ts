@@ -5,7 +5,7 @@
  * all are fleet members with a transport type. The transport plugin (.mjs)
  * is the implementation; the fleet member is what the user sees.
  *
- * Stored at ~/.prime/agent/fleet.json
+ * Stored at ~/.rlm/fleet.json
  */
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -85,7 +85,7 @@ export interface FleetConfig {
 	removed?: string[];
 }
 
-const FLEET_CONFIG_PATH = join(homedir(), ".prime", "agent", "fleet.json");
+const FLEET_CONFIG_PATH = join(homedir(), ".rlm", "fleet.json");
 
 export async function loadFleetConfig(): Promise<FleetConfig> {
 	try {
@@ -306,7 +306,7 @@ export async function removeFleetHostTag(hostname: string, tag: string): Promise
 // ─── Runtime → fleet member migration ─────────────────────────────
 
 /**
- * Import existing runtime plugin configs (~/.prime/runtimes/*.json) as fleet
+ * Import existing runtime plugin configs (~/.rlm/runtimes/*.json) as fleet
  * members. Called once on startup to unify runtimes into the fleet.
  * Idempotent — skips members that already exist.
  */
@@ -332,7 +332,7 @@ export async function importRuntimeMembers(): Promise<number> {
 			const { readFile } = await import("node:fs/promises");
 			const { homedir: hd } = await import("node:os");
 			const { join: jn } = await import("node:path");
-			const configPath = jn(hd(), ".prime", "runtimes", `${pluginName}.json`);
+			const configPath = jn(hd(), ".rlm", "runtimes", `${pluginName}.json`);
 			const content = await readFile(configPath, "utf-8");
 			const raw = JSON.parse(content);
 

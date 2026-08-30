@@ -10850,7 +10850,7 @@ export class AgentSession {
 		// Build runtime registry: LocalRuntime (default) + plugins (built-in + user)
 		// No hardcoded fallbacks — everything except LocalRuntime is a plugin.
 		// Built-in plugins: <installDir>/dist/plugins/runtimes/*.mjs (self-contained)
-		// User plugins: ~/.prime/runtimes/*.mjs (override built-ins)
+		// User plugins: ~/.rlm/runtimes/*.mjs (override built-ins)
 		const { registry } = await buildRuntimeRegistry(
 			new LocalRuntime({
 				spawnLocal: (p, k) => this.runRlmChild(p, k),

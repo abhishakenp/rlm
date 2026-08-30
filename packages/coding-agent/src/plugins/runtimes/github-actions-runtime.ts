@@ -58,7 +58,7 @@ export class GitHubActionsRuntime implements AgentRuntime {
 
 	async spawn(request: SpawnRequest): Promise<SpawnResult> {
 		const agentId = crypto.randomUUID();
-		const sessionDir = request.workDir ?? `.prime/agent/sessions/gha/${agentId}`;
+		const sessionDir = request.workDir ?? `.rlm/sessions/gha/${agentId}`;
 
 		const identity: AgentIdentity = {
 			agentId,
@@ -138,7 +138,7 @@ export class GitHubActionsRuntime implements AgentRuntime {
 		// Set credentials as GitHub repository secrets (not embedded in YAML)
 		await this.setRepositorySecrets(repo, token, credentialKeys);
 
-		const workDir = request.workDir ?? `.prime/agent/sessions/fleet/${agentId}`;
+		const workDir = request.workDir ?? `.rlm/sessions/fleet/${agentId}`;
 		const runId = await this.triggerWorkflow(repo, token, workflowYaml, agentId, gistUrl, workDir);
 
 		let currentStatus: AgentStatusInfo = { status: "running" };
@@ -220,7 +220,7 @@ export class GitHubActionsRuntime implements AgentRuntime {
 		_gistUrl: string,
 		_request: SpawnRequest,
 	): string {
-		const workDir = _request.workDir ?? `.prime/agent/sessions/fleet/${identity.agentId}`;
+		const workDir = _request.workDir ?? `.rlm/sessions/fleet/${identity.agentId}`;
 		const lines: string[] = [
 			"name: Prime Agent",
 			"on:",

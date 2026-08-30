@@ -6,7 +6,7 @@
  *   - Fleet TUI runtime management view
  *
  * Plugins live in:
- *   - ~/.prime/runtimes/*.mjs        (user plugins — active)
+ *   - ~/.rlm/runtimes/*.mjs        (user plugins — active)
  *   - <installDir>/dist/plugins/runtimes/*.mjs  (built-in — SSH only)
  *   - <installDir>/dist/plugins/templates/*.mjs (templates — copy to activate)
  */
@@ -27,7 +27,7 @@ import { fileURLToPath } from "node:url";
 
 /** User plugin directory. */
 export function userRuntimesDir(): string {
-	return join(homedir(), ".prime", "runtimes");
+	return join(homedir(), ".rlm", "runtimes");
 }
 
 /** Resolve the package directory from the current module URL. */
@@ -42,7 +42,7 @@ function resolvePkgDir(): string {
 		// Unbundled: <pkgDir>/dist/cli/fleet/runtime-operations.js → 4 levels up
 		return dirname(dirname(dirname(dirname(thisFile))));
 	} catch {
-		return join(homedir(), ".prime", "agent");
+		return join(homedir(), ".rlm");
 	}
 }
 
@@ -53,7 +53,7 @@ export function builtinRuntimesDir(): string {
 	if (existsSync(dir)) return dir;
 	// Fallback: try common install locations
 	const candidates = [
-		join(homedir(), ".prime", "agent", "dist", "plugins", "runtimes"),
+		join(homedir(), ".rlm", "dist", "plugins", "runtimes"),
 		"/usr/local/lib/prime-agent/dist/plugins/runtimes",
 		"/opt/prime-agent/dist/plugins/runtimes",
 	];
@@ -68,7 +68,7 @@ export function templateRuntimesDir(): string {
 	const pkgDir = resolvePkgDir();
 	const dir = join(pkgDir, "dist", "plugins", "templates");
 	if (existsSync(dir)) return dir;
-	return join(homedir(), ".prime", "agent", "dist", "plugins", "templates");
+	return join(homedir(), ".rlm", "dist", "plugins", "templates");
 }
 
 export interface RuntimePluginInfo {
@@ -153,7 +153,7 @@ export async function listRuntimePlugins(): Promise<RuntimePluginInfo[]> {
 	return plugins;
 }
 
-/** Install a template plugin by copying it to ~/.prime/runtimes/. */
+/** Install a template plugin by copying it to ~/.rlm/runtimes/. */
 export function installRuntimePlugin(name: string): { success: boolean; message: string } {
 	const templateDir = templateRuntimesDir();
 	const templatePath = join(templateDir, `${name}.mjs`);
@@ -174,7 +174,7 @@ export function installRuntimePlugin(name: string): { success: boolean; message:
 	};
 }
 
-/** Uninstall a user plugin (remove from ~/.prime/runtimes/). */
+/** Uninstall a user plugin (remove from ~/.rlm/runtimes/). */
 export function uninstallRuntimePlugin(name: string): { success: boolean; message: string } {
 	const userDir = userRuntimesDir();
 	const pluginPath = join(userDir, `${name}.mjs`);

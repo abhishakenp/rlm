@@ -705,7 +705,7 @@ async function runtimesCmd(args: string[]): Promise<void> {
 		const { join } = await import("node:path");
 		const { homedir } = await import("node:os");
 		const { pluginHasSetup, runPluginSetupWithPath, savePluginConfig } = await import("./runtime-operations.js");
-		const pluginPath = join(homedir(), ".prime", "runtimes", `${name}.mjs`);
+		const pluginPath = join(homedir(), ".rlm", "runtimes", `${name}.mjs`);
 		const hasSetup = await pluginHasSetup(pluginPath);
 		if (hasSetup) {
 			console.log(chalk.dim(`\n  Running setup for ${name}...`));
@@ -755,7 +755,7 @@ async function runtimesCmd(args: string[]): Promise<void> {
 				console.log(chalk.green(`✓ ${setupResult.message}`));
 				if (setupResult.config) {
 					savePluginConfig(name, setupResult.config);
-					console.log(chalk.dim(`  Config saved to ~/.prime/runtimes/${name}.json`));
+					console.log(chalk.dim(`  Config saved to ~/.rlm/runtimes/${name}.json`));
 				}
 			} else {
 				console.error(chalk.red(`✗ ${setupResult.message}`));
@@ -775,7 +775,7 @@ async function runtimesCmd(args: string[]): Promise<void> {
 		const { join } = await import("node:path");
 		const { pluginHasSetup, runPluginSetupWithPath, savePluginConfig } = await import("./runtime-operations.js");
 		const { homedir } = await import("node:os");
-		const pluginPath = join(homedir(), ".prime", "runtimes", `${name}.mjs`);
+		const pluginPath = join(homedir(), ".rlm", "runtimes", `${name}.mjs`);
 		const hasSetup = await pluginHasSetup(pluginPath);
 		if (!hasSetup) {
 			console.log(chalk.dim(`${name} has no setup flow`));
@@ -852,7 +852,7 @@ async function runtimesCmd(args: string[]): Promise<void> {
 			console.log(chalk.green(`✓ ${setupResult.message}`));
 			if (setupResult.config) {
 				savePluginConfig(name, setupResult.config);
-				console.log(chalk.dim(`  Config saved to ~/.prime/runtimes/${name}.json`));
+				console.log(chalk.dim(`  Config saved to ~/.rlm/runtimes/${name}.json`));
 			}
 		} else {
 			console.error(chalk.red(`✗ ${setupResult.message}`));
@@ -1053,7 +1053,7 @@ async function setupCmd(args: string[]): Promise<void> {
 			if (member) {
 				await updateFleetMemberConfig(name, setupResult.config);
 			}
-			console.log(chalk.dim(`  Config saved to ~/.prime/runtimes/${transport}.json`));
+			console.log(chalk.dim(`  Config saved to ~/.rlm/runtimes/${transport}.json`));
 		}
 	} else {
 		console.error(chalk.red(`✗ ${setupResult.message}`));

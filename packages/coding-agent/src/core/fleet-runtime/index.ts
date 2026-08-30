@@ -15,7 +15,7 @@
  * - LocalRuntime: in-process (existing behavior, default)
  * - SSHRuntime: SSH to a fleet host, run prime-agent --headless
  *
- * Plugin runtimes (loaded from ~/.prime/runtimes/ or dist/plugins/):
+ * Plugin runtimes (loaded from ~/.rlm/runtimes/ or dist/plugins/):
  * - CloudflareRuntime: deploy a CF Worker
  * - GitHubActionsRuntime: trigger a GH Actions workflow
  * - Custom runtimes: any .mjs plugin implementing AgentRuntime

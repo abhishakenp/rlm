@@ -94,7 +94,7 @@ export class RlmWorkflowService extends Service {
 	}
 
 	private getWorkflowsDir(): string {
-		return this.config.workflowsDir ?? join(homedir(), ".prime", "agent", "workflows");
+		return this.config.workflowsDir ?? join(homedir(), ".rlm", "workflows");
 	}
 
 	private getApi(): WorkflowApi {

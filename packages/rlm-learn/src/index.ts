@@ -76,7 +76,7 @@ export class RlmLearnService extends Service {
 	}
 
 	async [Service.init]() {
-		const baseDir = join(homedir(), ".prime", "agent", "workflows");
+		const baseDir = join(homedir(), ".rlm", "workflows");
 		this.learningsPath = join(baseDir, "learnings.jsonl");
 		this.proposalsDir = join(baseDir, "proposals");
 
@@ -297,7 +297,7 @@ ${summary}`,
 			throw new Error(`rlm-learn: proposal ${filename} not found`);
 		}
 
-		const workflowsDir = join(homedir(), ".prime", "agent", "workflows");
+		const workflowsDir = join(homedir(), ".rlm", "workflows");
 		const workflowPath = join(workflowsDir, `${workflowName}.ts`);
 		renameSync(proposalPath, workflowPath);
 

@@ -493,7 +493,7 @@ const envPrefix =
 export const PACKAGE_NAME: string = pkg.name || "@earendil-works/pi-coding-agent";
 export const APP_NAME: string = piConfigName || "pi";
 export const APP_TITLE: string = piConfigName ? APP_NAME : "π";
-export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".prime/agent";
+export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".rlm";
 export const VERSION: string = pkg.version || "0.0.0";
 
 // e.g., PI_CODING_AGENT_DIR or PRIME_AGENT_CODING_AGENT_DIR
@@ -516,10 +516,10 @@ export function getShareViewerUrl(gistId: string): string {
 }
 
 // =============================================================================
-// User Config Paths (~/.prime/agent/*)
+// User Config Paths (~/.rlm/*)
 // =============================================================================
 
-/** Get the agent config directory (e.g., ~/.prime/agent/) */
+/** Get the agent config directory (e.g., ~/.rlm/) */
 export function getAgentDir(): string {
 	const envDir = process.env[ENV_AGENT_DIR];
 	if (envDir) {
@@ -533,7 +533,7 @@ export function getCustomThemesDir(): string {
 	return join(getAgentDir(), "themes");
 }
 
-/** Directory where diagnostic logs are written (e.g. ~/.prime/agent/logs/). */
+/** Directory where diagnostic logs are written (e.g. ~/.rlm/logs/). */
 export function getLogsDir(): string {
 	return join(getAgentDir(), "logs");
 }

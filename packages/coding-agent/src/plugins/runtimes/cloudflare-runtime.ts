@@ -56,7 +56,7 @@ export class CloudflareRuntime implements AgentRuntime {
 
 	async spawn(request: SpawnRequest): Promise<SpawnResult> {
 		const agentId = crypto.randomUUID();
-		const sessionDir = request.workDir ?? `.prime/agent/sessions/cf/${agentId}`;
+		const sessionDir = request.workDir ?? `.rlm/sessions/cf/${agentId}`;
 
 		const identity: AgentIdentity = {
 			agentId,
