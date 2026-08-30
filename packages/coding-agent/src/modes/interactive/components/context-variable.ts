@@ -1,8 +1,14 @@
 import {
 	type Component,
 	truncateToWidth,
+	visibleWidth,
 } from "@earendil-works/pi-tui";
 import { theme } from "../theme/theme.js";
+
+const BLOCK = "▓"
+const BLOCK_GAP = "░"
+const VERT = "│"
+const GAP_LINE = "  ──────────────────────────────────────────────"
 
 /**
  * Extract actual text content from a value, stripping API format.
@@ -58,13 +64,15 @@ function formatValue(value: any): string {
 /**
  * Inline context variable component — renders in the chat flow like
  * user messages, tool calls, and assistant turns. Not a separate panel.
+ * Elegant micro-plugin: colored bar ▎ (theme accent/warning/muted per scope),
+ * dim separators │, compact preview, expanded badges with theme.fg("dim").
  *
  * Format (collapsed, 1 line):
- *   $ var.name = value-preview (Ctrl+O to expand)
+ *   ▎ let/varName = value-preview (Ctrl+O)
  *
  * Format (expanded):
- *   $ var.name const/let [type] scope
- *     <full value>
+ *   ▎ let varName [type] scope
+ *   │ <full value>
  *     (Ctrl+O to collapse)
  */
 export class ContextVariableComponent implements Component {
@@ -79,6 +87,7 @@ export class ContextVariableComponent implements Component {
 			scope?: string;
 			source?: string;
 			description?: string;
+			focused?: boolean;
 		} = {},
 	) {}
 
@@ -98,52 +107,100 @@ export class ContextVariableComponent implements Component {
 		const kind = mutable ? "let" : "const";
 		const type = this.options.type ?? typeof this.value;
 		const scope = this.options.scope ?? "session";
+		const focused = this.options.focused ?? false;
 
 		// Extract actual text content — no API format.
 		const valueStr = extractText(this.value);
-		const prefix = theme.fg("accent", "$");
-		const nameStr = theme.fg("thinkingText", this.name);
-		const kindStr = theme.fg("dim", kind);
 
-		if (!this._expanded) {
-			// Collapsed: const name = value (Ctrl+O)
-			const kindStr2 = theme.fg("dim", kind);
-			const nameStr2 = theme.fg("thinkingText", this.name);
-			const prefixWidth = kind.length + 1 + this.name.length + 3; // const name = 
-			const previewWidth = Math.max(10, width - prefixWidth - 12);
-			const valuePreview = truncateToWidth(valueStr.replace(/\n/g, " ").trim(), previewWidth);
-			return [`${kindStr2} ${nameStr2} ${theme.fg("dim", "=")} ${theme.fg("muted", valuePreview)} ${theme.fg("dim", "(Ctrl+O)")}`];
+		const scopeBar = (() => {
+			switch (scope) {
+				case "project": return theme.fg("accent", BLOCK)
+				case "session": return theme.fg("warning", BLOCK)
+				case "task": return theme.fg("muted", BLOCK)
+				default: return theme.fg("border", BLOCK)
+			}
+		})()
+		const scopeBadge = (() => {
+			switch (scope) {
+				case "project": return theme.fg("accent", scope)
+				case "session": return theme.fg("warning", scope)
+				case "task": return theme.fg("muted", scope)
+				default: return theme.fg("dim", scope)
+			}
+		})()
+		const kindStyled = mutable ? theme.fg("success", kind) : theme.fg("dim", kind)
+		const nameStyled = (() => {
+			try {
+				const fgText = theme.fg("text", this.name)
+				const plainCheck = `\x1b[39m${this.name}\x1b[39m`
+				if (fgText !== plainCheck) return theme.bold(fgText)
+				return theme.bold(this.name)
+			} catch {
+				return theme.fg("thinkingText", this.name)
+			}
+		})()
+
+		// Focus highlight: bright background or bold+reverse
+		const focusWrap = (text: string): string => {
+			if (!focused) return text
+			try {
+				if (theme.getSelectionBackgroundColor) {
+					const bg = theme.getSelectionBackgroundColor()(text)
+					if (bg !== text) return bg
+				}
+			} catch {}
+			return `\x1b[7m${text}\x1b[0m`
 		}
 
-		// Expanded: header line + value lines + collapse hint.
-		const lines: string[] = [];
-		const header = `${kindStr} ${nameStr} ${theme.fg("dim", `[${type}]`)} ${theme.fg("dim", scope)}`;
-		lines.push(header);
+		const hintCollapsed = "(Ctrl+O)"
+		const staticWidth = 2 + kind.length + 1 + this.name.length + 3 + hintCollapsed.length + 1
+		const previewWidth = Math.max(10, width - staticWidth - 1)
+		const valuePreview = truncateToWidth(valueStr.replace(/\n/g, " ").trim(), previewWidth)
+		const collapsedLine = `${scopeBar}${BLOCK_GAP} ${kindStyled} ${nameStyled} ${theme.fg("dim", "=")} ${theme.fg("muted", valuePreview)} ${theme.fg("dim", hintCollapsed)}`
+		const wrappedCollapsed = focusWrap(collapsedLine)
+		if (visibleWidth(wrappedCollapsed) > width) {
+			const over = visibleWidth(wrappedCollapsed) - width
+			const adjustedPreviewWidth = Math.max(5, previewWidth - over - 1)
+			const adjPreview = truncateToWidth(valueStr.replace(/\n/g, " ").trim(), adjustedPreviewWidth)
+			const adjLine = `${scopeBar}${BLOCK_GAP} ${kindStyled} ${nameStyled} ${theme.fg("dim", "=")} ${theme.fg("muted", adjPreview)} ${theme.fg("dim", hintCollapsed)}`
+			return [visibleWidth(focusWrap(adjLine)) > width ? truncateToWidth(focusWrap(adjLine), width) : focusWrap(adjLine)]
+		}
+		const result: string[] = [wrappedCollapsed]
 
-		// Value lines with indent.
+		if (!this._expanded) return result
+
+		// Expanded: block header + value lines + gap — colored blocks with spacing
+		const lines: string[] = []
+		const header = `${scopeBar}${BLOCK_GAP} ${kindStyled} ${nameStyled} ${theme.fg("dim", `[${type}]`)} ${scopeBadge}`
+		lines.push(visibleWidth(header) > width ? truncateToWidth(header, width) : header)
+		lines.push(GAP_LINE)
+
+		// Value lines with dim vertical guide
 		const valueLines = valueStr.split("\n");
 		const maxLines = 12;
 		for (let i = 0; i < Math.min(valueLines.length, maxLines); i++) {
-			lines.push(`  ${theme.fg("muted", truncateToWidth(valueLines[i], width - 2))}`);
+			const raw = truncateToWidth(valueLines[i], Math.max(10, width - 4))
+			const cont = `${theme.fg("dim", ` ${VERT}`)} ${theme.fg("muted", raw)}`
+			lines.push(visibleWidth(cont) > width ? truncateToWidth(cont, width) : cont);
 		}
 		if (valueLines.length > maxLines) {
-			lines.push(`  ${theme.fg("dim", `... +${valueLines.length - maxLines} more lines`)}`);
+			const more = theme.fg("dim", `   … +${valueLines.length - maxLines} more lines`)
+			lines.push(visibleWidth(more) > width ? truncateToWidth(more, width) : more);
 		}
 
 		if (this.options.description) {
-			lines.push(`  ${theme.fg("dim", truncateToWidth(this.options.description, width - 2))}`);
+			const desc = truncateToWidth(this.options.description, Math.max(10, width - 4))
+			const dline = theme.fg("dim", `   ${desc}`)
+			lines.push(visibleWidth(dline) > width ? truncateToWidth(dline, width) : dline);
 		}
 
-		lines.push(`  ${theme.fg("dim", "(Ctrl+O to collapse)")}`);
+		const hint = theme.fg("dim", "  (Ctrl+O to collapse)")
+		lines.push(visibleWidth(hint) > width ? truncateToWidth(hint, width) : hint);
 		return lines;
 	}
 
 	get height(): number {
-		// Compute actual height from render output so expanded vars
-		// with many value lines don't get truncated by a hardcoded value.
 		if (!this._expanded) return 1;
-		// Cache last render width for height computation.
-		// Default to a reasonable width if render hasn't been called.
 		const w = this._lastWidth ?? 80;
 		return this.render(w).length;
 	}
@@ -151,8 +208,16 @@ export class ContextVariableComponent implements Component {
 	private _lastWidth: number = 80;
 }
 
+// Virtualization caps — must stay in sync with RlmContextService.PANEL_MAX_VISIBLE (=10)
+// O(1) window: collapsed shows 5, expanded caps at 10 to avoid 50k render each frame.
+// Full 50k lives in panel's virtualized slice; group here is bounded.
+const COLLAPSED_MAX = 5;
+const EXPANDED_MAX = 10; // mirrors PANEL_MAX_VISIBLE
+
 /**
  * Container for rendering multiple context variables inline in the chat.
+ * Virtualized: collapsed caps at 5, expanded caps at 10 (PANEL_MAX_VISIBLE).
+ * Prevents 50k vars from causing scroll hell — full set lives in panel.
  */
 export class ContextVariableGroupComponent implements Component {
 	private _expanded: boolean = false;
@@ -183,29 +248,41 @@ export class ContextVariableGroupComponent implements Component {
 		if (this.variables.length === 0) return [];
 
 		if (!this._expanded) {
+			// Collapsed: O(1) — only first 5, bounded via truncateToWidth in child
 			const lines: string[] = [];
-			const max = Math.min(this.variables.length, 5);
+			const max = Math.min(this.variables.length, COLLAPSED_MAX);
 			for (let i = 0; i < max; i++) {
 				const v = this.variables[i];
 				const comp = new ContextVariableComponent(v.name, v.value, v);
 				lines.push(...comp.render(width));
 			}
-			if (this.variables.length > 5) {
-				lines.push(`  ${theme.fg("dim", `... +${this.variables.length - 5} more vars (Ctrl+O)`)}`);
+			if (this.variables.length > COLLAPSED_MAX) {
+				lines.push(`  ${theme.fg("dim", `... +${this.variables.length - COLLAPSED_MAX} more vars (Ctrl+O)`)}`);
 			}
 			return lines;
 		}
 
+		// Expanded: O(1) window — cap at EXPANDED_MAX (10) to avoid 50k render
+		// Theme colors and visibleWidth/truncateToWidth handled by ContextVariableComponent
 		const lines: string[] = [];
-		for (const v of this.variables) {
+		const visible = this.variables.length > EXPANDED_MAX ? this.variables.slice(0, EXPANDED_MAX) : this.variables;
+		for (const v of visible) {
 			const comp = new ContextVariableComponent(v.name, v.value, v);
 			comp.setExpanded(true);
 			lines.push(...comp.render(width));
+		}
+		if (this.variables.length > EXPANDED_MAX) {
+			lines.push(`  ${theme.fg("dim", `... +${this.variables.length - EXPANDED_MAX} more vars (see panel, ↑/↓ to scroll)`)}`);
 		}
 		return lines;
 	}
 
 	get height(): number {
-		return this._expanded ? this.variables.length * 3 : Math.min(this.variables.length, 5) + (this.variables.length > 5 ? 1 : 0);
+		// Bounded height: O(1) — collapsed ≤6, expanded ≤ ~10*3+1, never 50k*3
+		if (!this._expanded) {
+			return Math.min(this.variables.length, COLLAPSED_MAX) + (this.variables.length > COLLAPSED_MAX ? 1 : 0);
+		}
+		const visibleCount = Math.min(this.variables.length, EXPANDED_MAX);
+		return visibleCount * 3 + (this.variables.length > EXPANDED_MAX ? 1 : 0);
 	}
 }

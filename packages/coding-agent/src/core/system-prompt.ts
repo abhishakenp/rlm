@@ -37,6 +37,8 @@ export interface BuildSystemPromptOptions {
 	genericMcpServers?: string[];
 	/** Context registry summary — shows the agent what variables it has. */
 	contextSummary?: string;
+	/** Composite prompt fragments contributed by plugins via rlmPrompt (sorted by priority). */
+	promptFragments?: string;
 }
 
 /** Build the system prompt with tools, guidelines, and context */
@@ -53,6 +55,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		allowRecursion,
 		harnessState,
 		contextSummary,
+		promptFragments,
 	} = options;
 	const promptCwd = cwd.replace(/\\/g, "/");
 	const promptMessagesPath = (messagesPath ?? "not persisted").replace(/\\/g, "/");
@@ -117,6 +120,10 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			prompt += `\n\n${genericMcpSection}`;
 		}
 
+		if (promptFragments) {
+			prompt += `\n\n${promptFragments}`;
+		}
+
 		if (appendSection) {
 			prompt += appendSection;
 		}
@@ -152,6 +159,10 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	if (genericMcpSection) {
 		prompt += `\n\n${genericMcpSection}`;
+	}
+
+	if (promptFragments) {
+		prompt += `\n\n${promptFragments}`;
 	}
 
 	const guidelines = formatPromptGuidelines(promptGuidelines);

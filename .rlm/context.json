@@ -1,0 +1,10 @@
+{
+  "project.testCmd": {
+    "value": "bun test",
+    "mutable": true,
+    "type": "string",
+    "source": "agent",
+    "createdAt": 1788126697046,
+    "updatedAt": 1788126697046
+  }
+}

@@ -262,8 +262,13 @@ function installCordisHMR(ctx, { configPath, patchPath, includeEntry, here }) {
 
 	for (const dir of sourceDirs) {
 		watchPath(join(here, dir), (changed) => {
+			// Ignore test files, dist, node_modules, tsx cache, .map files
 			if (changed.endsWith(".test.ts") || changed.endsWith(".test.js")) return;
 			if (changed.includes("node_modules") || changed.includes("/dist/")) return;
+			if (changed.endsWith(".map") || changed.endsWith(".d.ts")) return;
+			if (changed.includes(".cache") || changed.includes("/.tsbuildinfo")) return;
+			// Only react to .ts/.js source changes
+			if (!changed.endsWith(".ts") && !changed.endsWith(".js")) return;
 
 			console.error(`[rlm] HMR: ${changed} changed`);
 
@@ -423,7 +428,26 @@ async function main() {
 			if (!printService) {
 				throw new Error("rlmPrint service not available — plugin failed to load");
 			}
-			const prompt = isPrint ? process.argv[printIdx + 1] : "";
+
+			// Resolve prompt: --print "..." flag, or piped stdin.
+			let prompt = isPrint ? process.argv[printIdx + 1] : "";
+			if (!prompt && isPiped) {
+				prompt = await new Promise((resolve) => {
+					let data = "";
+					process.stdin.setEncoding("utf8");
+					process.stdin.on("data", (chunk) => { data += chunk; });
+					process.stdin.on("end", () => { resolve(data.trim() || ""); });
+					process.stdin.resume();
+				});
+			}
+
+			if (!prompt) {
+				console.error("[rlm] print mode: no prompt provided (use --print \"...\" or pipe stdin)");
+				if (ctx?.fiber?.dispose) await ctx.fiber.dispose();
+				for (const w of hmrWatchers ?? []) { try { w.close(); } catch {} }
+				process.exit(1);
+			}
+
 			console.error(`[rlm] print mode via rlmPrint (Cordis service)`);
 			const exitCode = await printService.run({
 				mode: "text",

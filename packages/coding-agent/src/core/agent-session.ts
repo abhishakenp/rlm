@@ -1537,10 +1537,34 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 			// HMR: system prompt/skills changed → invalidate cache.
 			// Next LLM turn uses the new prompt. Active work never interrupted.
 			// The LLM creates/updates context variables itself — system doesn't.
-			ctx.on("rlm/prompt-changed", () => {
+			const invalidatePrompt = () => {
 				this._baseSystemPromptOptions = undefined as any;
-				console.error("[rlm] HMR: system prompt invalidated, will rebuild on next turn");
+			};
+			ctx.on("rlm/prompt-changed", (data: any) => {
+				invalidatePrompt();
+				// Only log for HMR-triggered invalidations (have a path), not context mutations
+				if (data?.path) {
+					console.error("[rlm] HMR: system prompt invalidated, will rebuild on next turn");
+				}
 			});
+			// Context mutations also invalidate the prompt so the next turn's
+			// contextSummary and any plugin fragments that depend on epoch are fresh.
+			// rlm-context already emits rlm/prompt-changed on mutation, but we also
+			// listen for raw context events for robustness (e.g. if emit ordering races
+			// or if another plugin mutates context without going through the service).
+			const contextEvents = [
+				"rlm/context-set",
+				"rlm/context-update",
+				"rlm/context-delete",
+				"rlm/context-move",
+				"rlm/context-clear",
+				"rlm/context-load-task",
+			] as const;
+			for (const evt of contextEvents) {
+				try {
+					ctx.on(evt, invalidatePrompt);
+				} catch {}
+			}
 		} catch { /* best effort */ }
 	}
 
@@ -4472,6 +4496,7 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 			harnessState: this._loadMergedHarnessState(),
 			genericMcpServers: this._mcpManager?.getEnabledGenericServers(),
 			contextSummary: this._getContextSummary(),
+			promptFragments: this._getPromptFragments(),
 		};
 		const systemPrompt = buildSystemPrompt(this._baseSystemPromptOptions);
 		// Register infrastructure vars (runtime + skills) — these are system
@@ -4540,6 +4565,18 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 			const summary = proxy.summarize();
 			if (!summary || summary === "(no context variables)") return undefined;
 			return summary;
+		} catch {
+			return undefined;
+		}
+	}
+
+	private _getPromptFragments(): string | undefined {
+		const promptSvc = (globalThis as any).__rlmPrompt;
+		if (!promptSvc?.buildCompositePrompt) return undefined;
+		try {
+			const composite = promptSvc.buildCompositePrompt(this._rlmDepth);
+			if (!composite || composite.trim().length === 0) return undefined;
+			return composite;
 		} catch {
 			return undefined;
 		}
@@ -7627,6 +7664,8 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 			throw new Error("Compaction cancelled");
 		}
 
+		this._baseSystemPromptOptions = undefined;
+
 		this.sessionManager.appendCompaction(
 			summary,
 			firstKeptEntryId,
@@ -10449,10 +10488,26 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
 	): Promise<RlmSpawnHandle> {
-		const { name: rawName, model: rawModel, thinking: rawThinking, host: rawHost, ...unsupported } = kwargs;
+		const { name: rawName, model: rawModel, thinking: rawThinking, host: rawHost, context: rawContext, contextMove: rawContextMove, contextStrategy: rawContextStrategy, ...unsupported } = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
 		if (unsupportedKwargs.length > 0) {
 			throw new Error(`Unsupported rlm.run kwargs: ${unsupportedKwargs.sort().join(", ")}`);
+		}
+		// Validate context transfer kwargs — 1 or many vars, copy or move, harness live + micro-flag gated
+		if (rawContext !== undefined && rawContext !== null) {
+			if (!Array.isArray(rawContext) || rawContext.some((v) => typeof v !== "string")) {
+				throw new Error("rlm.run context must be an array of string patterns (e.g. [\"auth.*\"])");
+			}
+		}
+		if (rawContextMove !== undefined && rawContextMove !== null) {
+			if (!Array.isArray(rawContextMove) || rawContextMove.some((v) => typeof v !== "string")) {
+				throw new Error("rlm.run contextMove must be an array of string patterns (e.g. [\"auth.*\"])");
+			}
+		}
+		if (rawContextStrategy !== undefined && rawContextStrategy !== null) {
+			if (rawContextStrategy !== "copy" && rawContextStrategy !== "move") {
+				throw new Error("rlm.run contextStrategy must be \"copy\" or \"move\"");
+			}
 		}
 
 		// Fleet-aware spawn: if host= is specified, route through the fleet runtime
@@ -10614,6 +10669,30 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 		void (async () => {
 			let childRuntime: RlmSubagentRuntime | undefined;
 			try {
+				// Context transfer — copy/move 1 or many vars atomically (harness live, micro-flags gated)
+				// Must set snapshot synchronously before child creation so child's _buildRuntime can load it via global.
+				const ctxProxy = (globalThis as any).__rlmContextProxy;
+				const cordisCtx = (globalThis as any).__rlmCordisContext;
+				const rlmContextSvc = cordisCtx?.get?.("rlmContext");
+				const wantsMove = Array.isArray(rawContextMove) && rawContextMove.length > 0;
+				const wantsCopy = Array.isArray(rawContext) && rawContext.length > 0;
+				if ((wantsMove || wantsCopy) && rlmContextSvc?.config?.enableSubagentTransfer === false) {
+					throw new Error("rlm.run: subagent transfer disabled by rlm-context config (enableSubagentTransfer=false)");
+				}
+				if (ctxProxy && (wantsMove || wantsCopy)) {
+					if (wantsMove) {
+						const snap = ctxProxy.move(rawContextMove as string[]);
+						(globalThis as any).__rlmTaskContextSnapshot = snap;
+					} else if (wantsCopy) {
+						if (rawContextStrategy === "move") {
+							const snap = ctxProxy.move(rawContext as string[]);
+							(globalThis as any).__rlmTaskContextSnapshot = snap;
+						} else {
+							const snap = ctxProxy.copy(rawContext as string[]);
+							(globalThis as any).__rlmTaskContextSnapshot = snap;
+						}
+					}
+				}
 				childRuntime = await this._createRlmSubagentRuntime(subagentOptions);
 				const child = childRuntime.session;
 				if (run.status === "cancelled") throw new Error(run.error ?? "RLM child cancelled");

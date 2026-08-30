@@ -69,6 +69,7 @@ export class RlmLearnService extends Service {
 	private proposalsDir: string = "";
 	private runCount: number = 0;
 	private reflectTimer: any = null;
+	private promptHandle: any = null;
 
 	constructor(ctx: any, config: RlmLearnConfig = {}) {
 		super(ctx, undefined as any);
@@ -98,9 +99,88 @@ export class RlmLearnService extends Service {
 		this.reflectTimer = setInterval(() => this.maybeReflect(), interval);
 		this.reflectTimer.unref?.(); // Don't keep process alive for reflection.
 
+		// Register a prompt fragment so the agent sees past learnings
+		// and doesn't make the same mistakes twice.
+		this._registerPromptFragment();
+
 		this.ctx.logger?.info(
 			`rlm-learn: self-evolution ready (learnings=${this.learningsPath}, proposals=${this.proposalsDir})`,
 		);
+	}
+
+	/**
+	 * Register a prompt fragment with the rlmPrompt service.
+	 * This feeds past learnings into the system prompt so the agent
+	 * doesn't make the same mistakes twice.
+	 */
+	private _registerPromptFragment() {
+		const getPromptSvc = () => {
+			try {
+				const fromGlobal = (globalThis as any).__rlmPrompt;
+				if (fromGlobal?.registerFragment) return fromGlobal;
+			} catch {}
+			try {
+				const fromCtx = (this.ctx as any)?.get?.("rlmPrompt");
+				if (fromCtx?.registerFragment) return fromCtx;
+			} catch {}
+			return null;
+		};
+
+		const svc = getPromptSvc();
+		if (!svc?.registerFragment) {
+			this.ctx.logger?.warn("rlm-learn: rlmPrompt service not available — learnings will not appear in system prompt");
+			return;
+		}
+
+		this.promptHandle = svc.registerFragment("rlm-learn", {
+			id: "past-learnings",
+			priority: 5,
+			content: () => this.buildLearningsPrompt() ?? "",
+			when: "always",
+		});
+
+		this.ctx.logger?.info("rlm-learn: registered prompt fragment — past learnings visible to agent");
+	}
+
+	/**
+	 * Build a concise prompt fragment from recent learnings.
+	 * Shows failure patterns so the agent avoids repeating them.
+	 */
+	buildLearningsPrompt(): string | undefined {
+		const learnings = this.readLearnings();
+		if (learnings.length === 0) return undefined;
+
+		// Focus on failures and reflections — those are the "don't repeat" signals.
+		const failures = learnings.filter((l: any) => l.success === false);
+		const reflections = learnings.filter((l: any) => l.type === "reflection");
+		const reviews = learnings.filter((l: any) => l.type === "review" && (l.score ?? 0) < 4);
+
+		if (failures.length === 0 && reflections.length === 0 && reviews.length === 0) {
+			return undefined;
+		}
+
+		const lines: string[] = ["## Past Learnings (don't repeat these mistakes)"];
+
+		// Recent failures (last 5)
+		const recentFailures = failures.slice(-5);
+		for (const f of recentFailures) {
+			const errMsg = (f.error ?? "unknown error").slice(0, 120);
+			lines.push(`- [FAIL] ${f.workflow}: ${errMsg}`);
+		}
+
+		// Low-score reviews (last 3)
+		const recentReviews = reviews.slice(-3);
+		for (const r of recentReviews) {
+			lines.push(`- [LOW SCORE] ${r.step ?? "review"}: score ${r.score}/5 (attempt ${r.attempt ?? "?"})`);
+		}
+
+		// Reflection patterns (last 1)
+		const lastReflection = reflections[reflections.length - 1];
+		if (lastReflection?.patterns?.length > 0) {
+			lines.push(`- [PATTERNS] ${lastReflection.patterns.slice(0, 3).join("; ")}`);
+		}
+
+		return lines.join("\n");
 	}
 
 	/** Record a workflow start. */
@@ -336,6 +416,10 @@ ${summary}`,
 		if (this.reflectTimer) {
 			clearInterval(this.reflectTimer);
 			this.reflectTimer = null;
+		}
+		if (this.promptHandle) {
+			try { this.promptHandle.dispose?.(); } catch {}
+			this.promptHandle = null;
 		}
 	}
 }

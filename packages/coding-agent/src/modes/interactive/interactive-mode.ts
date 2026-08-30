@@ -1029,6 +1029,12 @@ export class InteractiveMode {
 
 	private customHeader: (Component & { dispose?(): void }) | undefined = undefined;
 
+	// ── RLM TUI micro-plugins (chordis hot-reload, followup queue, auto-focus) ──
+	private rlmTuiPanelContainer!: Container;
+	private rlmTuiInputDisposer?: () => void;
+	private rlmTuiFollowupDisposer?: () => void;
+	private rlmTuiConfigDisposer?: () => void;
+
 	private getLocalSessionHost(): InteractiveModeLocalSessionHost {
 		if (!this.localSessionHost) {
 			throw new Error("Local session host is not available in connection-backed interactive mode");
@@ -1042,12 +1048,266 @@ export class InteractiveMode {
 		return this.uiServices.modelRegistry;
 	}
 
+	private getRlmTui(): any {
+		try {
+			const t = (globalThis as any).__rlmTui;
+			if (t) return t;
+		} catch {}
+		try {
+			const fromCtx = (this as any).ctx?.get?.("rlmTui");
+			if (fromCtx) return fromCtx;
+		} catch {}
+		try {
+			const fromUiServices: any = (this.uiServices as any)?.getTui?.();
+			if (fromUiServices) return fromUiServices;
+		} catch {}
+		return undefined;
+	}
+
+	private renderRlmTuiPanel(): void {
+		const tui: any = this.getRlmTui();
+		if (!tui || !this.rlmTuiPanelContainer) return;
+		try {
+			const comps: any[] = tui.getComponents?.() ?? [];
+			const panel: any = comps.find((c: any) => c.id === "context-panel");
+			if (!panel?.renderer) {
+				this.rlmTuiPanelContainer.clear();
+				this.ui.requestRender();
+				return;
+			}
+			const width = this.ui.terminal?.columns ?? 80;
+			const lines: string[] | null = panel.renderer({ width, cwd: this.getCurrentCwd() });
+			this.rlmTuiPanelContainer.clear();
+			if (!lines || lines.length === 0) {
+				this.ui.requestRender();
+				return;
+			}
+			for (const line of lines) {
+				this.rlmTuiPanelContainer.addChild(new Text(line, 1, 0));
+			}
+			this.ui.requestRender();
+		} catch {}
+	}
+
+	private handleRlmTuiFollowupSend = (payload: { texts: string[] }): void => {
+		const texts: string[] = payload?.texts ?? [];
+		if (texts.length === 0) return;
+		void (async () => {
+			for (const t of texts) {
+				try {
+					await this.agentConnection.prompt(t, { streamingBehavior: "followUp", queueIfBusy: true });
+				} catch (e) {
+					this.showError(e instanceof Error ? e.message : String(e));
+				}
+			}
+			this.renderRlmTuiPanel();
+			this.ui.requestRender();
+		})();
+	};
+
+	private setupRlmTuiIntegration(): void {
+		const tui: any = this.getRlmTui();
+		if (!tui) return;
+		try {
+			tui.setRenderCallback?.(() => {
+				this.renderRlmTuiPanel();
+				this.ui.requestRender();
+			});
+		} catch {}
+		this.renderRlmTuiPanel();
+		try {
+			const disposer = tui.onFollowupSend?.((payload: { texts: string[] }) => this.handleRlmTuiFollowupSend(payload));
+			if (typeof disposer === "function") this.rlmTuiFollowupDisposer = disposer;
+			else if (disposer?.dispose) this.rlmTuiFollowupDisposer = () => disposer.dispose();
+		} catch {}
+		try {
+			const ctx: any = (tui as any).ctx ?? (globalThis as any).__rlmTuiCtx;
+			const bindConfigHotReload = (c: any) => {
+				if (!c?.on) return undefined;
+				const off = c.on("rlm/tui-config-changed", () => {
+					this.renderRlmTuiPanel();
+					this.ui.requestRender();
+				});
+				const offKey = c.on("rlm/tui-keybindings-changed", () => {
+					this.ui.requestRender();
+				});
+				const disposer = () => {
+					try { if (typeof off === "function") (off as any)(); else if (off?.dispose) off.dispose(); } catch {}
+					try { if (typeof offKey === "function") (offKey as any)(); else if (offKey?.dispose) offKey.dispose(); } catch {}
+				};
+				return disposer;
+			};
+			if (ctx?.on) {
+				const disposer = bindConfigHotReload(ctx);
+				if (disposer) this.rlmTuiConfigDisposer = disposer;
+			} else if ((this as any).uiServices) {
+				const tui2: any = this.getRlmTui();
+				const maybeCtx: any = tui2?.ctx;
+				const disposer2 = bindConfigHotReload(maybeCtx);
+				if (disposer2) this.rlmTuiConfigDisposer = disposer2;
+			}
+		} catch {}
+		this.rlmTuiInputDisposer = this.ui.addInputListener((data: string): { consume?: boolean; data?: string } | undefined => {
+			const tui2: any = this.getRlmTui();
+			if (!tui2) return undefined;
+			let panel: any;
+			try {
+				const comps: any[] = tui2.getComponents?.() ?? [];
+				panel = comps.find((c: any) => c.id === "context-panel");
+			} catch {}
+			const getFocused = (): boolean => {
+				try {
+					if (panel?.isFocused) return !!panel.isFocused();
+					if (panel?.getState) {
+						const s = panel.getState();
+						if (s && typeof s.focusedIndex !== "undefined") return s.focusedIndex !== -1;
+					}
+					if (panel?.panelIsFocused) return !!panel.panelIsFocused();
+				} catch {}
+				try {
+					const st: any = tui2.getComponents?.().find((c: any) => c.id === "context-panel")?.getState?.();
+					if (st && typeof st.focusedIndex !== "undefined") return st.focusedIndex !== -1;
+				} catch {}
+				return false;
+			};
+			const beforeFocused = getFocused();
+			if (beforeFocused && panel?.handleKey) {
+				let handled = false;
+				try { handled = !!panel.handleKey(data); } catch {}
+				if (handled) {
+					this.renderRlmTuiPanel();
+					this.ui.requestRender();
+					return { consume: true };
+				}
+				const afterFocused = getFocused();
+				if (beforeFocused !== afterFocused) {
+					this.renderRlmTuiPanel();
+					this.ui.requestRender();
+				}
+				return undefined;
+			}
+			if (!beforeFocused) {
+				if (panel?.handleKey) {
+					try {
+						const isPrintable = data.length === 1 && data >= " " && data <= "~";
+						const shouldAuto = (() => {
+							try {
+								if (tui2.autoFocusShouldFocus) return !!tui2.autoFocusShouldFocus(data);
+								return false;
+							} catch { return false; }
+						})();
+						if (isPrintable && shouldAuto) {
+							let handled2 = false;
+							try { handled2 = !!panel.handleKey(data); } catch {}
+							const after = getFocused();
+							if (!beforeFocused && after) {
+								this.renderRlmTuiPanel();
+								this.ui.requestRender();
+							}
+							if (handled2) {
+								this.renderRlmTuiPanel();
+								this.ui.requestRender();
+								return { consume: true };
+							}
+							return undefined;
+						}
+					} catch {}
+				}
+				const lower = data.toLowerCase();
+				if (lower === "enter") {
+					let handledFollowup = false;
+					try {
+						if (panel?.handleKey) handledFollowup = !!panel.handleKey(data);
+						else if (tui2.handleFollowupKey) handledFollowup = !!tui2.handleFollowupKey(data);
+					} catch {}
+					if (handledFollowup) {
+						this.renderRlmTuiPanel();
+						this.ui.requestRender();
+						return { consume: true };
+					}
+					if (tui2.handleFollowupKey) {
+						try {
+							const fh = !!tui2.handleFollowupKey(data);
+							if (fh) {
+								this.renderRlmTuiPanel();
+								this.ui.requestRender();
+								return { consume: true };
+							}
+						} catch {}
+					}
+				}
+				if (!panel?.handleKey && tui2.handleFollowupKey) {
+					try {
+						const handled = !!tui2.handleFollowupKey(data);
+						if (handled) {
+							this.renderRlmTuiPanel();
+							this.ui.requestRender();
+							return { consume: true };
+						}
+					} catch {}
+				}
+			}
+			return undefined;
+		});
+		try {
+			const tuiCtx: any = (tui as any).ctx;
+			if (tuiCtx?.on) {
+				const offComp = tuiCtx.on("rlm/tui-register-component", () => {
+					this.renderRlmTuiPanel();
+					this.ui.requestRender();
+				});
+				const prevDisposer = this.rlmTuiConfigDisposer;
+				const extraDisposer = typeof offComp === "function" ? offComp : offComp?.dispose ? () => offComp.dispose() : undefined;
+				if (extraDisposer) {
+					const combinedPrev = prevDisposer;
+					this.rlmTuiConfigDisposer = () => {
+						try { combinedPrev?.(); } catch {}
+						try { extraDisposer(); } catch {}
+					};
+				}
+				const offComp2 = tuiCtx.on("rlm/tui-dispose-plugin", () => {
+					this.renderRlmTuiPanel();
+					this.ui.requestRender();
+				});
+				if (offComp2) {
+					const prev = this.rlmTuiConfigDisposer;
+					const extra2 = typeof offComp2 === "function" ? offComp2 : (offComp2 as any)?.dispose ? () => (offComp2 as any).dispose() : undefined;
+					if (extra2) {
+						this.rlmTuiConfigDisposer = () => {
+							try { prev?.(); } catch {}
+							try { extra2(); } catch {}
+						};
+					}
+				}
+			}
+		} catch {}
+		try {
+			(globalThis as any).__rlmTuiPanelContainer = this.rlmTuiPanelContainer;
+		} catch {}
+	}
+
+	private teardownRlmTuiIntegration(): void {
+		try { this.rlmTuiInputDisposer?.(); } catch {}
+		this.rlmTuiInputDisposer = undefined;
+		try { this.rlmTuiFollowupDisposer?.(); } catch {}
+		this.rlmTuiFollowupDisposer = undefined;
+		try { this.rlmTuiConfigDisposer?.(); } catch {}
+		this.rlmTuiConfigDisposer = undefined;
+		try {
+			const tui: any = this.getRlmTui();
+			if (tui?.setRenderCallback) tui.setRenderCallback(() => {});
+		} catch {}
+		try { this.rlmTuiPanelContainer?.clear(); } catch {}
+	}
+
 	constructor(private options: InteractiveModeOptions) {
 		const uiServices = options.uiServices ?? options.localSessionHost?.createUiServices();
 		if (!uiServices) {
 			throw new Error("InteractiveMode requires uiServices when no localSessionHost is supplied");
 		}
 		this.uiServices = uiServices;
+		setRegisteredThemes(this.uiServices.getThemes());
+		initTheme(this.settingsManager.getTheme(), true);
 		this.agentConnection = options.agentConnection;
 		this.promptStashStore = options.promptStashStore;
 		this.promptStashSessionId = options.promptStashSessionId;
@@ -1081,6 +1341,7 @@ export class InteractiveMode {
 		this.featureHintContainer = new Container();
 		this.widgetContainerAbove = new Container();
 		this.widgetContainerBelow = new Container();
+		this.rlmTuiPanelContainer = new Container();
 		this.recapContainer = new Container();
 		this.keybindings = KeybindingsManager.create();
 		setKeybindings(this.keybindings);
@@ -1119,9 +1380,6 @@ export class InteractiveMode {
 		this.setGoalAnnouncementBaseline(emptyGoalState());
 
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
-
-		setRegisteredThemes(this.uiServices.getThemes());
-		initTheme(this.settingsManager.getTheme(), true);
 	}
 
 	private get promptStash(): PromptStash | undefined {
@@ -1420,6 +1678,7 @@ export class InteractiveMode {
 		this.mainContainer.addChild(this.mainViewContainer);
 		this.renderWidgets(); // Initialize with default spacer
 		this.mainContainer.addChild(this.widgetContainerAbove);
+		this.mainContainer.addChild(this.rlmTuiPanelContainer);
 		this.renderRecap();
 		for (const container of this.getPromptContextContainers()) {
 			this.mainContainer.addChild(container);
@@ -1437,6 +1696,7 @@ export class InteractiveMode {
 
 		this.setupKeyHandlers();
 		this.setupEditorSubmitHandler();
+		this.setupRlmTuiIntegration();
 
 		this.ui.start();
 		this.fullscreenEnabled =
@@ -1454,6 +1714,7 @@ export class InteractiveMode {
 		onThemeChange(() => {
 			this.ui.invalidate();
 			this.updateEditorBorderColor();
+			try { this.renderRlmTuiPanel(); } catch {}
 			this.ui.requestRender();
 		});
 
@@ -3593,22 +3854,41 @@ export class InteractiveMode {
 
 	/** Track which context vars we've already rendered inline to avoid duplicates. */
 	private _renderedContextVars: Set<string> = new Set();
+	/** Bounded queue of inline context components — O(1) window to avoid 50k children scroll hell. Panel holds full virtualized list. */
+	private _contextInlineComponents: ContextVariableComponent[] = [];
+	private readonly INLINE_CONTEXT_MAX = 100;
+	private readonly CHAT_CONTAINER_HARD_CAP = 200;
 
 	/**
 	 * Render context variables inline in the chat flow — as first-class
 	 * elements like user prompts, tool calls, and assistant turns.
 	 * Only renders NEW vars since the last call, in creation order
 	 * (which reflects LLM input order: system → user → thinking → assistant → tools).
+	 *
+	 * Virtualization: inline chat shows only the last INLINE_CONTEXT_MAX (100) vars.
+	 * Full 50k lives in panel's virtualized slice (PANEL_MAX_VISIBLE=10). `mutate`
+	 * updates the same var in place — does NOT create a new inline line, so 50k
+	 * `mutate` turns collapse to the original line (panel shows latest value).
+	 * CHAT_CONTAINER_HARD_CAP (200) prevents unbounded children growth.
 	 */
 	private renderContextVarsInline(): void {
 		const ctxProxy = (globalThis as any).__rlmContextProxy;
 		if (!ctxProxy) return;
 		try {
+			// Get focus state from panel state for highlighting.
+			let focusedIndex = -1;
+			try {
+				const ps = ctxProxy.getPanelState?.();
+				if (ps?.focusedIndex !== undefined) focusedIndex = ps.focusedIndex;
+			} catch {}
+
 			// Get all vars with metadata, sorted by createdAt (insertion order).
 			const allVars = ctxProxy.list() as string[];
 			if (!allVars || allVars.length === 0) return;
 
-			// Filter to vars we haven't rendered yet.
+			// Filter to vars we haven't rendered yet — mutate reuses same name, so no new line.
+			// This is intentional: 50k mutates on `files.packages` collapse to one inline entry;
+			// the panel's expanded view shows the current mutated value.
 			const newVars = allVars.filter((name: string) => !this._renderedContextVars.has(name));
 			if (newVars.length === 0) return;
 
@@ -3624,23 +3904,61 @@ export class InteractiveMode {
 			}
 
 			// Render each new variable inline in creation order.
+			// Bounded: inline shows only recent mutations, full set in panel.
+			let renderIdx = 0;
 			for (const { name, meta } of withMeta) {
 				try {
 					const value = ctxProxy.get(name);
 					if (value === undefined || value === null) continue;
 
+					const isFocused = renderIdx === focusedIndex;
 					const component = new ContextVariableComponent(name, value, {
 						mutable: meta?.mutable,
 						type: meta?.type,
 						scope: meta?.scope,
 						source: meta?.source,
 						description: meta?.description,
+						focused: isFocused,
 					});
 					this.chatContainer.addChild(component);
+					this._contextInlineComponents.push(component);
 					this._renderedContextVars.add(name);
+					renderIdx++;
 				} catch { /* best effort */ }
 			}
+			// ── Keep inline chat bounded: prune oldest inline contexts beyond INLINE_CONTEXT_MAX ──
+			this._pruneInlineContextIfNeeded();
+			// ── Hard cap on total chatContainer children to prevent 50k scroll hell ──
+			this._enforceChatContainerHardCap();
+			try { this.renderRlmTuiPanel(); } catch {}
 		} catch { /* best effort */ }
+	}
+
+	private _pruneInlineContextIfNeeded(): void {
+		if (this._contextInlineComponents.length <= this.INLINE_CONTEXT_MAX) return;
+		const overflow = this._contextInlineComponents.length - this.INLINE_CONTEXT_MAX;
+		const toRemove = this._contextInlineComponents.splice(0, overflow);
+		for (const c of toRemove) {
+			try { this.chatContainer.removeChild(c); } catch {}
+		}
+	}
+
+	private _enforceChatContainerHardCap(): void {
+		if (this.chatContainer.children.length <= this.CHAT_CONTAINER_HARD_CAP) return;
+		// First, ensure inline queue already pruned; if still over cap, evict oldest inline contexts
+		while (this.chatContainer.children.length > this.CHAT_CONTAINER_HARD_CAP && this._contextInlineComponents.length > 0) {
+			const oldest = this._contextInlineComponents.shift()!;
+			try { this.chatContainer.removeChild(oldest); } catch {}
+		}
+		// Safety net: if still over hard cap due to non-context history, trim oldest generic children
+		// Keep most recent CHAT_CONTAINER_HARD_CAP entries.
+		if (this.chatContainer.children.length > this.CHAT_CONTAINER_HARD_CAP) {
+			const excess = this.chatContainer.children.length - this.CHAT_CONTAINER_HARD_CAP;
+			const snapshot = [...this.chatContainer.children];
+			for (let i = 0; i < excess && i < snapshot.length; i++) {
+				try { this.chatContainer.removeChild(snapshot[i]); } catch {}
+			}
+		}
 	}
 
 	private renderRecap(): void {
@@ -3675,6 +3993,7 @@ export class InteractiveMode {
 				} catch {}
 			}
 		}
+		try { this.renderRlmTuiPanel(); } catch {}
 
 		if ((recap || showChanges) && !this.featureHintComponent) {
 			this.recapContainer.addChild(new Spacer(1));
@@ -5090,6 +5409,30 @@ export class InteractiveMode {
 
 				this.clearSideQuestion({ abort: true });
 				this.flushPendingBashComponents();
+				// ── RLM TUI micro-plugin: followup queue while streaming ──
+				const rlmTuiForQueue: any = this.getRlmTui();
+				let shouldEnqueue = false;
+				try {
+					const enabledViaMethod = rlmTuiForQueue?.getFollowupQueueUi?.() ?? rlmTuiForQueue?.isFollowupQueueEnabled?.();
+					const cfgEnabled = rlmTuiForQueue?.getConfig ? rlmTuiForQueue.getConfig("followupQueueUi") : enabledViaMethod;
+					const enabled = cfgEnabled ?? enabledViaMethod ?? true;
+					shouldEnqueue = !!enabled && !!rlmTuiForQueue && this.isAgentStreaming() && !text.startsWith("/") && !text.startsWith("!");
+				} catch { shouldEnqueue = false; }
+				if (shouldEnqueue && rlmTuiForQueue) {
+					try {
+						if (rlmTuiForQueue.enqueueFollowup) rlmTuiForQueue.enqueueFollowup(text);
+						else if (rlmTuiForQueue.enqueue) rlmTuiForQueue.enqueue(text);
+						else if (rlmTuiForQueue.panelEnqueueFollowup) rlmTuiForQueue.panelEnqueueFollowup(text);
+					} catch {}
+					this.editor.addToHistory?.(text);
+					this.editor.setText("");
+					let qLen = 1;
+					try { const q = rlmTuiForQueue.getFollowupQueue?.() ?? rlmTuiForQueue.getQueue?.() ?? rlmTuiForQueue.panelGetFollowupQueue?.(); if (Array.isArray(q)) qLen = q.length; } catch {}
+					this.showStatus(`Queued followup (${qLen}) — press Enter twice to send`);
+					this.renderRlmTuiPanel();
+					this.ui.requestRender();
+					return;
+				}
 				const images = this.collectImagesFor(text);
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
@@ -5846,6 +6189,7 @@ export class InteractiveMode {
 			case "refine_complete":
 				break;
 		}
+		try { this.renderRlmTuiPanel(); } catch {}
 	}
 
 	private startAssistantStreamingMessage(message: AssistantMessage): void {
@@ -6744,8 +7088,9 @@ export class InteractiveMode {
 		const context = await this.agentConnection.getSessionContext();
 		await this.renderSessionContext(context, { clearChat: true });
 		// Re-render context vars after chat rebuild — clearChat removed them.
-		// Reset the tracked set so all existing vars get re-added inline.
+		// Reset the tracked set and bounded queue so all existing vars get re-added inline (capped).
 		this._renderedContextVars.clear();
+		this._contextInlineComponents.length = 0;
 		this.renderContextVarsInline();
 	}
 
@@ -10160,6 +10505,7 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 	}
 
 	stop(options: { preserveAltScreen?: boolean } = {}): void {
+		this.teardownRlmTuiIntegration();
 		this.unregisterSignalHandlers();
 		this.clearCtrlCExitHint({ render: false });
 		this.clearEscapeRepeat();

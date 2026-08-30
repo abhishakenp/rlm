@@ -1,29 +1,30 @@
 # rlm profile — Cordis entry-list composing all plugins.
 #
-# Twelve plugins, ALL hot-swappable via fiber.restart():
+# Fourteen plugins, ALL hot-swappable via fiber.restart():
 #
 #   Foundation layer (no dependencies):
 #     1. config  — settings, model registry, auth storage
 #     2. context — persistent typed variable registry (agent working memory)
 #     3. tui     — TUI extension service (slash commands, components)
+#     4. prompt  — prompt contribution registry (system-prompt fragments)
 #
 #   Core layer (depends on foundation):
-#     4. session — session manager + persistence
-#     5. tools   — tool registry (code, edit)
-#     6. refine  — refinement + auto-refine
-#     7. code    — persistent JS code execution (replaces bash + edit)
-#     8. workflow — hot-swappable TS workflows from ~/.rlm/agent/workflows/
-#     9. learn   — self-evolution (tracks outcomes, proposes modifications)
+#     5. session — session manager + persistence
+#     6. tools   — tool registry (code, edit)
+#     7. refine  — refinement + auto-refine
+#     8. code    — persistent JS code execution (replaces bash + edit)
+#     9. workflow — hot-swappable TS workflows from ~/.rlm/agent/workflows/
+#    10. learn   — self-evolution (tracks outcomes, proposes modifications)
 #
 #   Agent layer (depends on core):
-#    10. agent   — AgentSession (the LLM loop, tool dispatch, subagent spawning)
+#    11. agent   — AgentSession (the LLM loop, tool dispatch, subagent spawning)
 #
 #   Presentation layer (depends on agent):
-#    11. renderer — InteractiveMode (terminal rendering, input handling)
-#    12. print    — Print mode (single-shot prompt → output → exit)
-#    13. sdk      — in-process subagent spawning (wraps agent service)
+#    12. renderer — InteractiveMode (terminal rendering, input handling)
+#    13. print    — Print mode (single-shot prompt → output → exit)
+#    14. sdk      — in-process subagent spawning (wraps agent service)
 #
-# Dependency order: config → context/tui → session/tools/refine/code/workflow/learn
+# Dependency order: config → context/tui/prompt → session/tools/refine/code/workflow/learn
 #                   → agent → renderer/sdk
 #
 # HMR: editing ANY plugin source triggers fiber.restart() on that plugin.
@@ -43,6 +44,9 @@
 
 - id: tui
   name: './packages/rlm-tui/src/index.ts'
+
+- id: prompt
+  name: './packages/rlm-prompt/src/index.ts'
 
 # ─── Core ────────────────────────────────────────────────────────────────────
 
