@@ -529,7 +529,7 @@ describe("ENG-4531 agent message UI", () => {
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		const lines = rendered.split("\n");
 		expect(lines).toEqual([
-			expect.stringContaining("python"),
+			expect.stringContaining("js"),
 			" ◆ Agent message queued · to child Worker · Review shard seven.",
 			" ◆ Agent message sent · to parent Worker · Continue with shard eight.",
 		]);
@@ -572,7 +572,7 @@ describe("ENG-4531 agent message UI", () => {
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		const lines = rendered.split("\n").filter((line) => line.trim().length > 0);
 		expect(lines).toEqual([
-			expect.stringContaining("python"),
+			expect.stringContaining("js"),
 			expect.stringContaining("await agent_message.send"),
 			" ◆ Agent message sent · to parent Worker",
 			" ╰─ Continue with shard eight.",

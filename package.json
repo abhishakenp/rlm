@@ -20,6 +20,8 @@
   },
   "dependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/cordis-plugin-include": "^1.0.6",
+    "@deepseek-ai/cordis-plugin-loader": "^1.0.2",
     "chokidar": "^5.0.0",
     "tsx": "^4.23.12",
     "yaml": "^2.5.0"

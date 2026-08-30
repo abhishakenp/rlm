@@ -62,7 +62,7 @@ function makeTempDir(): string {
 
 const kinds = ["prompt", "memory", "skill", "subagent"] as const satisfies readonly RefinementKind[];
 const skillReference = {
-	type: "python",
+	type: "js",
 	import: "agent_skills.example",
 	callable: "run",
 	call_pattern: "await run(...)",
@@ -357,7 +357,7 @@ describe("harness refinement", () => {
 						title: "Native check",
 						content: "Use documented project commands for validation.",
 						reference: {
-							type: "python",
+							type: "js",
 							import: "agent_skills.native_check",
 							callable: "native_check",
 							call_pattern: "await native_check(command=...)",
@@ -384,7 +384,7 @@ describe("harness refinement", () => {
 						title: "Native check",
 						content: "Use `npm run check` for this repo after code changes.",
 						reference: {
-							type: "python",
+							type: "js",
 							import: "agent_skills.native_check",
 							callable: "native_check",
 							call_pattern: "await native_check(command=...)",
@@ -423,7 +423,7 @@ describe("harness refinement", () => {
 					title: "Native Check!",
 					content: "Run project-native checks.",
 					reference: {
-						type: "python",
+						type: "js",
 						import: "agent_skills.native_check",
 						callable: "native_check",
 						call_pattern: "await native_check(command=...)",
@@ -443,7 +443,7 @@ describe("harness refinement", () => {
 				id: "native_check",
 				path: "general",
 				reference: {
-					type: "python",
+					type: "js",
 					import: "agent_skills.native_check",
 					callable: "native_check",
 					call_pattern: "await native_check(command=...)",
@@ -501,7 +501,7 @@ describe("harness refinement", () => {
 		});
 	});
 
-	it("requires Python references for harness-created skills", () => {
+	it("requires JS references for harness-created skills", () => {
 		const state = loadHarnessState(makeTempDir());
 
 		const missingReference = applyRefinementProposal(
@@ -512,7 +512,7 @@ describe("harness refinement", () => {
 					kind: "skill",
 					id: "unbacked_skill",
 					title: "Unbacked skill",
-					content: "This should not be accepted without a Python reference.",
+					content: "This should not be accepted without a JS reference.",
 					arguments: {},
 				},
 			]),
@@ -520,7 +520,7 @@ describe("harness refinement", () => {
 		);
 		const nonPythonReference = applyRefinementProposal(
 			state,
-			proposal("Create skill with non-python reference", [
+			proposal("Create skill with non-js reference", [
 				{
 					action: "create",
 					kind: "skill",
@@ -531,16 +531,16 @@ describe("harness refinement", () => {
 					arguments: {},
 				},
 			]),
-			{ id: "refine_non_python_skill_reference" },
+			{ id: "refine_non_js_skill_reference" },
 		);
 
 		expect(missingReference.appliedEdits[0]).toMatchObject({
 			applied: false,
-			error: "create skill requires python reference",
+			error: "create skill requires js reference",
 		});
 		expect(nonPythonReference.appliedEdits[0]).toMatchObject({
 			applied: false,
-			error: "create skill reference.type must be python",
+			error: "create skill reference.type must be js",
 		});
 		expect(state.entries.skill.unbacked_skill).toBeUndefined();
 		expect(state.entries.skill.shell_skill).toBeUndefined();

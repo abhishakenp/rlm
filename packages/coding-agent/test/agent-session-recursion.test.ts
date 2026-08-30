@@ -319,12 +319,7 @@ describe("AgentSession rlm recursion", () => {
 								baseDir: tempDir,
 								sourceInfo: createSyntheticSourceInfo(join(tempDir, "SKILL.md"), { source: "test" }),
 								disableModelInvocation: false,
-								kind: "python",
-								python: {
-									importName: "agent_message",
-									packagePath: tempDir,
-									pyprojectPath: join(tempDir, "pyproject.toml"),
-								},
+								kind: "markdown",
 							},
 						]
 					: undefined,

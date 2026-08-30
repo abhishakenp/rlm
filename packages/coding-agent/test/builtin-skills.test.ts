@@ -227,31 +227,28 @@ describe("builtin skills", () => {
 			expect(skills.map((s) => s.name)).toContain("skill-creator");
 		});
 
-		it("loads the bundled goal skill as a python skill", () => {
+		it("loads the bundled goal skill as a markdown skill", () => {
 			const { skills } = loadSkillsFromDir({ dir: getBundledSkillsDir(), source: "builtin" });
 
 			const goal = skills.find((s) => s.name === "goal");
 			expect(goal).toBeDefined();
-			expect(goal?.kind).toBe("python");
-			expect(goal?.kind === "python" && goal.python.importName).toBe("goal");
+			expect(goal?.kind).toBe("markdown");
 		});
 
-		it("loads the bundled compact skill as a python skill", () => {
+		it("loads the bundled compact skill as a markdown skill", () => {
 			const { skills } = loadSkillsFromDir({ dir: getBundledSkillsDir(), source: "builtin" });
 
 			const compact = skills.find((s) => s.name === "compact");
 			expect(compact).toBeDefined();
-			expect(compact?.kind).toBe("python");
-			expect(compact?.kind === "python" && compact.python.importName).toBe("compact");
+			expect(compact?.kind).toBe("markdown");
 		});
 
-		it("loads the bundled RLM heartbeat skill as a python skill", () => {
+		it("loads the bundled RLM heartbeat skill as a markdown skill", () => {
 			const { skills } = loadSkillsFromDir({ dir: getBundledSkillsDir(), source: "builtin" });
 
 			const rlmHeartbeat = skills.find((s) => s.name === "rlm-heartbeat");
 			expect(rlmHeartbeat).toBeDefined();
-			expect(rlmHeartbeat?.kind).toBe("python");
-			expect(rlmHeartbeat?.kind === "python" && rlmHeartbeat.python.importName).toBe("rlm_heartbeat");
+			expect(rlmHeartbeat?.kind).toBe("markdown");
 		});
 
 		it("does not ship orchestration heartbeat as a built-in skill", () => {
@@ -260,16 +257,15 @@ describe("builtin skills", () => {
 			expect(skills.map((skill) => skill.name)).not.toContain("orchestration-heartbeat");
 		});
 
-		it("ships the edit skill as a python skill importable as `edit`", () => {
+		it("ships the edit skill as a markdown skill", () => {
 			const { skills } = loadSkillsFromDir({ dir: getBundledSkillsDir(), source: "builtin" });
 
 			const edit = skills.find((s) => s.name === "edit");
 			expect(edit).toBeDefined();
-			expect(edit?.kind).toBe("python");
-			expect(edit?.kind === "python" && edit.python.importName).toBe("edit");
+			expect(edit?.kind).toBe("markdown");
 		});
 
-		it("loads the skill-creator python template as a valid python skill", () => {
+		it("loads the skill-creator template as a valid markdown skill", () => {
 			const referencePath = join(getBundledSkillsDir(), "skill-creator", "references", "python-skills.md");
 			const reference = readFileSync(referencePath, "utf-8");
 			const section = reference.match(/## Minimal Template([\s\S]*?)\n## /)?.[1];
@@ -289,8 +285,7 @@ describe("builtin skills", () => {
 			expect(diagnostics).toEqual([]);
 			expect(skills).toHaveLength(1);
 			expect(skills[0].name).toBe("word-count");
-			expect(skills[0].kind).toBe("python");
-			expect(skills[0].kind === "python" && skills[0].python.importName).toBe("word_count");
+			expect(skills[0].kind).toBe("markdown");
 		});
 	});
 

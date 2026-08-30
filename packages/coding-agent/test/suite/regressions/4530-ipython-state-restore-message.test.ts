@@ -5,7 +5,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { RestoreResult } from "../../../src/core/kernel/state-snapshot.js";
 import {
 	type CustomMessage,
-	IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
+	CODE_STATE_RESTORED_CUSTOM_TYPE,
 	type CodeStateRestoredDetails,
 } from "../../../src/core/messages.js";
 import {
@@ -97,7 +97,7 @@ describe("ENG-4530 Code state restore message", () => {
 		expect(prefixMessages).toHaveLength(1);
 		expect(prefixMessages[0]).toMatchObject({
 			role: "custom",
-			customType: IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
+			customType: CODE_STATE_RESTORED_CUSTOM_TYPE,
 			display: true,
 			details: { restored: true },
 		});
@@ -109,7 +109,7 @@ describe("ENG-4530 Code state restore message", () => {
 		expect(getUserTexts(harness)).toEqual(["start", "stop the heartbeat"]);
 		const restoreMessage = harness.session.messages.find(
 			(message): message is CustomMessage =>
-				message.role === "custom" && message.customType === IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
+				message.role === "custom" && message.customType === CODE_STATE_RESTORED_CUSTOM_TYPE,
 		);
 		if (!restoreMessage || !isInjectedPromptMessage(restoreMessage)) {
 			throw new Error("Expected an injected Code restore message");
@@ -129,7 +129,7 @@ describe("ENG-4530 Code state restore message", () => {
 		harnesses.push(harness);
 		await harness.session.sendCustomMessage(
 			{
-				customType: IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
+				customType: CODE_STATE_RESTORED_CUSTOM_TYPE,
 				content: "restore context",
 				display: true,
 				details: { restored: true },
@@ -155,14 +155,14 @@ describe("ENG-4530 Code state restore message", () => {
 			queued?.payload.kind === "turn" ? queued.payload.records.filter((record) => record.role === "prefix") : [],
 		).toEqual([]);
 		expect(harness.session.messages).toEqual([
-			expect.objectContaining({ customType: IPYTHON_STATE_RESTORED_CUSTOM_TYPE }),
+			expect.objectContaining({ customType: CODE_STATE_RESTORED_CUSTOM_TYPE }),
 		]);
 	});
 
 	it("shows an accurate fixed label when restoration starts a fresh kernel", () => {
 		const message: CustomMessage<CodeStateRestoredDetails> = {
 			role: "custom",
-			customType: IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
+			customType: CODE_STATE_RESTORED_CUSTOM_TYPE,
 			content: "restore details",
 			display: true,
 			details: { restored: false },

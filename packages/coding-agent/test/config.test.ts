@@ -192,9 +192,9 @@ describe("detectInstallMethod", () => {
 		createHomebrewInstall();
 
 		expect(detectInstallMethod()).toBe("homebrew");
-		expect(getSelfUpdateCommand("prime-agent")).toBeUndefined();
-		expect(getSelfUpdateUnavailableInstruction("prime-agent")).toBe("Update with: brew upgrade prime-agent");
-		expect(getUpdateInstruction("prime-agent")).toBe("Update with: brew upgrade prime-agent");
+		expect(getSelfUpdateCommand("rlm")).toBeUndefined();
+		expect(getSelfUpdateUnavailableInstruction("rlm")).toBe("Update with: brew upgrade rlm");
+		expect(getUpdateInstruction("rlm")).toBe("Update with: brew upgrade rlm");
 	});
 
 	test("self-updates npm installs from custom prefixes", () => {
@@ -412,7 +412,7 @@ describe("detectInstallMethod", () => {
 
 describe("session paths", () => {
 	test("uses the short app-prefixed session dir env var", () => {
-		expect(ENV_SESSION_DIR).toBe("PRIME_AGENT_SESSION_DIR");
+		expect(ENV_SESSION_DIR).toBe("RLM_SESSION_DIR");
 	});
 
 	test("uses the session root env var when computing sessions dir", () => {
