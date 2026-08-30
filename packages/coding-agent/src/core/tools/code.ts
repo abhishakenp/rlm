@@ -29,23 +29,22 @@ import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 const require = createRequire(import.meta.url);
 
 /**
- * Detect Python syntax in a failed JS code execution and return a hint
- * that teaches the LLM to write Python to a file instead of pasting it
- * into the JS code tool. This provides within-turn feedback so the LLM
- * corrects itself immediately, not just via auto-refine on the next turn.
+ * Detect non-JS syntax in a failed code execution and return a hint.
+ * Teaches the LLM within-turn: use console.log(), not print(). Use JS syntax.
  */
-function detectPythonInJsError(code: string, ename: string, evalue: string): string | undefined {
+function detectNonJsSyntaxError(code: string, ename: string, evalue: string): string | undefined {
 	const lines = code.split("\n").map((l) => l.trim()).filter(Boolean);
-	let pythonLines = 0;
 	for (const line of lines) {
-		if (/^(def |class |import |from |print\(|elif |#.*print\(|f["']|self\.|__init__|__name__|None\b|True\b|False\b)/.test(line)) {
-			pythonLines++;
+		// print() — most common mistake. Trigger on first match.
+		if (/^print\(/.test(line)) {
+			return `[HINT] The code tool runs JavaScript. Use console.log() instead of print().`;
+		}
+		// Other non-JS syntax patterns.
+		if (/^(def |class |import |from |elif |self\.|__init__|__name__)/.test(line)) {
+			return `[HINT] The code tool runs JavaScript. This is not valid JS syntax. Use JS equivalents (function, class, import(), etc).`;
 		}
 	}
-	// If at least 30% of non-empty lines look like Python, it's Python.
-	if (pythonLines === 0 || pythonLines / lines.length < 0.3) return undefined;
-
-	return `[HINT] This looks like Python code, but the code tool ONLY runs JavaScript. Write the JavaScript equivalent instead. If you absolutely must run Python, write it to a file with fs.writeFileSync and run with !python — but prefer JavaScript.`;
+	return undefined;
 }
 
 // ─── Schema ──────────────────────────────────────────────────────────────────
@@ -357,11 +356,11 @@ export class CodeKernelProvisioner {
 			let evalue = error instanceof Error ? error.message : String(error);
 			const traceback = error instanceof Error ? (error.stack ?? "").split("\n") : [String(error)];
 
-			// Detect Python syntax in JS errors and add a helpful hint.
-			// This teaches the LLM within-turn (not just via auto-refine).
-			const pythonHint = detectPythonInJsError(code, ename, evalue);
-			if (pythonHint) {
-				evalue = `${evalue}\n\n${pythonHint}`;
+			// Detect non-JS syntax in errors and add a hint.
+			// Teaches the LLM within-turn (not just via auto-refine).
+			const syntaxHint = detectNonJsSyntaxError(code, ename, evalue);
+			if (syntaxHint) {
+				evalue = `${evalue}\n\n${syntaxHint}`;
 			}
 
 			return {

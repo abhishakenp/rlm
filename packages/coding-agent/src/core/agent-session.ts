@@ -1467,9 +1467,9 @@ export class AgentSession {
 					description: "Shell command used as bare JS — must use ! or %%bash prefix",
 				},
 				{
-					key: "python-in-js",
-					test: /^\s*(def |print\(|import |from |elif |#.*print\(|f"|f'|None\b|True\b|False\b|self\.|__init__|__name__)/,
-					description: "Python code written in JS kernel — write to file and run with !python instead",
+					key: "non-js-syntax",
+					test: /^\s*(def |print\(|import |from |elif |f"|f'|None\b|True\b|False\b|self\.|__init__|__name__)/,
+					description: "Non-JS syntax in code tool — use console.log() not print(), use JS syntax",
 				},
 				{
 					key: "top-level-return",
@@ -1509,7 +1509,7 @@ export class AgentSession {
 		// Build refinement instructions based on the error pattern.
 		const instructionsByPattern: Record<string, string> = {
 			"shell-as-js": `Create a prompt note: "Shell commands (ls, cat, grep, git, etc.) MUST be prefixed with ! or use %%bash in the code tool. Bare shell commands cause ReferenceError. Example: use !ls not ls." Also create a memory: "LLM attempted bare shell command as JS. Always use ! prefix."`,
-			"python-in-js": `Create a prompt note: "The code tool ONLY runs JavaScript. Never paste Python syntax (def, print(), import, f-strings) directly. Write the JavaScript equivalent instead." Also create a memory: "LLM wrote Python in JS kernel. Must use JavaScript only."`,
+			"non-js-syntax": `Create a prompt note: "The code tool runs JavaScript only. Use console.log() not print(). Use JS syntax (function, class, import()) not other languages." Also create a memory: "LLM used non-JS syntax in code tool. Must use JavaScript only."`,
 			"top-level-return": `Create a prompt note: "Do not use top-level return in the code tool. Assign the result to a variable and use console.log() to output it."`,
 		};
 
