@@ -17,7 +17,7 @@ Everything is a plugin. The host boots Cordis, loads plugins from `config/profil
 | `@rlm/context` | `rlm-context` | `rlmContext` | Persistent typed variable registry (agent working memory) |
 | `@rlm/code` | `rlm-code` | `rlmCode` | Persistent JS code execution (vm.Context + `!` shell + `%%bash`) |
 | `@rlm/sdk` | `rlm-sdk` | `rlmSdk` | In-process subagent spawning, goal management |
-| `@rlm/workflow` | `rlm-workflow` | `rlmWorkflow` | Hot-swappable TS workflows from `~/.prime/agent/workflows/` |
+| `@rlm/workflow` | `rlm-workflow` | `rlmWorkflow` | Hot-swappable TS workflows from `~/.rlm/workflows/` |
 | `@rlm/learn` | `rlm-learn` | `rlmLearn` | Self-evolution — tracks outcomes, proposes modifications |
 
 ### Code tool

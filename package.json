@@ -1,7 +1,7 @@
 {
   "name": "rlm",
   "version": "0.1.0",
-  "description": "Self-evolving terminal agent — prime-agent UI + Cordis plugins + HMR",
+  "description": "Self-evolving terminal agent — JavaScript-native, Cordis plugins, HMR",
   "license": "MIT",
   "type": "module",
   "bin": {

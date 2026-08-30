@@ -5,7 +5,7 @@
 #   2. Context — persistent typed variable registry (agent working memory)
 #   3. Code — persistent JS code execution (replaces bash + edit)
 #   4. SDK — in-process subagent spawning (wraps coding-agent runtime)
-#   5. Workflow — hot-swappable TS workflows from ~/.prime/agent/workflows/
+#   5. Workflow — hot-swappable TS workflows from ~/.rlm/workflows/
 #   6. Learn — self-evolution (tracks outcomes, proposes modifications)
 #
 # Order matters: TUI must load first so other plugins can register extensions.
@@ -36,7 +36,7 @@
 - id: workflow
   name: './packages/rlm-workflow/src/index.ts'
   config:
-    workflowsDir: ~/.prime/agent/workflows
+    workflowsDir: ~/.rlm/workflows
 
 - id: learn
   name: './packages/rlm-learn/src/index.ts'

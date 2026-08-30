@@ -1,7 +1,7 @@
 /**
  * @rlm/workflow — hot-swappable TS workflow orchestrator.
  *
- * Cordis Service. Loads workflow definitions from ~/.prime/agent/workflows/*.ts,
+ * Cordis Service. Loads workflow definitions from ~/.rlm/workflows/*.ts,
  * hot-reloads them on file change, and exposes them via ctx.get("rlmWorkflow").
  *
  * Workflows use @rlm/sdk to compose recursive agent trees:

@@ -1,6 +1,6 @@
 {
   "name": "rlm-code",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "rlm persistent JS code execution tool — vm.Context + shell + rlm SDK",
   "license": "MIT",
   "type": "module",

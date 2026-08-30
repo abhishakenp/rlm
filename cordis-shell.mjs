@@ -9,7 +9,7 @@
  * 1. Boots Cordis Context
  * 2. Loads rlm-* plugins from config/profile.yml
  * 3. Starts chokidar HMR watcher on all package source dirs
- * 4. Launches prime-agent's runCli() in-process (interactive TUI or print mode)
+ * 4. Launches rlm runCli() in-process (interactive TUI or print mode)
  *
  * HMR: editing any plugin source file triggers hot-swap (new generation
  * takes over, old fiber disposed in background — active sessions never
@@ -88,7 +88,7 @@ async function bootCordis() {
 			}
 		}
 
-		// Watch prime-agent source dirs (tui, ai, agent, coding-agent)
+		// Watch rlm source dirs (tui, ai, agent, coding-agent)
 		for (const d of ["tui", "ai", "agent", "coding-agent"]) {
 			const srcPath = join("packages", d, "src");
 			if (existsSync(join(here, srcPath))) watchDirs.push(srcPath);
@@ -164,7 +164,7 @@ async function loadPlugins(ctx) {
 	// until the new one is fully loaded and ready. Only then do we swap.
 	// In-flight operations using the old service complete normally.
 	ctx.on("rlm/hmr-change", async ({ path }) => {
-		// Only reload rlm-* plugins (not prime-agent source — that's too complex for HMR).
+		// Only reload rlm-* plugins (not rlm coding-agent source — that's too complex for HMR).
 		const match = path.match(/packages\/(rlm-[^/]+)\//);
 		if (!match) return;
 		const pkgDir = match[1];
@@ -259,7 +259,7 @@ async function main() {
 		console.error(`[rlm] context registry unavailable: ${error?.message ?? error}`);
 	}
 
-	// Launch prime-agent in-process.
+	// Launch rlm in-process.
 	// runCli() reads process.argv and dispatches to interactive mode or print mode.
 	// The interactive mode uses InProcessAgentConnection (no daemon).
 	// Import from the esbuild bundle (self-contained JS, no tsx needed).
@@ -277,7 +277,7 @@ async function main() {
 	// Print mode (-p) exits after the response. Interactive mode exits on Ctrl+C.
 	// In both cases, chokidar watchers keep the process alive — force exit.
 	// Only force-exit if stdout is not a TTY (print mode), or if the CLI
-	// has finished. The prime-agent CLI calls process.exit() itself in
+	// has finished. The rlm CLI calls process.exit() itself in
 	// interactive mode, so this is a safety net for print mode.
 	if (!process.stdout.isTTY) {
 		process.exit(0);

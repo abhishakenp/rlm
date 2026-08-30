@@ -7,9 +7,9 @@
  * What it does:
  * - Listens to rlm/workflow-* events from @rlm/workflow
  * - Records every workflow run: name, input, result, duration, success
- * - Writes to ~/.prime/agent/workflows/learnings.jsonl
+ * - Writes to ~/.rlm/workflows/learnings.jsonl
  * - Periodically reflects: "what patterns led to success?"
- * - Proposes workflow modifications via LLM → ~/.prime/agent/workflows/proposals/
+ * - Proposes workflow modifications via LLM → ~/.rlm/workflows/proposals/
  * - Operator approves → proposal moves to workflows/ → HMR picks it up
  *
  * The learning loop:
