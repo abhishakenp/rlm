@@ -4039,6 +4039,24 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 			this._lastAutoRefineReviewAt = Date.now();
 			this._assistantTurnsSinceAutoRefine = 0;
 		}
+		// Drain pending tool_error/tool_discovery reviews before disposal.
+		// These bypass turn interval and must run so learning is never lost.
+		if (this._pendingAutoRefineReview && this._autoRefineAllowedForSession()) {
+			const pendingReview = this._pendingAutoRefineReview;
+			const reviewSettings = this.settingsManager.getAutoRefineSettings();
+			if (reviewSettings.enabled) {
+				const nowMs = Date.now();
+				const underCooldown =
+					this._lastAutoRefineReviewAt > 0 && nowMs - this._lastAutoRefineReviewAt < reviewSettings.cooldownMs;
+				if (!underCooldown) {
+					try {
+						await this._runApprovedRefine(pendingReview.reason, pendingReview.review);
+					} catch {
+						// Best-effort; refinement errors must not block disposal.
+					}
+				}
+			}
+		}
 		// A serialized compaction can finish without another model turn. Drain its
 		// pending review here so disposal does not silently lose the trigger.
 		if (this._serializedRefine && this._compactAutoRefinePending && this._autoRefineAllowedForSession()) {
@@ -7658,7 +7676,7 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 	}
 
 	private _autoRefineAllowedForSession(): boolean {
-		return this._rlmDepth === 0 && this._localHarnessStateDir() !== undefined;
+		return this._localHarnessStateDir() !== undefined;
 	}
 
 	private _settlePostCompactionContinue(error?: Error): void {
