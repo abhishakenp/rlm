@@ -58,8 +58,6 @@ export interface CodeToolOptions {
 	sessionId?: string;
 	/** Host request handlers for rlm.run, goal.*, etc. */
 	hostHandlers?: HostRequestHandlers;
-	/** Legacy skill stubs — ignored by JS code tool. */
-	legacySkills?: readonly any[];
 	/** Per-session artifact dir where namespace snapshot would be stored. Ignored by JS code tool. */
 	snapshotDir?: string;
 	/** Resolves before this kernel starts — ignored by JS code tool (no async boot). */
