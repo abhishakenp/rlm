@@ -141,6 +141,7 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.js";
 import { emitSessionShutdownEvent } from "./extensions/runner.js";
+import { HotReloadScheduler, installResourceHotReload } from "./hot-reload-scheduler.js";
 import {
 	createGoalContextMessage,
 	emptyGoalState,
@@ -1115,6 +1116,10 @@ export class AgentSession {
 	private _extensionRunner!: ExtensionRunner;
 	private _execEnvProvider?: () => Record<string, string | undefined> | undefined;
 	private _turnIndex = 0;
+	/** True while an agent run is in flight; hot reloads wait for it. */
+	private _agentRunning = false;
+	/** Re-derives skills, extensions, tools and prompts when files change. */
+	private _hotReload?: HotReloadScheduler;
 	private _modelSelectEmitQueue: Promise<void> = Promise.resolve();
 	private _modelSelectEmitQueueIdle = true;
 	private _modelSelectEmitContext = new AsyncLocalStorage<boolean>();
@@ -1327,6 +1332,7 @@ export class AgentSession {
 		this._installAgentTurnHook();
 		this._installAgentContinuationHook();
 		this._installPromptHmrListener();
+		this._installResourceHmrListener();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -1565,6 +1571,34 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 					ctx.on(evt, invalidatePrompt);
 				} catch {}
 			}
+		} catch { /* best effort */ }
+	}
+
+	/**
+	 * Re-derive this session's resources when something on disk changes.
+	 *
+	 * Invalidating the system prompt (above) covers prompt text, but skills,
+	 * extensions, tools and settings are read once when the session is built.
+	 * `reload()` already re-reads all of them and swaps the extension runner in
+	 * place; nothing was ever calling it except the /reload command. This wires
+	 * the same path to the reload events the HMR plugin emits, so a skill added
+	 * or a plugin edited while the agent is running reaches the running agent.
+	 *
+	 * A reload never interrupts a turn — the scheduler holds it until the turn
+	 * ends. See HotReloadScheduler.
+	 */
+	private _installResourceHmrListener(): void {
+		const ctx = (globalThis as any).__rlmCordisContext;
+		if (!ctx?.on) return;
+		try {
+			this._hotReload = installResourceHotReload(ctx, {
+				isBusy: () => this._agentRunning,
+				reload: () => this.reload(),
+				onReload: (reason) =>
+					console.error(`[rlm] HMR: session resources reloaded (${reason})`),
+				onError: (error: any) =>
+					console.error(`[rlm] HMR: session reload failed: ${error?.message ?? error}`),
+			});
 		} catch { /* best effort */ }
 	}
 
@@ -3835,6 +3869,7 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 	private async _emitExtensionEvent(event: AgentEvent): Promise<void> {
 		if (event.type === "agent_start") {
 			this._turnIndex = 0;
+			this._agentRunning = true;
 			this.sessionManager.recordGitStateIfChanged();
 			await this._extensionRunner.emit({ type: "agent_start" });
 		} else if (event.type === "agent_end") {
@@ -3844,6 +3879,9 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 				type: "agent_end",
 				messages: event.messages,
 			});
+			// The run is over, so a reload that arrived mid-turn can land now.
+			this._agentRunning = false;
+			void this._hotReload?.onIdle();
 		} else if (event.type === "turn_start") {
 			const extensionEvent: TurnStartEvent = {
 				type: "turn_start",

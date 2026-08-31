@@ -31,6 +31,7 @@
 import { Service } from "@deepseek-ai/cordis";
 import { watch as fsWatch, existsSync, type FSWatcher } from "node:fs";
 import { join, relative, sep } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 
@@ -41,11 +42,21 @@ export interface RlmHmrConfig {
 	roots?: string[];
 	/** Substrings and suffixes that disqualify a path from triggering a reload. */
 	ignored?: string[];
+	/**
+	 * Directories holding runtime resources — skills, extensions, prompts,
+	 * themes. Anything that changes here is announced to live sessions, which
+	 * re-derive from it without restarting. Defaults to the project's and the
+	 * user's agent directories.
+	 */
+	resourceRoots?: string[];
 	/** Milliseconds to batch rapid saves into one reload pass. Default 100. */
 	debounce?: number;
 	/** Log every decision. Also enabled by RLM_HMR_VERBOSE=1. */
 	verbose?: boolean;
 }
+
+/** Paths whose contents end up inside the built system prompt. */
+const PROMPT_SHAPED = ["/skills/", "/prompts/", "/refinement/", "/themes/"];
 
 const DEFAULT_IGNORED = [
 	"/node_modules/",
@@ -65,7 +76,9 @@ export class RlmHmrService extends Service {
 	declare config: RlmHmrConfig;
 
 	private root = process.cwd();
+	private resourceRoots: string[] = [];
 	private reloadCount = 0;
+	private resourceEvents = 0;
 	private lastReloaded: string[] = [];
 
 	constructor(ctx: any, config: RlmHmrConfig = {}) {
@@ -79,6 +92,9 @@ export class RlmHmrService extends Service {
 
 	async [Service.init]() {
 		this.root = this.ctx.baseUrl ? fileURLToPath(this.ctx.baseUrl) : process.cwd();
+		this.resourceRoots = (
+			this.config.resourceRoots ?? [join(this.root, ".rlm", "agent"), join(homedir(), ".rlm", "agent")]
+		).filter((d) => existsSync(d));
 
 		if (!this.ctx.loader?.internal) {
 			this.ctx.logger?.warn?.(
@@ -124,6 +140,14 @@ export class RlmHmrService extends Service {
 
 			this.log(`[rlm] HMR: ${relative(this.root, absolute)} changed`);
 			stashed.add(pathToFileURL(absolute).href);
+			// Source that feeds the prompt (prompt templates, skill definitions,
+			// refinement text) must invalidate the built prompt as well as
+			// reloading the module that holds it.
+			if (PROMPT_SHAPED.some((frag) => absolute.includes(frag))) {
+				try {
+					(this.ctx as any).emit("rlm/prompt-changed", { path: absolute });
+				} catch {}
+			}
 
 			if (timer) clearTimeout(timer);
 			timer = setTimeout(() => {
@@ -149,12 +173,72 @@ export class RlmHmrService extends Service {
 				this.log(`[rlm] HMR: cannot watch ${dir}: ${e?.message ?? e}`);
 			}
 		}
+
+		// Resource directories. Nothing here is a module, so nothing is
+		// re-imported; the change is announced and live sessions re-derive from
+		// it. This is what makes a skill added at runtime reach a running agent.
+		let resourceTimer: NodeJS.Timeout | null = null;
+		const resourceChanges = new Set<string>();
+		const onResourceChange = (absolute: string) => {
+			if (ignored.some((frag) => absolute.includes(frag) || absolute.endsWith(frag))) return;
+			resourceChanges.add(absolute);
+			if (resourceTimer) clearTimeout(resourceTimer);
+			resourceTimer = setTimeout(() => {
+				resourceTimer = null;
+				const batch = [...resourceChanges];
+				resourceChanges.clear();
+				this.announceResourceChange(batch);
+			}, debounceMs);
+		};
+
+		for (const dir of this.resourceRoots) {
+			try {
+				watchers.push(
+					fsWatch(dir, { recursive: true }, (_event, filename) => {
+						if (filename) onResourceChange(join(dir, filename.toString()));
+					}),
+				);
+				this.log(`[rlm] HMR: watching resources in ${dir}`);
+			} catch (e: any) {
+				this.log(`[rlm] HMR: cannot watch ${dir}: ${e?.message ?? e}`);
+			}
+		}
 		return watchers;
+	}
+
+	/**
+	 * Tell live sessions that something they read at startup has changed.
+	 *
+	 * `rlm/resources-changed` makes a session re-derive skills, extensions and
+	 * tools; `rlm/prompt-changed` additionally invalidates the built system
+	 * prompt. Both are advisory — a session applies them between turns, never
+	 * during one.
+	 */
+	private announceResourceChange(paths: string[]) {
+		if (paths.length === 0) return;
+		const ctx: any = this.ctx;
+		const names = paths.map((p) => relative(this.root, p)).slice(0, 3).join(", ");
+		this.log(`[rlm] HMR: resources changed (${names})`);
+		this.resourceEvents++;
+		try {
+			ctx.emit("rlm/resources-changed", { paths, reason: `resources changed: ${names}` });
+		} catch {}
+		if (paths.some((p) => PROMPT_SHAPED.some((frag) => p.includes(frag)))) {
+			try {
+				ctx.emit("rlm/prompt-changed", { path: paths[0] });
+			} catch {}
+		}
 	}
 
 	/** How many reload passes this fiber has performed, and what it last swapped. */
 	stats() {
-		return { reloads: this.reloadCount, lastReloaded: this.lastReloaded, root: this.root };
+		return {
+			reloads: this.reloadCount,
+			resourceEvents: this.resourceEvents,
+			lastReloaded: this.lastReloaded,
+			root: this.root,
+			resourceRoots: this.resourceRoots,
+		};
 	}
 
 	// ─── Module graph ─────────────────────────────────────────────────────────
