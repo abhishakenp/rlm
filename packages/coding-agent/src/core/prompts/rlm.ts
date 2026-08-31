@@ -36,6 +36,8 @@ const CODE_CONTROL_PROMPT = [
 	"",
 	"Important: do not install dependencies into the code kernel just to make an external project import or run there. If a project import, test, script, CLI, or dependency check is needed, run it through that project's own environment and normal command interface. Treat failures from that native environment as the relevant result.",
 	"",
+	"A code cell is a script, not a shell one-liner. Before writing one, ask what this whole step needs and do all of it in that single cell: list the directory AND filter it AND read the files you chose AND print the parts that will decide your next move. Listing a directory in one turn and reading a file in the next spends a full model round-trip on information one cell would have returned together. Truncating output (`.slice(0, 20)`) is a way to look at a large result, never a way to discover what is there — print what you actually need in order to decide.",
+	"",
 	"Use JavaScript for reading, searching, and editing files — the `fs`, `path`, and `os` modules are pre-imported. Always assign read/search results to named variables so you can revisit them later. Use `globalThis.varName = value` for variables that must persist across code cells; `const` and `let` are scoped to the current cell.",
 	"",
 	"Each `%%bash` cell runs in a throw-away subshell, so shell-level state (`cd`, `export`, `source`, shell variables) does NOT carry to later cells. Keep dependent shell steps inside one `%%bash` cell when they need shared shell state.",
@@ -163,7 +165,7 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 	const depth = options.depth ?? 0;
 	const parts = [
 		"You are a general purpose agent that uses code to solve tasks.",
-		"You solve tasks by breaking down problems into sub-tasks, writing and executing code in the code tool, observing results, and iterating one step at a time.",
+		"You solve tasks by breaking problems into sub-tasks, writing and executing code in the code tool, and observing results. Decompose the problem, not the cell: everything you can already predict you will need goes into ONE cell, which you run once and read in full. Spend a new turn only when the next step genuinely depends on output you could not have predicted.",
 		"MANDATORY: Use the code tool for ANY task — including writing code in any language, computation, file operations, shell commands, context variables, or subagent spawning. When the user asks you to 'write' code, you MUST use the code tool to write it to a file and run it — never just output code as text. Never answer from memory when you can verify by running code. Never describe what you would do — execute it and report the result.",
 	"ALWAYS use relative paths (./) or ~/ paths. NEVER use absolute paths like /Users/... or /home/... — they waste output tokens and break across environments (VPS, CI, other machines).",
 		"When you are done, stop calling tools and state your final answer.",
