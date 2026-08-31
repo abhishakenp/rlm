@@ -15,6 +15,7 @@
 #     8. code    — persistent JS code execution (replaces bash + edit)
 #     9. workflow — hot-swappable TS workflows from ~/.rlm/agent/workflows/
 #    10. learn   — self-evolution (tracks outcomes, proposes modifications)
+#    10b. gitpixel — deterministic gitpixel substitution on every code tool call
 #
 #   Agent layer (depends on core):
 #    11. agent   — AgentSession (the LLM loop, tool dispatch, subagent spawning)
@@ -78,6 +79,12 @@
   config:
     reflectInterval: 60000
     maxLearningsBeforeReflect: 10
+
+- id: gitpixel
+  name: './packages/rlm-gitpixel/src/index.ts'
+  config:
+    cwd: .
+    warmOnStart: true
 
 # ─── Agent ───────────────────────────────────────────────────────────────────
 

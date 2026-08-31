@@ -31,6 +31,53 @@ import type { SessionManager } from "../../coding-agent/src/core/session-manager
 import type { CreateAgentSessionResult } from "../../coding-agent/src/core/sdk.js";
 import { getAgentDir } from "../../coding-agent/src/config.js";
 
+/**
+ * Extension factories published by other Cordis plugins.
+ *
+ * A plugin that needs to observe or rewrite tool calls pushes
+ * `{ id, factory }` onto `globalThis.__rlmExtensionFactories`; the id lets a
+ * hot-swap replace an entry instead of stacking duplicates. Read through a
+ * global rather than dependency injection so @rlm/agent stays unaware of which
+ * plugins exist, and so a contributor can come and go at runtime.
+ */
+function currentContributedFactories(): Array<(pi: any) => void> {
+	try {
+		const entries = (globalThis as any).__rlmExtensionFactories;
+		if (!Array.isArray(entries)) return [];
+		return entries.map((e: any) => e?.factory).filter((f: unknown) => typeof f === "function");
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * A live view of the contributed factories, not a snapshot.
+ *
+ * The resource loader keeps whatever array it is handed for the life of the
+ * session and re-reads it on `/reload`. Handing it a plain array would freeze
+ * the set of contributors at session-creation time, so a plugin loaded later —
+ * exactly what a hot-swap does — could never attach, even on an explicit
+ * reload. This proxy reads the registry at the moment the loader looks.
+ */
+function getContributedExtensionFactories(): Array<(pi: any) => void> {
+	return new Proxy([] as Array<(pi: any) => void>, {
+		get(_target, prop, receiver) {
+			return Reflect.get(currentContributedFactories(), prop, receiver);
+		},
+		has(_target, prop) {
+			return Reflect.has(currentContributedFactories(), prop);
+		},
+		ownKeys() {
+			return Reflect.ownKeys(currentContributedFactories());
+		},
+		getOwnPropertyDescriptor(_target, prop) {
+			const live = currentContributedFactories();
+			const d = Reflect.getOwnPropertyDescriptor(live, prop);
+			return d && { ...d, configurable: true };
+		},
+	});
+}
+
 export interface RlmAgentConfig {
 	cwd?: string;
 	agentDir?: string;
@@ -80,9 +127,37 @@ export class RlmAgentService extends Service {
 		opts: Omit<CreateAgentSessionServicesOptions, "cwd" | "agentDir"> &
 			Partial<Pick<CreateAgentSessionServicesOptions, "cwd" | "agentDir">>,
 	): Promise<AgentSessionServices> {
+		// Wire rlmPrompt's buildCompositePrompt() into the AgentSession's
+		// system prompt via appendSystemPromptOverride. This makes all
+		// registered prompt fragments (context registry, learnings, refine,
+		// SDK subagent guidance, etc.) visible to the AI on every turn.
+		const getPromptSvc = () => {
+			try {
+				const fromGlobal = (globalThis as any).__rlmPrompt;
+				if (fromGlobal?.buildCompositePrompt) return fromGlobal;
+			} catch {}
+			try {
+				const fromCtx = (this.ctx as any)?.get?.("rlmPrompt");
+				if (fromCtx?.buildCompositePrompt) return fromCtx;
+			} catch {}
+			return null;
+		};
+
 		const base: CreateAgentSessionServicesOptions = {
 			cwd: this.services?.cwd ?? this.config.cwd ?? process.cwd(),
 			agentDir: this.services?.agentDir ?? this.config.agentDir ?? getAgentDir(),
+			resourceLoaderOptions: {
+				// In-process extension factories contributed by other plugins
+				// (see @rlm/gitpixel). Resolved lazily at session-creation time so
+				// a fiber.restart() on the contributing plugin is picked up by the
+				// next session without restarting the agent.
+				extensionFactories: getContributedExtensionFactories(),
+				appendSystemPromptOverride: (baseAppend: string[]) => {
+					const svc = getPromptSvc();
+					const composite = svc?.buildCompositePrompt?.() ?? "";
+					return [...baseAppend, composite];
+				},
+			},
 			...opts,
 		};
 		return createAgentSessionServices(base);
