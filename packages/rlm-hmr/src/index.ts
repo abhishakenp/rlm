@@ -45,8 +45,13 @@ export interface RlmHmrConfig {
 	/**
 	 * Directories holding runtime resources — skills, extensions, prompts,
 	 * themes. Anything that changes here is announced to live sessions, which
-	 * re-derive from it without restarting. Defaults to the project's and the
-	 * user's agent directories.
+	 * re-derive from it without restarting.
+	 *
+	 * Defaults to the resource subdirectories of the project's and the user's
+	 * agent directories, never the agent directory itself: a running session
+	 * writes its transcript, artifacts and lock files there, and watching the
+	 * parent turns the session's own output into a reload trigger, which
+	 * produces more output.
 	 */
 	resourceRoots?: string[];
 	/** Milliseconds to batch rapid saves into one reload pass. Default 100. */
@@ -58,7 +63,24 @@ export interface RlmHmrConfig {
 /** Paths whose contents end up inside the built system prompt. */
 const PROMPT_SHAPED = ["/skills/", "/prompts/", "/refinement/", "/themes/"];
 
+/**
+ * The subdirectories of an agent directory that actually hold resources.
+ *
+ * Deliberately not the agent directory itself: sessions, session-artifacts,
+ * logs and lock files live beside these and are written by the running
+ * session, so watching the parent makes a session reload in response to its
+ * own transcript — and each reload writes more of one.
+ */
+const RESOURCE_DIRS = ["skills", "extensions", "prompts", "themes", "workflows"];
+
 const DEFAULT_IGNORED = [
+	// Session state written by the running agent. Never a resource change.
+	"/sessions/",
+	"/session-artifacts/",
+	"/logs/",
+	".lock",
+	".jsonl",
+	".tmp",
 	"/node_modules/",
 	"/dist/",
 	"/.cache",
@@ -93,7 +115,10 @@ export class RlmHmrService extends Service {
 	async [Service.init]() {
 		this.root = this.ctx.baseUrl ? fileURLToPath(this.ctx.baseUrl) : process.cwd();
 		this.resourceRoots = (
-			this.config.resourceRoots ?? [join(this.root, ".rlm", "agent"), join(homedir(), ".rlm", "agent")]
+			this.config.resourceRoots ??
+			[join(this.root, ".rlm", "agent"), join(homedir(), ".rlm", "agent")].flatMap((base) =>
+				RESOURCE_DIRS.map((sub) => join(base, sub)),
+			)
 		).filter((d) => existsSync(d));
 
 		if (!this.ctx.loader?.internal) {

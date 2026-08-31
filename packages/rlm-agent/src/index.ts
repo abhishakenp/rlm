@@ -60,6 +60,10 @@ function currentContributedFactories(): Array<(pi: any) => void> {
  * reload. This proxy reads the registry at the moment the loader looks.
  */
 function getContributedExtensionFactories(): Array<(pi: any) => void> {
+	if (process.env.RLM_VERBOSE || process.env.RLM_HMR_VERBOSE) {
+		const ids = ((globalThis as any).__rlmExtensionFactories ?? []).map((e: any) => e?.id).join(", ");
+		console.error(`[rlm] rlm-agent: contributed extension factories → [${ids || "none"}]`);
+	}
 	return new Proxy([] as Array<(pi: any) => void>, {
 		get(_target, prop, receiver) {
 			return Reflect.get(currentContributedFactories(), prop, receiver);

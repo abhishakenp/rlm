@@ -37,7 +37,7 @@ function write(dir, id, version) {
 }
 
 function cleanup() {
-  for (const d of [early, late]) { try { rmSync(d, { recursive: true }); } catch {} }
+  for (const d of [early, late, join(repoRoot, "packages", "rlm-hmr-dep")]) { try { rmSync(d, { recursive: true }); } catch {} }
   try { rmSync(cfg); } catch {}
 }
 process.on("exit", cleanup);
@@ -104,6 +104,46 @@ check("late package loaded v1 after config refresh", globalThis.__hmrLate === "v
 write(late, "hmrLate", "v2");
 await new Promise((r) => setTimeout(r, 2500));
 check("a package created AFTER boot reloads", globalThis.__hmrLate === "v2", String(globalThis.__hmrLate));
+
+// ── 3. A module a plugin depends on — the "core" case ──
+// Editing packages/coding-agent/src/core/* must reload the plugins that
+// import it. This models that with a shared module of its own, so the test
+// never edits real core files.
+const dep = join(repoRoot, "packages", "rlm-hmr-dep");
+mkdirSync(join(dep, "src"), { recursive: true });
+writeFileSync(join(dep, "src", "helper.ts"), `export const HELPER = "h1";\n`);
+writeFileSync(join(dep, "src", "index.ts"), `import { Service } from "@deepseek-ai/cordis";
+import { HELPER } from "./helper.ts";
+export class D extends Service {
+  static inject = [] as const;
+  static provide = "hmrDep" as const;
+  constructor(ctx: any, config: any = {}) { super(ctx, undefined as any); }
+  async [Service.init]() { (globalThis as any).__hmrDep = HELPER; }
+}
+export default D;
+export const name = "hmrDep";
+`);
+writeFileSync(cfg, `- id: hmr
+  name: './packages/rlm-hmr/src/index.ts'
+  config:
+    roots: ['packages']
+    debounce: 50
+    verbose: ${process.env.RLM_HMR_VERBOSE ? "true" : "false"}
+- id: hmrEarly
+  name: './packages/rlm-hmr-early/src/index.ts'
+- id: hmrLate
+  name: './packages/rlm-hmr-late/src/index.ts'
+- id: hmrDep
+  name: './packages/rlm-hmr-dep/src/index.ts'
+`);
+if (tree?.refresh) await tree.refresh();
+await new Promise((r) => setTimeout(r, 1200));
+check("dependent plugin loaded h1", globalThis.__hmrDep === "h1", String(globalThis.__hmrDep));
+
+writeFileSync(join(dep, "src", "helper.ts"), `export const HELPER = "h2";\n`);
+await new Promise((r) => setTimeout(r, 2500));
+check("editing an imported module reloads its dependent plugin",
+  globalThis.__hmrDep === "h2", String(globalThis.__hmrDep));
 
 const stats = ctx.get("rlmHmr")?.stats?.();
 console.log("\nhmr stats:", JSON.stringify(stats));

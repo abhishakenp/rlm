@@ -29,7 +29,7 @@
 import { Service } from "@deepseek-ai/cordis";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 
 const require_ = createRequire(import.meta.url);
@@ -101,18 +101,29 @@ export class RlmGitpixelService extends Service {
 		this.config = config;
 	}
 
+	/** Boot diagnostics, visible with RLM_VERBOSE=1. */
+	private diag(message: string) {
+		if (process.env.RLM_VERBOSE || process.env.RLM_HMR_VERBOSE) console.error(`[rlm] ${message}`);
+	}
+
 	async [Service.init]() {
+		this.diag("rlm-gitpixel: init");
 		const rlmConfig = this.ctx.get("rlmConfig") as {
 			getSettingsManager?: () => { getCwd?: () => string } | undefined;
 		};
-		this.cwd = this.config.cwd ?? rlmConfig?.getSettingsManager?.()?.getCwd?.() ?? process.cwd();
+		// cordis.yml carries `cwd: .`, so this must be resolved: a literal "."
+		// would be compared against absolute paths when deciding whether a file
+		// belongs to this repo, and every such comparison would fail.
+		this.cwd = resolve(this.config.cwd ?? rlmConfig?.getSettingsManager?.()?.getCwd?.() ?? process.cwd());
 
 		this.engine = resolveEngine(this.config.enginePath);
 		if (!this.engine) {
+			this.diag("rlm-gitpixel: substitution engine not found — plugin is inert");
 			this.ctx.logger?.warn("rlm-gitpixel: substitution engine not found — plugin is inert");
 			return;
 		}
 		if (!this.engine.gitpixelAvailable()) {
+			this.diag("rlm-gitpixel: gitpixel binary not on PATH — plugin is inert");
 			this.ctx.logger?.warn("rlm-gitpixel: gitpixel binary not on PATH — plugin is inert");
 			this.engine = null;
 			return;
@@ -121,6 +132,7 @@ export class RlmGitpixelService extends Service {
 		this.contributeFactory();
 		this.contributePrompt();
 
+		this.diag(`rlm-gitpixel: enforcing (cwd=${this.cwd})`);
 		this.ctx.logger?.info(`rlm-gitpixel: enforcing (cwd=${this.cwd})`);
 	}
 
@@ -139,6 +151,7 @@ export class RlmGitpixelService extends Service {
 			if (stale >= 0) reg.splice(stale, 1);
 			const entry: FactoryEntry = { id: PLUGIN_ID, factory: (pi: any) => this.register(pi) };
 			reg.push(entry);
+			this.diag(`rlm-gitpixel: factory contributed (registry size ${reg.length})`);
 			return () => {
 				const i = reg.indexOf(entry);
 				if (i >= 0) reg.splice(i, 1);
@@ -148,6 +161,7 @@ export class RlmGitpixelService extends Service {
 
 	/** Wire the handlers onto one AgentSession's extension API. */
 	private register(pi: any) {
+		this.diag("rlm-gitpixel: attaching handlers to a session");
 		pi.on("session_start", () => {
 			this.seeded = false;
 			if (this.config.warmOnStart === false) return;
@@ -187,9 +201,15 @@ export class RlmGitpixelService extends Service {
 			// being a shell cell at all. Seeding waits for the next JS cell —
 			// shell cells are already covered by substitution.
 			if (!this.seeded && !/^[ \t]*%%/.test(code)) {
-				const manifest = this.engine.loadManifest(this.cwd);
+				const manifest: any = this.engine.loadManifest(this.cwd);
+				this.diag(
+					`rlm-gitpixel: seeding (cwd=${this.cwd}, manifest=${
+						manifest ? `${manifest.files?.length ?? 0} file(s)${manifest.stale ? " STALE" : ""}` : "none"
+					})`,
+				);
 				code = `${this.engine.kernelBootstrap(this.cwd, manifest)}\n${code}`;
 				this.seeded = true;
+				this.diag("rlm-gitpixel: kernel seeded with gp.* and fs interception");
 			}
 
 			// Mutation in place is the contract — no re-validation follows.
