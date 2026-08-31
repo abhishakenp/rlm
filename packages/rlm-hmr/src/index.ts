@@ -1,0 +1,380 @@
+/**
+ * @rlm/hmr — module reload, as a plugin.
+ *
+ * The reload engine used to live in cordis-shell.mjs, which is the one file in
+ * the process that cannot reload itself. That is not a stylistic complaint: it
+ * had two costs the plugin form does not have.
+ *
+ *   The watch roots were derived once, at boot, from `readdirSync(packages)`.
+ *   A package created afterwards was never watched, so the first edit to a
+ *   newly added plugin did nothing and looked like a broken reloader.
+ *
+ *   The reload policy — debounce, ignore rules, what counts as source — was
+ *   frozen for the life of the process. Changing how reloading works meant
+ *   restarting the thing whose job is to avoid restarts.
+ *
+ * As a fiber both go away. One recursive watcher over `packages/` sees
+ * directories that appear later, so a package added at runtime is watched from
+ * the moment it exists. And this file lives under that same tree, so editing
+ * the reloader reloads the reloader: `fiber.restart()` disposes these watchers
+ * through ctx.effect() and the new module opens its own.
+ *
+ * The reload algorithm itself is unchanged from the shell's — module-graph
+ * tracing, cache clearing, registry swap with rollback — which in turn mirrors
+ * @deepseek-ai/cordis-plugin-hmr. The official plugin is the better long-term
+ * home, but it requires Node's internal module loader and refuses to run under
+ * bun, so rlm keeps its own until that stops being a constraint.
+ *
+ * Running sessions are never interrupted: reload swaps plugin fibers, and the
+ * agent's own state lives in the kernel, not in the plugin closure.
+ */
+import { Service } from "@deepseek-ai/cordis";
+import { watch as fsWatch, existsSync, type FSWatcher } from "node:fs";
+import { join, relative, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { createRequire } from "node:module";
+
+const require_ = createRequire(import.meta.url);
+
+export interface RlmHmrConfig {
+	/** Directories to watch, relative to the repo root. Default: ["packages"]. */
+	roots?: string[];
+	/** Substrings and suffixes that disqualify a path from triggering a reload. */
+	ignored?: string[];
+	/** Milliseconds to batch rapid saves into one reload pass. Default 100. */
+	debounce?: number;
+	/** Log every decision. Also enabled by RLM_HMR_VERBOSE=1. */
+	verbose?: boolean;
+}
+
+const DEFAULT_IGNORED = [
+	"/node_modules/",
+	"/dist/",
+	"/.cache",
+	"/.tsbuildinfo",
+	".test.ts",
+	".test.js",
+	".map",
+	".d.ts",
+];
+
+export class RlmHmrService extends Service {
+	static inject = [] as const;
+	static provide = "rlmHmr" as const;
+
+	declare config: RlmHmrConfig;
+
+	private root = process.cwd();
+	private reloadCount = 0;
+	private lastReloaded: string[] = [];
+
+	constructor(ctx: any, config: RlmHmrConfig = {}) {
+		super(ctx, undefined as any);
+		this.config = config;
+	}
+
+	private log(...args: unknown[]) {
+		if (this.config.verbose || process.env.RLM_HMR_VERBOSE) console.error(...args);
+	}
+
+	async [Service.init]() {
+		this.root = this.ctx.baseUrl ? fileURLToPath(this.ctx.baseUrl) : process.cwd();
+
+		if (!this.ctx.loader?.internal) {
+			this.ctx.logger?.warn?.(
+				"rlm-hmr: loader.internal unavailable — reload is inert (start node with --expose-internals)",
+			);
+		}
+
+		this.ctx.effect(() => {
+			const watchers = this.install();
+			return () => {
+				for (const w of watchers) {
+					try {
+						w.close();
+					} catch {}
+				}
+			};
+		});
+
+		this.ctx.logger?.info?.(
+			`rlm-hmr: watching ${(this.config.roots ?? ["packages"]).join(", ")} (root=${this.root})`,
+		);
+	}
+
+	/**
+	 * One recursive watcher per configured root.
+	 *
+	 * Recursive is the whole point: a package directory created after boot is
+	 * inside an already-watched tree, so it needs no new watcher and no restart.
+	 */
+	private install(): FSWatcher[] {
+		const watchers: FSWatcher[] = [];
+		const debounceMs = this.config.debounce ?? 100;
+		const ignored = [...DEFAULT_IGNORED, ...(this.config.ignored ?? [])];
+
+		let timer: NodeJS.Timeout | null = null;
+		const stashed = new Set<string>();
+
+		const onChange = (absolute: string) => {
+			if (!absolute.endsWith(".ts") && !absolute.endsWith(".js")) return;
+			if (ignored.some((frag) => absolute.includes(frag) || absolute.endsWith(frag))) return;
+			// Only source under a package's src/ is plugin code.
+			if (!absolute.includes(`${sep}src${sep}`)) return;
+
+			this.log(`[rlm] HMR: ${relative(this.root, absolute)} changed`);
+			stashed.add(pathToFileURL(absolute).href);
+
+			if (timer) clearTimeout(timer);
+			timer = setTimeout(() => {
+				timer = null;
+				const batch = [...stashed];
+				stashed.clear();
+				this.partialReload(batch).catch((e) =>
+					this.log(`[rlm] HMR: partialReload failed: ${e?.message ?? e}`),
+				);
+			}, debounceMs);
+		};
+
+		for (const rel of this.config.roots ?? ["packages"]) {
+			const dir = join(this.root, rel);
+			if (!existsSync(dir)) continue;
+			try {
+				watchers.push(
+					fsWatch(dir, { recursive: true }, (_event, filename) => {
+						if (filename) onChange(join(dir, filename.toString()));
+					}),
+				);
+			} catch (e: any) {
+				this.log(`[rlm] HMR: cannot watch ${dir}: ${e?.message ?? e}`);
+			}
+		}
+		return watchers;
+	}
+
+	/** How many reload passes this fiber has performed, and what it last swapped. */
+	stats() {
+		return { reloads: this.reloadCount, lastReloaded: this.lastReloaded, root: this.root };
+	}
+
+	// ─── Module graph ─────────────────────────────────────────────────────────
+
+	private async resolveModuleURL(specifier: string, parentURL: string) {
+		const internal = this.ctx.loader?.internal;
+		if (!internal) return null;
+		const attrs = {};
+		switch (internal.version) {
+			case "v1":
+				return await internal.resolve(specifier, parentURL, attrs);
+			case "v2":
+				return internal.resolveSync(parentURL, { specifier, attributes: attrs });
+			default:
+				return null;
+		}
+	}
+
+	private async getLinked(internal: any, url: string): Promise<string[]> {
+		const job = internal.loadCache.get(url);
+		if (!job) return [];
+		const linked = await job.linked;
+		if (!linked || !Array.isArray(linked)) return [];
+		return Array.prototype.map.call(linked, (j: any) => j.url) as string[];
+	}
+
+	private async loadDependencies(internal: any, url: string, ignored = new Set<string>()) {
+		const dependencies = new Set<string>();
+		const traverse = async (u: string): Promise<void> => {
+			if (ignored.has(u) || dependencies.has(u)) return;
+			if (u.startsWith("node:") || u.includes("/node_modules/")) return;
+			dependencies.add(u);
+			const linked = await this.getLinked(internal, u);
+			await Promise.all(linked.map(traverse));
+		};
+		await traverse(url);
+		return dependencies;
+	}
+
+	// ─── Reload ───────────────────────────────────────────────────────────────
+
+	/**
+	 * Clear the changed modules from Node's caches, re-import them, and swap the
+	 * affected plugins in the registry, keeping each old fiber's config. Any
+	 * failure rolls the caches back and re-registers what was removed, so a
+	 * syntax error in a plugin costs a failed reload rather than a dead process.
+	 */
+	async partialReload(stashedURLs: string[]) {
+		const ctx: any = this.ctx;
+		const loader = ctx.loader;
+		if (!loader?.internal) {
+			this.log("[rlm] HMR: loader.internal unavailable — cannot reload (need --expose-internals)");
+			return;
+		}
+		const internal = loader.internal;
+
+		const accepted = new Set(stashedURLs);
+		const declined = new Set<string>();
+		const isExcluded = (url: string) => url.startsWith("node:") || url.includes("/node_modules/");
+
+		const pending: string[] = [];
+		for (const url of stashedURLs) {
+			for (const child of await this.getLinked(internal, url)) {
+				if (accepted.has(child) || declined.has(child) || isExcluded(child)) continue;
+				pending.push(child);
+			}
+		}
+
+		while (pending.length) {
+			let index = 0;
+			let hasUpdate = false;
+			while (index < pending.length) {
+				const url = pending[index]!;
+				const linked = await this.getLinked(internal, url);
+				if (linked.length === 0) {
+					pending.splice(index, 1);
+					hasUpdate = true;
+					declined.add(url);
+					continue;
+				}
+				let isDeclined = true;
+				let isAccepted = false;
+				for (const child of linked) {
+					if (declined.has(child) || isExcluded(child)) continue;
+					if (accepted.has(child)) {
+						isAccepted = true;
+						break;
+					}
+					isDeclined = false;
+					if (!pending.includes(child)) {
+						hasUpdate = true;
+						pending.push(child);
+					}
+				}
+				if (isAccepted || isDeclined) {
+					hasUpdate = true;
+					pending.splice(index, 1);
+					if (isAccepted) accepted.add(url);
+					else declined.add(url);
+				} else index++;
+			}
+			if (!hasUpdate) break;
+		}
+		for (const url of pending) declined.add(url);
+
+		const nameMap: Record<string, Set<string>> = {};
+		for (const entry of loader.entries()) {
+			const baseUrl = entry.parent?.tree?.ctx?.baseUrl;
+			if (!baseUrl) continue;
+			(nameMap[baseUrl] ??= new Set()).add(entry.options.name);
+		}
+
+		const allPending = new Map<any, { plugin: any; url: string }>();
+		for (const baseUrl in nameMap) {
+			for (const name of nameMap[baseUrl]!) {
+				try {
+					const result: any = await this.resolveModuleURL(name, baseUrl);
+					if (!result?.url || declined.has(result.url)) continue;
+					const job = internal.loadCache.get(result.url);
+					if (!job) continue;
+					const plugin = loader.unwrapExports(job.module?.getNamespace?.());
+					if (!plugin) continue;
+					allPending.set(job, { plugin, url: result.url });
+					declined.add(result.url);
+				} catch {}
+			}
+		}
+
+		const reloads = new Map<string, { plugin: any; runtime: any }>();
+		for (const [, { plugin, url }] of allPending) {
+			declined.delete(url);
+			const deps = [...(await this.loadDependencies(internal, url, declined))];
+			declined.add(url);
+			if (!deps.some((dep) => accepted.has(dep))) continue;
+			deps.forEach((dep) => accepted.add(dep));
+			const runtime = ctx.registry.get(plugin);
+			if (!runtime) continue;
+			reloads.set(url, { plugin, runtime });
+		}
+
+		if (reloads.size === 0) {
+			this.log(`[rlm] HMR: no plugins affected by ${stashedURLs.length} changed file(s)`);
+			return;
+		}
+		this.log(`[rlm] HMR: ${reloads.size} plugin(s) to reload`);
+
+		const esmBackup: Record<string, any> = {};
+		const cjsBackup: Record<string, any> = {};
+		for (const filename of accepted) {
+			esmBackup[filename] = Map.prototype.get.call(internal.loadCache, filename);
+			Map.prototype.delete.call(internal.loadCache, filename);
+			try {
+				const filepath = fileURLToPath(filename);
+				if (require_.cache[filepath]) {
+					cjsBackup[filepath] = require_.cache[filepath];
+					delete require_.cache[filepath];
+				}
+			} catch {}
+		}
+		const rollback = () => {
+			for (const filename in esmBackup) {
+				Map.prototype.set.call(internal.loadCache, filename, esmBackup[filename]);
+			}
+			for (const filepath in cjsBackup) require_.cache[filepath] = cjsBackup[filepath];
+		};
+
+		const getOuterStack = () => [];
+		const attempts: Record<string, any> = {};
+		try {
+			for (const [url] of reloads) {
+				attempts[url] = loader.unwrapExports(await loader.import(url, getOuterStack));
+			}
+		} catch (e: any) {
+			this.log(`[rlm] HMR: re-import failed: ${e?.message ?? e}`);
+			rollback();
+			return;
+		}
+
+		const reload = (plugin: any, runtime: any) => {
+			if (!runtime) return;
+			for (const oldFiber of runtime.fibers) {
+				const fiber = oldFiber.parent.registry.plugin(plugin, oldFiber._config, getOuterStack);
+				fiber.entry = oldFiber.entry;
+				if (fiber.entry) fiber.entry.fiber = fiber;
+			}
+		};
+
+		for (const [url, { plugin: oldPlugin, runtime }] of reloads) {
+			const newPlugin = attempts[url];
+			if (!newPlugin) continue;
+			const path = url.replace(ctx.baseUrl, "");
+			try {
+				ctx.registry.delete(oldPlugin);
+			} catch (e: any) {
+				this.log(`[rlm] HMR: failed to dispose old plugin at ${path}: ${e?.message ?? e}`);
+			}
+			try {
+				reload(newPlugin, runtime);
+				this.log(`[rlm] HMR: reloaded plugin at ${path}`);
+			} catch (e: any) {
+				this.log(`[rlm] HMR: failed to reload plugin at ${path}: ${e?.message ?? e}`);
+				rollback();
+				for (const [url2, { plugin: oldPlugin2, runtime: runtime2 }] of reloads) {
+					if (oldPlugin2 === oldPlugin) continue;
+					try {
+						ctx.registry.delete(attempts[url2]);
+					} catch {}
+					reload(oldPlugin2, runtime2);
+				}
+				return;
+			}
+		}
+
+		this.reloadCount++;
+		this.lastReloaded = [...reloads.keys()];
+		ctx.emit("rlm/hmr-reload", { reloaded: this.lastReloaded });
+	}
+}
+
+export default RlmHmrService;
+export const name = "rlm-hmr";
+export const inject = [] as const;
+export { RlmHmrService as RlmHmr };

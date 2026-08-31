@@ -31,6 +31,17 @@
 # HMR: editing ANY plugin source triggers fiber.restart() on that plugin.
 #      Active work continues on old fiber; new work uses reloaded plugin.
 
+# ─── Reload ──────────────────────────────────────────────────────────────────
+#
+# First row on purpose: module reload is itself a fiber, so editing it reloads
+# it, and its recursive watch sees packages added after boot.
+
+- id: hmr
+  name: './packages/rlm-hmr/src/index.ts'
+  config:
+    roots: ['packages']
+    debounce: 100
+
 # ─── Foundation ──────────────────────────────────────────────────────────────
 
 - id: config
