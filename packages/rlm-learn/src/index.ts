@@ -69,6 +69,8 @@ export class RlmLearnService extends Service {
 	private proposalsDir: string = "";
 	private runCount: number = 0;
 	private reflectTimer: any = null;
+	/** Code cells issued during the current turn, for cadence judgement. */
+	private turnCells: string[] = [];
 	private promptHandle: any = null;
 
 	constructor(ctx: any, config: RlmLearnConfig = {}) {
@@ -77,9 +79,12 @@ export class RlmLearnService extends Service {
 	}
 
 	async [Service.init]() {
-		const baseDir = join(homedir(), ".rlm", "agent", "workflows");
+		// Honour the declared config. These keys existed but were ignored, so
+		// every instance — including tests — wrote into the one real learnings
+		// file under the home directory.
+		const baseDir = this.config.learningsDir ?? join(homedir(), ".rlm", "agent", "workflows");
 		this.learningsPath = join(baseDir, "learnings.jsonl");
-		this.proposalsDir = join(baseDir, "proposals");
+		this.proposalsDir = this.config.proposalsDir ?? join(baseDir, "proposals");
 
 		if (!existsSync(this.proposalsDir)) {
 			mkdirSync(this.proposalsDir, { recursive: true });
@@ -102,6 +107,12 @@ export class RlmLearnService extends Service {
 		// Register a prompt fragment so the agent sees past learnings
 		// and doesn't make the same mistakes twice.
 		this._registerPromptFragment();
+
+		// Watch ordinary turns. Without this the plugin only ever hears about
+		// workflows and delegator reviews — neither of which an interactive
+		// session emits — so a normal session produced no learnings at all and
+		// the feedback loop never closed.
+		this._observeTurns();
 
 		this.ctx.logger?.info(
 			`rlm-learn: self-evolution ready (learnings=${this.learningsPath}, proposals=${this.proposalsDir})`,
@@ -143,6 +154,74 @@ export class RlmLearnService extends Service {
 	}
 
 	/**
+	 * Contribute a session observer so real turns feed the learning loop.
+	 *
+	 * Published through the shared extension-factory registry rather than wired
+	 * into @rlm/agent directly, and owned by a ctx.effect() so a fiber.restart()
+	 * withdraws the old observer before the reloaded one registers — the loop
+	 * improves itself while a session is running, without disturbing it.
+	 */
+	private _observeTurns() {
+		this.ctx.effect(() => {
+			const g = globalThis as any;
+			if (!Array.isArray(g.__rlmExtensionFactories)) g.__rlmExtensionFactories = [];
+			const reg = g.__rlmExtensionFactories as Array<{ id: string; factory: (pi: any) => void }>;
+			const stale = reg.findIndex((e) => e.id === "rlm-learn");
+			if (stale >= 0) reg.splice(stale, 1);
+
+			const entry = {
+				id: "rlm-learn",
+				factory: (pi: any) => {
+					pi.on("turn_start", () => {
+						this.turnCells = [];
+					});
+					pi.on("tool_call", (event: any) => {
+						if (event?.toolName === "code" && typeof event.input?.code === "string") {
+							this.turnCells.push(event.input.code);
+						}
+					});
+					pi.on("turn_end", () => this._judgeCadence());
+				},
+			};
+			reg.push(entry);
+			return () => {
+				const i = reg.indexOf(entry);
+				if (i >= 0) reg.splice(i, 1);
+			};
+		});
+	}
+
+	/**
+	 * Notice a turn spent as a ladder of one-liners.
+	 *
+	 * A persistent kernel invites REPL habits: list a directory, stop, think,
+	 * read one file, stop, think. Each pause is a full model round-trip bought
+	 * for information a single cell would have returned together. When a turn
+	 * shows that shape, record it — the prompt fragment feeds it back, so the
+	 * next session starts already knowing.
+	 */
+	private _judgeCadence() {
+		const cells = this.turnCells;
+		this.turnCells = [];
+		if (cells.length < 3) return;
+
+		// A one-liner ladder: several cells, each a single short statement.
+		const terse = cells.filter((c) => c.trim().split("\n").length <= 2 && c.trim().length < 200);
+		if (terse.length < 3 || terse.length < cells.length) return;
+
+		this.appendLearning({
+			timestamp: Date.now(),
+			type: "cadence",
+			workflow: "interactive-turn",
+			input: "",
+			cells: cells.length,
+			sample: terse.slice(0, 3).map((c) => c.trim().replace(/\s+/g, " ").slice(0, 80)),
+			durationMs: 0,
+			success: true,
+		} as any);
+	}
+
+	/**
 	 * Build a concise prompt fragment from recent learnings.
 	 * Shows failure patterns so the agent avoids repeating them.
 	 */
@@ -154,8 +233,9 @@ export class RlmLearnService extends Service {
 		const failures = learnings.filter((l: any) => l.success === false);
 		const reflections = learnings.filter((l: any) => l.type === "reflection");
 		const reviews = learnings.filter((l: any) => l.type === "review" && (l.score ?? 0) < 4);
+		const cadence = learnings.filter((l: any) => l.type === "cadence");
 
-		if (failures.length === 0 && reflections.length === 0 && reviews.length === 0) {
+		if (failures.length === 0 && reflections.length === 0 && reviews.length === 0 && cadence.length === 0) {
 			return undefined;
 		}
 
@@ -178,6 +258,16 @@ export class RlmLearnService extends Service {
 		const lastReflection = reflections[reflections.length - 1];
 		if (lastReflection?.patterns?.length > 0) {
 			lines.push(`- [PATTERNS] ${lastReflection.patterns.slice(0, 3).join("; ")}`);
+		}
+
+		// Cadence: turns that were spent as a ladder of one-liners.
+		const lastCadence = cadence[cadence.length - 1] as any;
+		if (lastCadence) {
+			lines.push(
+				`- [CADENCE] a recent turn used ${lastCadence.cells} separate code cells, each a one-liner ` +
+					`(e.g. ${(lastCadence.sample ?? []).slice(0, 2).map((c: string) => `\`${c}\``).join(", ")}). ` +
+					"Work that could be predicted belongs in one cell — the round-trips bought nothing.",
+			);
 		}
 
 		return lines.join("\n");
