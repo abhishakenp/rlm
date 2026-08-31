@@ -33,10 +33,27 @@
 
 # ─── Reload ──────────────────────────────────────────────────────────────────
 #
-# First row on purpose: module reload is itself a fiber, so editing it reloads
-# it, and its recursive watch sees packages added after boot.
+# First rows on purpose: reload is itself a fiber, so editing a plugin reloads
+# it. `hmr` is the upstream plugin DSH declares in its own base composition —
+# it traces Node's module graph, clears the affected caches and swaps only the
+# plugin entries that depend on what changed. `rlm-hmr` adds the two things it
+# does not do: it watches the agent's resource directories (skills, extensions,
+# prompts, workflows live outside the repo and are not modules) and translates
+# reload announcements into the events a live AgentSession listens for. With no
+# official plugin present — under bun, or without --expose-internals — rlm-hmr
+# reloads modules itself instead.
+
+- id: timer
+  name: '@deepseek-ai/cordis-plugin-timer'
 
 - id: hmr
+  name: '@deepseek-ai/cordis-plugin-hmr'
+  config:
+    root: ['packages']
+    ignored: ['**/node_modules', '**/dist', '**/.*']
+    debounce: 100
+
+- id: rlm-hmr
   name: './packages/rlm-hmr/src/index.ts'
   config:
     roots: ['packages']

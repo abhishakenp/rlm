@@ -1,5 +1,5 @@
 /**
- * @rlm/hmr — module reload, as a plugin.
+ * @rlm/hmr — the reload bridge.
  *
  * The reload engine used to live in cordis-shell.mjs, which is the one file in
  * the process that cannot reload itself. That is not a stylistic complaint: it
@@ -19,11 +19,23 @@
  * the reloader reloads the reloader: `fiber.restart()` disposes these watchers
  * through ctx.effect() and the new module opens its own.
  *
- * The reload algorithm itself is unchanged from the shell's — module-graph
- * tracing, cache clearing, registry swap with rollback — which in turn mirrors
- * @deepseek-ai/cordis-plugin-hmr. The official plugin is the better long-term
- * home, but it requires Node's internal module loader and refuses to run under
- * bun, so rlm keeps its own until that stops being a constraint.
+ * Module reload itself is now the official @deepseek-ai/cordis-plugin-hmr's
+ * job — the same plugin DSH declares in its own base composition. This plugin
+ * does the two things that one does not:
+ *
+ *   It watches the agent's resource directories. Skills, extensions, prompts
+ *   and workflows live outside the repo (under ~/.rlm/agent), are not modules,
+ *   and so are invisible to a module reloader — but a session reads them at
+ *   startup and must re-derive when they change.
+ *
+ *   It translates. The official plugin announces `hmr/reload` and `hmr/change`;
+ *   a live AgentSession listens for `rlm/hmr-reload` and `rlm/resources-changed`.
+ *
+ * When the official plugin is absent — under bun, which exposes no internal
+ * module loader, or when the process was not started with --expose-internals —
+ * this plugin falls back to reloading modules itself with the algorithm rlm
+ * had before: module-graph tracing, cache clearing, registry swap with
+ * rollback. Same behaviour, one less dependency, and no silent loss of HMR.
  *
  * Running sessions are never interrupted: reload swaps plugin fibers, and the
  * agent's own state lives in the kernel, not in the plugin closure.
@@ -58,6 +70,12 @@ export interface RlmHmrConfig {
 	debounce?: number;
 	/** Log every decision. Also enabled by RLM_HMR_VERBOSE=1. */
 	verbose?: boolean;
+	/**
+	 * "bridge" defers module reload to @deepseek-ai/cordis-plugin-hmr;
+	 * "standalone" reloads modules here; "auto" (default) bridges when the
+	 * official plugin is present and falls back when it is not.
+	 */
+	mode?: "auto" | "bridge" | "standalone";
 }
 
 /** Paths whose contents end up inside the built system prompt. */
@@ -72,6 +90,15 @@ const PROMPT_SHAPED = ["/skills/", "/prompts/", "/refinement/", "/themes/"];
  * own transcript — and each reload writes more of one.
  */
 const RESOURCE_DIRS = ["skills", "extensions", "prompts", "themes", "workflows"];
+
+/** file:// URL → path, tolerant of anything that is not one. */
+function urlToPathSafe(url: string): string {
+	try {
+		return url.startsWith("file:") ? fileURLToPath(url) : url;
+	} catch {
+		return url;
+	}
+}
 
 const DEFAULT_IGNORED = [
 	// Session state written by the running agent. Never a resource change.
@@ -99,6 +126,7 @@ export class RlmHmrService extends Service {
 
 	private root = process.cwd();
 	private resourceRoots: string[] = [];
+	private mode: "auto" | "bridge" | "standalone" = "auto";
 	private reloadCount = 0;
 	private resourceEvents = 0;
 	private lastReloaded: string[] = [];
@@ -121,9 +149,12 @@ export class RlmHmrService extends Service {
 			)
 		).filter((d) => existsSync(d));
 
-		if (!this.ctx.loader?.internal) {
+		this.mode = this.config.mode ?? "auto";
+		if (this.mode !== "standalone") this.installBridge();
+		if (this.mode === "standalone" && !this.ctx.loader?.internal) {
 			this.ctx.logger?.warn?.(
-				"rlm-hmr: loader.internal unavailable — reload is inert (start node with --expose-internals)",
+				"rlm-hmr: no official hmr plugin and no loader.internal — module reload is inert " +
+					"(start node with --expose-internals, or add an hmr row to cordis.yml)",
 			);
 		}
 
@@ -138,9 +169,42 @@ export class RlmHmrService extends Service {
 			};
 		});
 
-		this.ctx.logger?.info?.(
-			`rlm-hmr: watching ${(this.config.roots ?? ["packages"]).join(", ")} (root=${this.root})`,
-		);
+		const what =
+			this.mode === "bridge"
+				? "bridging @deepseek-ai/cordis-plugin-hmr"
+				: `mode=${this.mode}, watching ${(this.config.roots ?? ["packages"]).join(", ")}`;
+		this.log(`[rlm] rlm-hmr: ${what}; resources: ${this.resourceRoots.join(", ") || "none"}`);
+		this.ctx.logger?.info?.(`rlm-hmr: ${what} (root=${this.root})`);
+	}
+
+	/**
+	 * Translate the official plugin's announcements into the ones a live
+	 * session listens for. Registered through ctx.effect so a reload of this
+	 * plugin does not leave a second translator behind.
+	 */
+	private installBridge() {
+		this.ctx.effect(() => {
+			const ctx: any = this.ctx;
+			const onReload = (reloads: any) => {
+				const count = reloads?.size ?? reloads?.length ?? 0;
+				this.reloadCount++;
+				this.log(`[rlm] rlm-hmr: official hmr reloaded ${count} plugin(s)`);
+				try {
+					ctx.emit("rlm/hmr-reload", { reloaded: [...(reloads?.keys?.() ?? [])] });
+				} catch {}
+			};
+			// A file the official plugin watched but could not treat as a module:
+			// for us that is a resource, and a session may need to re-read it.
+			const onChange = (url: string) => this.announceResourceChange([urlToPathSafe(url)]);
+			ctx.on("hmr/reload", onReload);
+			ctx.on("hmr/change", onChange);
+			return () => {
+				try {
+					ctx.off?.("hmr/reload", onReload);
+					ctx.off?.("hmr/change", onChange);
+				} catch {}
+			};
+		});
 	}
 
 	/**
@@ -179,13 +243,18 @@ export class RlmHmrService extends Service {
 				timer = null;
 				const batch = [...stashed];
 				stashed.clear();
+				if (this.isBridging) {
+					// The official plugin owns module reload; it saw this too.
+					this.log(`[rlm] rlm-hmr: ${batch.length} change(s) deferred to the official hmr plugin`);
+					return;
+				}
 				this.partialReload(batch).catch((e) =>
 					this.log(`[rlm] HMR: partialReload failed: ${e?.message ?? e}`),
 				);
 			}, debounceMs);
 		};
 
-		for (const rel of this.config.roots ?? ["packages"]) {
+		for (const rel of this.mode === "bridge" ? [] : this.config.roots ?? ["packages"]) {
 			const dir = join(this.root, rel);
 			if (!existsSync(dir)) continue;
 			try {
@@ -255,9 +324,29 @@ export class RlmHmrService extends Service {
 		}
 	}
 
+	/**
+	 * Whether module reload belongs to the official plugin right now.
+	 *
+	 * Asked at the moment a change arrives rather than at startup: the official
+	 * plugin's service only becomes visible once its watcher is ready, which is
+	 * after this plugin's own init, so an init-time answer is a race. Both
+	 * watchers may see the same file; only one acts on it.
+	 */
+	get isBridging(): boolean {
+		if (this.mode === "bridge") return true;
+		if (this.mode === "standalone") return false;
+		try {
+			return !!this.ctx.get?.("hmr");
+		} catch {
+			return false;
+		}
+	}
+
 	/** How many reload passes this fiber has performed, and what it last swapped. */
 	stats() {
 		return {
+			mode: this.mode,
+			bridging: this.isBridging,
 			reloads: this.reloadCount,
 			resourceEvents: this.resourceEvents,
 			lastReloaded: this.lastReloaded,
