@@ -30,7 +30,8 @@ import { Service } from "@deepseek-ai/cordis";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
 
 const require_ = createRequire(import.meta.url);
 
@@ -42,24 +43,51 @@ export interface RlmGitpixelConfig {
 	enginePath?: string;
 	/** Warm the index on session start. Default true. */
 	warmOnStart?: boolean;
+	/**
+	 * Build gitpixel from source when the binary is not on PATH. Default true.
+	 *
+	 * Installing takes minutes and happens in the background; the plugin stays
+	 * inert until it finishes, then activates without a restart.
+	 */
+	autoInstall?: boolean;
+	/** Where to clone and build. Default ~/.rlm/agent/tools/gitpixel. */
+	installDir?: string;
 }
 
 /** The subset of gitpixel's substitution engine this plugin uses. */
+const GITPIXEL_REPO = "https://github.com/LivioGama/gitpixel.git";
+
 interface Engine {
 	rewriteKernelCode(code: string, opts?: { cwd?: string }): { code: string; notes: string[] } | null;
 	gateShell(cmd: string): { allow: boolean; reason?: string };
 	kernelBootstrap(cwd?: string, manifest?: unknown): string;
-	promptFragment(manifest: unknown): string;
+	promptFragment(manifest: unknown, options?: { help?: string | null }): string;
+	cliHelp(subcommands?: string[]): string | null;
 	loadManifest(startPath: string): unknown;
 	gp(args: string[], opts?: { cwd?: string; timeout?: number }): string | null;
 	gitpixelAvailable(): boolean;
+}
+
+/** The substitution engine ships inside the gitpixel checkout, beside the binary. */
+function engineNextToBinary(): string | null {
+	try {
+		const which = execFileSync("sh", ["-c", "command -v gitpixel"], { encoding: "utf8" }).trim();
+		if (!which) return null;
+		const real = execFileSync("readlink", ["-f", which], { encoding: "utf8" }).trim() || which;
+		// <checkout>/target/release/gitpixel → <checkout>/js/substitute/index.cjs
+		return join(real, "..", "..", "..", "js", "substitute", "index.cjs");
+	} catch {
+		return null;
+	}
 }
 
 function resolveEngine(explicit?: string): Engine | null {
 	const candidates = [
 		explicit,
 		process.env.GITPIXEL_SUBSTITUTE,
+		engineNextToBinary(),
 		join(homedir(), "proj/tools/gitpixel/js/substitute/index.cjs"),
+		join(homedir(), ".rlm/agent/tools/gitpixel/js/substitute/index.cjs"),
 		"/usr/local/lib/gitpixel/js/substitute/index.cjs",
 		"/opt/homebrew/lib/gitpixel/js/substitute/index.cjs",
 	].filter(Boolean) as string[];
@@ -94,6 +122,7 @@ export class RlmGitpixelService extends Service {
 	private cwd = process.cwd();
 	/** The kernel is seeded once per session; the vm context persists. */
 	private seeded = false;
+	private installing = false;
 	private rewrites = 0;
 
 	constructor(ctx: any, config: RlmGitpixelConfig = {}) {
@@ -116,24 +145,102 @@ export class RlmGitpixelService extends Service {
 		// belongs to this repo, and every such comparison would fail.
 		this.cwd = resolve(this.config.cwd ?? rlmConfig?.getSettingsManager?.()?.getCwd?.() ?? process.cwd());
 
-		this.engine = resolveEngine(this.config.enginePath);
-		if (!this.engine) {
-			this.diag("rlm-gitpixel: substitution engine not found — plugin is inert");
-			this.ctx.logger?.warn("rlm-gitpixel: substitution engine not found — plugin is inert");
-			return;
-		}
-		if (!this.engine.gitpixelAvailable()) {
-			this.diag("rlm-gitpixel: gitpixel binary not on PATH — plugin is inert");
-			this.ctx.logger?.warn("rlm-gitpixel: gitpixel binary not on PATH — plugin is inert");
-			this.engine = null;
-			return;
-		}
-
+		// Contribute first, resolve second. Both contributions read the engine
+		// lazily, so an install that finishes minutes from now activates this
+		// plugin without a restart and without re-registering anything.
 		this.contributeFactory();
 		this.contributePrompt();
 
-		this.diag(`rlm-gitpixel: enforcing (cwd=${this.cwd})`);
-		this.ctx.logger?.info(`rlm-gitpixel: enforcing (cwd=${this.cwd})`);
+		this.engine = this.resolveUsableEngine();
+		if (this.engine) {
+			this.diag(`rlm-gitpixel: enforcing (cwd=${this.cwd})`);
+			this.ctx.logger?.info(`rlm-gitpixel: enforcing (cwd=${this.cwd})`);
+			return;
+		}
+
+		if (this.config.autoInstall === false) {
+			this.ctx.logger?.warn("rlm-gitpixel: gitpixel not available and autoInstall is off — inert");
+			return;
+		}
+		void this.install();
+	}
+
+	/** An engine is only usable if the binary it drives is actually there. */
+	private resolveUsableEngine(): Engine | null {
+		const engine = resolveEngine(this.config.enginePath);
+		if (!engine) return null;
+		if (!engine.gitpixelAvailable()) return null;
+		return engine;
+	}
+
+	private has(bin: string): boolean {
+		try {
+			execFileSync("sh", ["-c", `command -v ${bin}`], { stdio: "ignore" });
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	private run(cmd: string, args: string[], cwd: string): Promise<boolean> {
+		return new Promise((resolve) => {
+			const child = spawn(cmd, args, { cwd, stdio: "ignore" });
+			child.on("error", () => resolve(false));
+			child.on("close", (code) => resolve(code === 0));
+		});
+	}
+
+	/**
+	 * Build gitpixel from source, in the background, and activate when it lands.
+	 *
+	 * The agent should not have to be told to install its own tooling, and a
+	 * missing binary should not quietly mean a worse agent for the rest of the
+	 * session. Nothing here blocks startup: the plugin is already registered and
+	 * simply does nothing until the build finishes.
+	 */
+	private async install(): Promise<void> {
+		if (this.installing) return;
+		this.installing = true;
+		const dir = this.config.installDir ?? join(homedir(), ".rlm", "agent", "tools", "gitpixel");
+
+		if (!this.has("git") || !this.has("cargo")) {
+			this.ctx.logger?.warn(
+				`rlm-gitpixel: gitpixel is missing and cannot be built (need git and cargo) — ` +
+					`install it manually: git clone ${GITPIXEL_REPO} && cd gitpixel && cargo build --release`,
+			);
+			this.installing = false;
+			return;
+		}
+
+		this.ctx.logger?.info(`rlm-gitpixel: building gitpixel from source in ${dir} (this takes a few minutes)`);
+		this.diag(`rlm-gitpixel: installing into ${dir}`);
+
+		try {
+			if (!existsSync(join(dir, "Cargo.toml"))) {
+				mkdirSync(dir, { recursive: true });
+				const cloned = await this.run("git", ["clone", "--depth", "1", GITPIXEL_REPO, dir], homedir());
+				if (!cloned) throw new Error("clone failed");
+			}
+			const built = await this.run("cargo", ["build", "--release"], dir);
+			if (!built) throw new Error("cargo build failed");
+
+			const bin = join(dir, "target", "release", "gitpixel");
+			if (!existsSync(bin)) throw new Error("build produced no binary");
+			process.env.GITPIXEL_BIN = bin;
+			process.env.GITPIXEL_SUBSTITUTE = join(dir, "js", "substitute", "index.cjs");
+
+			this.engine = this.resolveUsableEngine();
+			if (!this.engine) throw new Error("built gitpixel is still not usable");
+
+			this.seeded = false; // the next cell seeds a kernel that now has gp
+			this.ctx.logger?.info(`rlm-gitpixel: gitpixel installed at ${bin} — enforcing from the next tool call`);
+			this.diag(`rlm-gitpixel: installed at ${bin}`);
+		} catch (error: any) {
+			this.ctx.logger?.warn(`rlm-gitpixel: automatic install failed (${error?.message ?? error}) — inert`);
+			this.diag(`rlm-gitpixel: install failed: ${error?.message ?? error}`);
+		} finally {
+			this.installing = false;
+		}
 	}
 
 	/**
@@ -223,11 +330,18 @@ export class RlmGitpixelService extends Service {
 			let handle: { dispose(): void } | undefined;
 			try {
 				const svc = (globalThis as any).__rlmPrompt ?? (this.ctx as any).get?.("rlmPrompt");
-				if (svc?.registerFragment && this.engine) {
+				if (svc?.registerFragment) {
+					// Evaluated per prompt build: the manifest changes between
+					// turns, and the engine may not exist yet when this registers.
 					handle = svc.registerFragment(PLUGIN_ID, {
 						id: "gitpixel-contract",
 						priority: 40,
-						content: this.engine.promptFragment(this.engine.loadManifest(this.cwd)),
+						content: () => {
+							if (!this.engine) return "";
+							return this.engine.promptFragment(this.engine.loadManifest(this.cwd), {
+								help: this.engine.cliHelp(),
+							});
+						},
 					});
 				}
 			} catch {}
