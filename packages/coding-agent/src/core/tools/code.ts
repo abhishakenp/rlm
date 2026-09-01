@@ -28,6 +28,16 @@ import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 
 const require = createRequire(import.meta.url);
 
+/**
+ * The dynamic-import loader handed to every cell.
+ *
+ * `vm.constants.USE_MAIN_CONTEXT_DEFAULT_LOADER` is Node >= 20.12 / 21.7. On
+ * anything older the constant is undefined, which `vm.runInContext` treats as
+ * "no callback" — exactly the behaviour we had before, so an old runtime
+ * degrades to the old error instead of failing to start.
+ */
+const DYNAMIC_IMPORT_LOADER = vm.constants?.USE_MAIN_CONTEXT_DEFAULT_LOADER;
+
 // ─── Schema ──────────────────────────────────────────────────────────────────
 
 const codeSchema = Type.Object({
@@ -285,6 +295,20 @@ export class CodeKernelProvisioner {
 			const result = vm.runInContext(wrapped, this.context!, {
 				timeout,
 				displayErrors: true,
+				// Without this, any `import()` inside a cell throws
+				// ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING: a vm context has no
+				// module loader of its own. The sandbox's `import` property
+				// (see resetContext) never helped — `import(x)` is syntax, not
+				// a property lookup, so the parser never reaches it.
+				//
+				// The main context's default loader is used rather than a
+				// custom callback because a custom one additionally requires
+				// --experimental-vm-modules, which rlm is not started with.
+				// Bare specifiers therefore resolve against rlm's own
+				// node_modules, and relative ones against the host entry
+				// rather than the cell's cwd — absolute paths are the reliable
+				// form for project files.
+				importModuleDynamically: DYNAMIC_IMPORT_LOADER,
 			});
 
 			// Await promise with real ms timeout.
