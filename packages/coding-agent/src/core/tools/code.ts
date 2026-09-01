@@ -508,7 +508,23 @@ export function createCodeToolDefinition(
 				if (r.stderr) text += (text ? "\n" : "") + r.stderr;
 				if (r.result) text += (text ? "\n" : "") + r.result;
 				if (r.status === "error" && r.error) {
-					text += (text ? "\n" : "") + r.error.traceback.join("\n");
+					// `evalue` is the message the kernel wants read — teachReferenceError
+					// rewrites it to name the route that would have worked. The traceback's
+					// first line is only the bare message, so sending the traceback alone
+					// threw that guidance away and left the agent with the dead end again.
+					// Send the message, then the frames. A traceback opens with the
+					// message, which can run to several lines, so the frames start at the
+					// first "at ..." rather than at index 1 — otherwise the tail of a
+					// multi-line message gets printed twice.
+					const firstFrame = r.error.traceback.findIndex((line) =>
+						/^\s+at\s/.test(line),
+					);
+					const frames =
+						firstFrame === -1
+							? ""
+							: r.error.traceback.slice(firstFrame).join("\n");
+					text +=
+						(text ? "\n" : "") + r.error.evalue + (frames ? "\n" + frames : "");
 				}
 
 				const content: TextContent[] = [{ type: "text", text: text || "" }];
