@@ -1187,10 +1187,14 @@ export class InteractiveMode {
 				return undefined;
 			}
 			if (!beforeFocused) {
-				// Arrows / hjkl should still focus and navigate even when panel not focused
+				// Arrows should still focus and navigate when the panel is not focused.
+				// Plain letters must not: h, j, k and l are characters someone is
+				// trying to type, and routing them to an unfocused panel takes them
+				// out of the editor. Navigation is arrows (and the chorded keys);
+				// hjkl remains available once the panel actually has focus.
 				if (panel?.handleKey) {
 					try {
-						const navKeys = ["arrowup","arrowdown","arrowleft","arrowright","k","j","h","l","pageup","pagedown","ctrl+u","ctrl+d","ctrl+o","tab","shift+tab"];
+						const navKeys = ["arrowup","arrowdown","arrowleft","arrowright","pageup","pagedown","ctrl+u","ctrl+d","ctrl+o","tab","shift+tab"];
 						const lowerNav = data.toLowerCase();
 						if (navKeys.includes(lowerNav)) {
 							let navHandled = false;

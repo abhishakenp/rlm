@@ -120,7 +120,10 @@ export const DEFAULT_TUI_CONFIG: Required<Omit<RlmTuiConfig, "keybindings">> & P
 	followupQueueUi: true,
 	doubleEnterToSend: true,
 	autoFocusTyping: true,
-	hjklNavigation: true,
+	// Off by default: h, j, k and l are letters before they are directions, and
+	// binding them at the panel level swallows them out of ordinary typing.
+	// Arrow keys navigate; set hjklNavigation: true to opt back in.
+	hjklNavigation: false,
 	keybindings: { ...DEFAULT_TUI_KEYBINDINGS },
 };
 
@@ -132,7 +135,7 @@ export function resolveRlmTuiConfig(cfg: RlmTuiConfig = {}): Required<RlmTuiConf
 		followupQueueUi: cfg.followupQueueUi ?? true,
 		doubleEnterToSend: cfg.doubleEnterToSend ?? true,
 		autoFocusTyping: cfg.autoFocusTyping ?? true,
-		hjklNavigation: cfg.hjklNavigation ?? true,
+		hjklNavigation: cfg.hjklNavigation ?? false,
 		keybindings: { ...DEFAULT_TUI_KEYBINDINGS, ...(cfg.keybindings ?? {}) },
 	};
 }
@@ -679,7 +682,10 @@ export const DEFAULT_TUI_FLAGS = {
 	followupQueueUi: true,
 	doubleEnterToSend: true,
 	autoFocusTyping: true,
-	hjklNavigation: true,
+	// Off by default: h, j, k and l are letters before they are directions, and
+	// binding them at the panel level swallows them out of ordinary typing.
+	// Arrow keys navigate; set hjklNavigation: true to opt back in.
+	hjklNavigation: false,
 } as const;
 
 // ─── Exports ─────────────────────────────────────────────────────────────────
