@@ -7702,7 +7702,10 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 			throw new Error("Compaction cancelled");
 		}
 
-		this._baseSystemPromptOptions = undefined;
+		// Same invalidation idiom as the HMR prompt-changed handler above: the field
+		// is declared with a definite-assignment assertion and cleared to force a
+		// rebuild on the next turn.
+		this._baseSystemPromptOptions = undefined as any;
 
 		this.sessionManager.appendCompaction(
 			summary,

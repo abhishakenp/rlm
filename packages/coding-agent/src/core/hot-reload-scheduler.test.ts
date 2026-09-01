@@ -2,7 +2,7 @@
  * The scheduler's whole job is timing, so these tests drive a fake clock and a
  * fake "is a turn running" flag rather than a real session.
  */
-import { HotReloadScheduler } from "/Users/abhi/proj/rlm/packages/coding-agent/src/core/hot-reload-scheduler.ts";
+import { HotReloadScheduler } from "./hot-reload-scheduler.js";
 
 let pass = 0, fail = 0;
 const t = (name: string, fn: () => void | Promise<void>) => {
