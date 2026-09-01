@@ -1,35 +1,39 @@
-# rlm profile — Cordis entry-list composing all plugins.
+# rlm — the application, as data.
 #
-# Fourteen plugins, ALL hot-swappable via fiber.restart():
+# This file IS rlm. Every capability is a row; there is no privileged core and
+# no row that needs a restart to change. Load order comes from what each row
+# injects, never from position here — position is for reading.
 #
-#   Foundation layer (no dependencies):
-#     1. config  — settings, model registry, auth storage
-#     2. context — persistent typed variable registry (agent working memory)
-#     3. tui     — TUI extension service (slash commands, components)
-#     4. prompt  — prompt contribution registry (system-prompt fragments)
+#   Recording      log
+#   Boot           boot                    where things are, the overlay, shutdown
+#   Reload         timer, hmr, rlm-hmr
+#   Foundation     config, context, tui, prompt
+#   Self-extension compose, plugins, self  rlm's hands on this file
+#   Core           session, tools, refine, code, workflow, learn, gitpixel
+#   Agent          agent                   the LLM loop
+#   Presentation   renderer, print, sdk, modes
 #
-#   Core layer (depends on foundation):
-#     5. session — session manager + persistence
-#     6. tools   — tool registry (code, edit)
-#     7. refine  — refinement + auto-refine
-#     8. code    — persistent JS code execution (replaces bash + edit)
-#     9. workflow — hot-swappable TS workflows from ~/.rlm/agent/workflows/
-#    10. learn   — self-evolution (tracks outcomes, proposes modifications)
-#    10b. gitpixel — deterministic gitpixel substitution on every code tool call
+# The user's overlay is `~/.rlm/cordis.patch.yml`, layered over this file by the
+# `boot` row and re-applied whenever it changes. Everything rlm decides about
+# itself is written there and nowhere else, so `git diff` on this file only ever
+# shows what a person did, and deleting the overlay returns rlm to stock.
 #
-#   Agent layer (depends on core):
-#    11. agent   — AgentSession (the LLM loop, tool dispatch, subagent spawning)
+# ## Hot reload, accurately
 #
-#   Presentation layer (depends on agent):
-#    12. renderer — InteractiveMode (terminal rendering, input handling)
-#    13. print    — Print mode (single-shot prompt → output → exit)
-#    14. sdk      — in-process subagent spawning (wraps agent service)
+# `fiber.restart()` is NOT the mechanism, and three places in this repo used to
+# say it was. It re-runs the plugin callback against the *cached* module, so a
+# source edit has no effect. What actually happens is
+# `registry.delete(oldPlugin)` followed by `registry.plugin(newPlugin,
+# oldFiber._config)` for each live fiber, after the changed modules and
+# everything downstream of them have been evicted from Node's ESM load cache.
+# `@deepseek-ai/cordis-plugin-hmr` does that; `rlm-hmr` adds what it does not —
+# watching the resource directories (skills, extensions, prompts, workflows)
+# that live outside the module graph, and translating a reload into the events a
+# live AgentSession listens for.
 #
-# Dependency order: config → context/tui/prompt → session/tools/refine/code/workflow/learn
-#                   → agent → renderer/sdk
-#
-# HMR: editing ANY plugin source triggers fiber.restart() on that plugin.
-#      Active work continues on old fiber; new work uses reloaded plugin.
+# Two fibers of one row therefore coexist for as long as the old disposer takes.
+# That is what lets in-flight work finish, and it is why anything singleton — a
+# port, a lock, a sidecar — has to be acquired inside `ctx.effect()`.
 
 # ─── Recording ───────────────────────────────────────────────────────────────
 #
@@ -40,6 +44,17 @@
   name: './packages/rlm-log/src/index.ts'
   config:
     level: info
+
+# ─── Boot ────────────────────────────────────────────────────────────────────
+#
+# Second, because everything below it wants to know where the repo and the
+# home directory are, and because the overlay it layers on top of this file has
+# to be in place before rows start reading their own config. `cordis-shell.mjs`
+# used to do all of this; a bug in any of it therefore cost a restart, which is
+# the one thing rlm is not allowed to need in order to change itself.
+
+- id: boot
+  name: './packages/rlm-boot/src/index.ts'
 
 # ─── Reload ──────────────────────────────────────────────────────────────────
 #
@@ -86,6 +101,30 @@
 
 - id: prompt
   name: './packages/rlm-prompt/src/index.ts'
+
+# ─── Self-extension ──────────────────────────────────────────────────────────
+#
+# The three rows that make this file writable by the thing it composes.
+# `compose` reads the composition and writes the overlay; `plugins` scaffolds a
+# package, mounts it, and refuses to call a row that did not start "mounted";
+# `self` is the seam that puts both in reach of a code cell, as `self.*`.
+#
+# They are three rows and not one because the capability and the surface it is
+# offered through are different concerns: a second surface (a slash command, a
+# socket) is a new row beside `self`, not an edit to `plugins`.
+
+- id: compose
+  name: './packages/rlm-compose/src/index.ts'
+
+- id: plugins
+  name: './packages/rlm-plugins/src/index.ts'
+  config:
+    staleAfterMinutes: 30
+    rollbackOnFailure: true
+    mountTimeout: 4000
+
+- id: self
+  name: './packages/rlm-self/src/index.ts'
 
 # ─── Core ────────────────────────────────────────────────────────────────────
 
@@ -148,3 +187,10 @@
   config:
     maxDepth: 10
     defaultModel: auto/best-free
+
+# Which face rlm shows for this invocation. Last, because a mode runs the rows
+# above it and there is nothing to run until they are there. The host asks this
+# row what to do and does it; that is the whole of `main()` now.
+
+- id: modes
+  name: './packages/rlm-modes/src/index.ts'

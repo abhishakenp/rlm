@@ -207,6 +207,14 @@ export class CodeKernelProvisioner {
 		// TUI service — for inspecting registered extensions (read-only)
 		tui: new Proxy({}, { get: (_, prop) => (globalThis as any).__rlmTui?.[prop] }),
 
+			// rlm's hands on its own wiring — see packages/rlm-self. Read through
+			// a proxy, and per property access, so a cell picks up the CURRENT
+			// binding: `rlm-self` is a hot-swappable row like any other, and a
+			// value captured when the sandbox was built would go stale the first
+			// time that row reloaded. Absent when the row is not mounted, which
+			// is what `self` being undefined in a cell means.
+			self: new Proxy({}, { get: (_, prop) => (globalThis as any).__rlmSelf?.[prop] }),
+
 			// Helpers
 			cwd,
 		};

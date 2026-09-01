@@ -1,0 +1,15 @@
+{
+	"name": "@rlm/compose",
+	"version": "0.1.0",
+	"description": "rlm's knowledge of its own wiring, and its hands on it.",
+	"type": "module",
+	"main": "src/index.ts",
+	"types": "src/index.ts",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"dependencies": {
+		"@deepseek-ai/cordis": "*",
+		"yaml": "*"
+	}
+}

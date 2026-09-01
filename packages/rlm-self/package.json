@@ -1,0 +1,14 @@
+{
+	"name": "@rlm/self",
+	"version": "0.1.0",
+	"description": "The seam between rlm's own wiring and the model running inside it.",
+	"type": "module",
+	"main": "src/index.ts",
+	"types": "src/index.ts",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"dependencies": {
+		"@deepseek-ai/cordis": "*"
+	}
+}

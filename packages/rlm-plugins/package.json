@@ -1,0 +1,14 @@
+{
+	"name": "@rlm/plugins",
+	"version": "0.1.0",
+	"description": "How rlm grows a new capability: scaffold, mount, verify, and reclaim what it abandoned.",
+	"type": "module",
+	"main": "src/index.ts",
+	"types": "src/index.ts",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"dependencies": {
+		"@deepseek-ai/cordis": "*"
+	}
+}
