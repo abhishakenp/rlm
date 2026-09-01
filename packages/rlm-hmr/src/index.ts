@@ -16,7 +16,7 @@
  * As a fiber both go away. One recursive watcher over `packages/` sees
  * directories that appear later, so a package added at runtime is watched from
  * the moment it exists. And this file lives under that same tree, so editing
- * the reloader reloads the reloader: `fiber.restart()` disposes these watchers
+ * the reloader reloads the reloader: the swap disposes these watchers
  * through ctx.effect() and the new module opens its own.
  *
  * Module reload itself is now the official @deepseek-ai/cordis-plugin-hmr's

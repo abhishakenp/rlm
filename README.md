@@ -205,7 +205,7 @@ Each block is its own micro-plugin — the colored bar renderer, the focus/highl
 
 **Dependency order:** `config → context/tui/prompt → session/tools/refine/code/workflow/learn → agent → renderer/print/sdk`
 
-**HMR:** editing ANY plugin source triggers `fiber.restart()` on that plugin. Active work continues on old fiber; new work uses reloaded plugin.
+**HMR:** editing any row's source reloads that row. The mechanism is *not* `fiber.restart()` — that re-runs the plugin callback against the cached module, so a source edit has no effect. It is `registry.delete(oldPlugin)` followed by `registry.plugin(newPlugin, oldFiber._config)`, after the changed modules and everything downstream of them have been evicted from Node's ESM load cache. Active work continues on the old fiber; new work uses the reloaded one.
 
 ---
 
@@ -698,7 +698,7 @@ for (const task of tasks) {
 
 HMR follows the Cordis philosophy: plugins are disposable, reloadable fibers. No `chokidar` — only Node built-in `fs.watch` registered as `ctx.effect()` (cleaned up on dispose).
 
-The implementation mirrors the official `@deepseek-ai/cordis-plugin-hmr` algorithm: cache-clear, re-import, registry-swap. `fiber.restart()` alone is insufficient because the imported module stays cached — the restart reruns the plugin callback but reuses stale code.
+The implementation mirrors the official `@deepseek-ai/cordis-plugin-hmr` algorithm: cache-clear, re-import, registry-swap. `fiber.restart()` alone is insufficient because the imported module stays cached — the restart reruns the plugin callback but reuses stale code. It is called nowhere in this repo, and three places used to claim otherwise.
 
 ### Two kinds of watching
 
