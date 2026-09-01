@@ -151,6 +151,24 @@
   config:
     workflowsDir: ~/.rlm/agent/workflows
 
+# The delegation loop's memory. Above `workflow` in reading order because the
+# workflow that does the delegating asks this row for the list first: what was
+# asked is written down before any of it is attempted, and it is still written
+# down after the process that was attempting it has gone. Load order still comes
+# from `inject` — this row injects nothing, so it is up early either way.
+#
+# It also contributes two prompt fragments, both read from disk when the prompt
+# is built rather than at mount: what is still owed, and the current source of
+# the delegator workflow itself.
+- id: delegate
+  name: './packages/rlm-delegate/src/index.ts'
+  config:
+    # concurrency is deliberately absent: left unset, the limit is measured from
+    # this machine between tasks — descriptors first, since that is what wedged
+    # it — and anything over the limit waits in the journal instead of being
+    # refused. Set it to a number to pin it.
+    headroomFloor: 0.2
+
 - id: learn
   name: './packages/rlm-learn/src/index.ts'
   config:
