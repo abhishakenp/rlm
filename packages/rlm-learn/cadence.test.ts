@@ -38,9 +38,11 @@ t("contributes a session observer", () => eq(mine().length, 1));
 const handlers: Record<string, Function[]> = {};
 const pi = { on: (ev: string, h: Function) => { (handlers[ev] ??= []).push(h); } };
 mine()[0].factory(pi);
-const turn = (cells: string[]) => {
+const turn = (cells: string[], errors: string[] = []) => {
   handlers["turn_start"][0]({ type: "turn_start" });
   for (const code of cells) handlers["tool_call"][0]({ type: "tool_call", toolName: "code", input: { code } });
+  for (const text of errors)
+    handlers["tool_result"][0]({ type: "tool_result", toolName: "code", isError: true, content: [{ type: "text", text }] });
   handlers["turn_end"][0]({ type: "turn_end" });
 };
 
@@ -79,6 +81,35 @@ console.log("\nwork done properly is left alone");
     "const out = [];\nfor (const f of fs.readdirSync('src')) { out.push(f); }\nconsole.log(out);\nout.length",
   ]);
   t("a mixed turn with real work is not flagged", () => eq(learnings().filter((l) => l.type === "cadence").length, before));
+}
+
+console.log("\nthe same failure twice is the signal");
+{
+  const refusal = "Error: runtime.model is immutable and already set";
+  const before = learnings().filter((l) => l.type === "repeat-error").length;
+  turn(["context.set('runtime.model', 'x')", "context.set('runtime.model', 'y')"], [refusal, refusal]);
+  const loops = learnings().filter((l) => l.type === "repeat-error");
+  t("a repeated refusal is recorded", () => eq(loops.length, before + 1));
+  t("it counts the repeats", () => eq(loops[loops.length - 1].count, 2));
+  t("it keeps the error text", () => { if (!loops[loops.length - 1].error.includes("immutable")) throw new Error(loops[loops.length - 1].error); });
+}
+{
+  const before = learnings().filter((l) => l.type === "repeat-error").length;
+  turn(["a()", "b()"], ["Error: one thing broke", "Error: a different thing broke"]);
+  t("two different failures are not a loop", () => eq(learnings().filter((l) => l.type === "repeat-error").length, before));
+  turn(["a()"], ["Error: lonely failure"]);
+  t("a single failure is not a loop", () => eq(learnings().filter((l) => l.type === "repeat-error").length, before));
+}
+{
+  const p = svc.buildLearningsPrompt() ?? "";
+  t("the loop reaches the prompt", () => { if (!p.includes("[LOOP]")) throw new Error(p); });
+  t("with the error and the advice", () => {
+    if (!p.includes("immutable") || !p.includes("fails the same way")) throw new Error(p);
+  });
+  t("and it is listed before the rest", () => {
+    const iLoop = p.indexOf("[LOOP]"), iCad = p.indexOf("[CADENCE]");
+    if (iLoop < 0 || (iCad >= 0 && iLoop > iCad)) throw new Error(p);
+  });
 }
 
 console.log("\nhot-swap");

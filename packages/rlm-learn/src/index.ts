@@ -43,6 +43,17 @@ export interface RlmLearnConfig {
 	maxLearningsBeforeReflect?: number;
 }
 
+/**
+ * A stable, comparable summary of a tool failure: enough to tell two identical
+ * refusals apart from two different ones, short enough to sit in a prompt.
+ */
+function errorSignature(event: any): string {
+	const text = Array.isArray(event?.content)
+		? event.content.map((c: any) => (typeof c?.text === "string" ? c.text : "")).join(" ")
+		: String(event?.content ?? "");
+	return text.replace(/\s+/g, " ").trim().slice(0, 160) || "unknown error";
+}
+
 export interface LearningEntry {
 	timestamp: number;
 	workflow: string;
@@ -71,6 +82,8 @@ export class RlmLearnService extends Service {
 	private reflectTimer: any = null;
 	/** Code cells issued during the current turn, for cadence judgement. */
 	private turnCells: string[] = [];
+	/** Tool failures during the current turn, for loop detection. */
+	private turnErrors: string[] = [];
 	private promptHandle: any = null;
 
 	constructor(ctx: any, config: RlmLearnConfig = {}) {
@@ -174,13 +187,21 @@ export class RlmLearnService extends Service {
 				factory: (pi: any) => {
 					pi.on("turn_start", () => {
 						this.turnCells = [];
+						this.turnErrors = [];
 					});
 					pi.on("tool_call", (event: any) => {
 						if (event?.toolName === "code" && typeof event.input?.code === "string") {
 							this.turnCells.push(event.input.code);
 						}
 					});
-					pi.on("turn_end", () => this._judgeCadence());
+					pi.on("tool_result", (event: any) => {
+						if (!event?.isError) return;
+						this.turnErrors.push(errorSignature(event));
+					});
+					pi.on("turn_end", () => {
+						this._judgeRepeatedFailure();
+						this._judgeCadence();
+					});
 				},
 			};
 			reg.push(entry);
@@ -189,6 +210,37 @@ export class RlmLearnService extends Service {
 				if (i >= 0) reg.splice(i, 1);
 			};
 		});
+	}
+
+	/**
+	 * Notice the same failure happening more than once in a turn.
+	 *
+	 * An agent that retries a refused call with different wording is not making
+	 * progress; it is paying a full round trip to be told the same thing again.
+	 * The second identical failure is the signal, and it is worth more than any
+	 * success: recorded here, it reaches the next turn's prompt, so the loop
+	 * ends within the session rather than repeating in the next one.
+	 */
+	private _judgeRepeatedFailure() {
+		const errors = this.turnErrors;
+		this.turnErrors = [];
+		if (errors.length < 2) return;
+
+		const counts = new Map<string, number>();
+		for (const e of errors) counts.set(e, (counts.get(e) ?? 0) + 1);
+		for (const [error, count] of counts) {
+			if (count < 2) continue;
+			this.appendLearning({
+				timestamp: Date.now(),
+				type: "repeat-error",
+				workflow: "interactive-turn",
+				input: "",
+				error,
+				count,
+				durationMs: 0,
+				success: false,
+			} as any);
+		}
 	}
 
 	/**
@@ -230,16 +282,31 @@ export class RlmLearnService extends Service {
 		if (learnings.length === 0) return undefined;
 
 		// Focus on failures and reflections — those are the "don't repeat" signals.
-		const failures = learnings.filter((l: any) => l.success === false);
+		const failures = learnings.filter((l: any) => l.success === false && l.type !== "repeat-error");
 		const reflections = learnings.filter((l: any) => l.type === "reflection");
 		const reviews = learnings.filter((l: any) => l.type === "review" && (l.score ?? 0) < 4);
 		const cadence = learnings.filter((l: any) => l.type === "cadence");
+		const loops = learnings.filter((l: any) => l.type === "repeat-error");
 
-		if (failures.length === 0 && reflections.length === 0 && reviews.length === 0 && cadence.length === 0) {
+		if (
+			failures.length === 0 &&
+			reflections.length === 0 &&
+			reviews.length === 0 &&
+			cadence.length === 0 &&
+			loops.length === 0
+		) {
 			return undefined;
 		}
 
 		const lines: string[] = ["## Past Learnings (don't repeat these mistakes)"];
+
+		// Loops first: they cost the most and are the easiest to avoid.
+		for (const loop of loops.slice(-2) as any[]) {
+			lines.push(
+				`- [LOOP] this failed ${loop.count} times in one turn: ${String(loop.error).slice(0, 160)}. ` +
+					"Retrying it with different wording fails the same way — change the approach or move on.",
+			);
+		}
 
 		// Recent failures (last 5)
 		const recentFailures = failures.slice(-5);
