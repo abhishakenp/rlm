@@ -48,10 +48,14 @@ export interface RlmLearnConfig {
  * refusals apart from two different ones, short enough to sit in a prompt.
  */
 function errorSignature(event: any): string {
-	const text = Array.isArray(event?.content)
-		? event.content.map((c: any) => (typeof c?.text === "string" ? c.text : "")).join(" ")
-		: String(event?.content ?? "");
-	return text.replace(/\s+/g, " ").trim().slice(0, 160) || "unknown error";
+	const parts: string[] = [];
+	if (Array.isArray(event?.content)) {
+		for (const c of event.content) if (typeof c?.text === "string") parts.push(c.text);
+	}
+	const details = event?.details;
+	if (details?.error?.evalue) parts.push(String(details.error.evalue));
+	else if (details?.stderr) parts.push(String(details.stderr));
+	return parts.join(" ").replace(/\s+/g, " ").trim().slice(0, 160) || "unknown error";
 }
 
 export interface LearningEntry {
@@ -195,7 +199,15 @@ export class RlmLearnService extends Service {
 						}
 					});
 					pi.on("tool_result", (event: any) => {
-						if (!event?.isError) return;
+						// A thrown code cell comes back as a normal result whose
+						// details say status: "error". Reading isError alone would
+						// miss every failure the code tool produces — which is most
+						// of them.
+						const failed =
+							!!event?.isError ||
+							event?.details?.status === "error" ||
+							event?.details?.status === "aborted";
+						if (!failed) return;
 						this.turnErrors.push(errorSignature(event));
 					});
 					pi.on("turn_end", () => {

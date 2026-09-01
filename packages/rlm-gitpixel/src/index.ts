@@ -132,6 +132,11 @@ export class RlmGitpixelService extends Service {
 
 	/** Boot diagnostics, visible with RLM_VERBOSE=1. */
 	private diag(message: string) {
+		// Console output is opt-in and ephemeral; the log is neither, and it is
+		// what someone reads after the fact when this went wrong.
+		try {
+			(globalThis as any).__rlmLog?.("info", "gitpixel", message);
+		} catch {}
 		if (process.env.RLM_VERBOSE || process.env.RLM_HMR_VERBOSE) console.error(`[rlm] ${message}`);
 	}
 
