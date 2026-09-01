@@ -31,6 +31,16 @@
 # HMR: editing ANY plugin source triggers fiber.restart() on that plugin.
 #      Active work continues on old fiber; new work uses reloaded plugin.
 
+# ─── Recording ───────────────────────────────────────────────────────────────
+#
+# First row of all: everything after it can be explained from the log, and a
+# failure during boot is exactly the one you cannot reproduce on demand.
+
+- id: log
+  name: './packages/rlm-log/src/index.ts'
+  config:
+    level: info
+
 # ─── Reload ──────────────────────────────────────────────────────────────────
 #
 # First rows on purpose: reload is itself a fiber, so editing a plugin reloads

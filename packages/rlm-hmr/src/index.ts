@@ -137,6 +137,9 @@ export class RlmHmrService extends Service {
 	}
 
 	private log(...args: unknown[]) {
+		try {
+			(globalThis as any).__rlmLog?.("info", "hmr", String(args[0] ?? "").replace(/^\[rlm\] /, ""));
+		} catch {}
 		if (this.config.verbose || process.env.RLM_HMR_VERBOSE) console.error(...args);
 	}
 
