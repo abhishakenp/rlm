@@ -185,7 +185,11 @@ export class RlmPluginsService extends Service {
 			"No restart, ever. From a code cell:",
 			"",
 			'  self.plugin.new("rlm-weather", "Report the weather")   // writes the package',
-			'  // edit packages/rlm-weather/src/index.ts with fs                          ',
+			"  // now edit packages/rlm-weather/src/index.ts. The scaffold already",
+			"  // there is correct and is the shape to keep — a Service subclass with",
+			'  // `static provide`, imported from "@deepseek-ai/cordis". That is the',
+			"  // only kernel there is; do not invent another package name for it.",
+			'  await self.plugin.check("rlm-weather")                 // will it load?',
 			'  await self.plugin.mount("rlm-weather")                 // switches it on',
 			'  await self.call("rlmWeather", "hello", "you")          // uses it',
 			"",
@@ -195,6 +199,8 @@ export class RlmPluginsService extends Service {
 			"",
 			"`self.plugin.mount` verifies. It returns only once the row is ACTIVE, and",
 			"switches a row that fails to start back off rather than leaving it broken.",
+			"When it refuses, read the reason — it names the import or the service that",
+			"is missing. Never report a capability as working that mount did not accept.",
 		];
 		try {
 			const packages = this.list();
@@ -387,15 +393,62 @@ export class RlmPluginsService extends Service {
 				? "it is waiting on a service that has not arrived — check its `inject` list, and remember there is no optional inject"
 				: state === "FAILED"
 					? "it threw while starting — check the log"
-					: `it settled in ${state}`;
+					: `the row never appeared at all: ${await this.diagnose(name)}`;
 
 		if (this.config.rollbackOnFailure !== false) {
 			compose.reset(rowId);
+			// Wait for the row to actually be gone before saying so. The reset is
+			// a file write, and the row does not disappear until `@rlm/boot` sees
+			// it and Include re-composes — several hops later. Returning early
+			// means the very next thing the caller does, which is nearly always
+			// "fix it and mount again", fails with "already mounted" against a
+			// row that is on its way out.
+			await this.vanish(rowId);
 			this.ctx.emit?.("rlm/plugins-changed", name, `mount failed (${state}), rolled back`);
 			throw new Error(`${name} did not start: ${why}. Switched back off; the package is still on disk.`);
 		}
 		this.ctx.emit?.("rlm/plugins-changed", name, `mounted as ${rowId} but ${state}`);
 		return { name, id: rowId, state, ok: false as const, why };
+	}
+
+	/**
+	 * Can this package be mounted at all?
+	 *
+	 * Worth having separately from `mount` because the answer is cheap, and the
+	 * most common way a generated plugin fails is one a human would call a typo:
+	 * an import of a package that does not exist. The first model to use this
+	 * machinery wrote `import ... from "@primecordis/core"` — a plausible name
+	 * for cordis that has never existed — and all `mount` could tell it was that
+	 * the row "settled in absent", which sent it off installing packages from
+	 * npm for four turns. Import errors say exactly what is wrong; they were
+	 * simply not being read out.
+	 */
+	async check(name: string): Promise<{ ok: boolean; why?: string }> {
+		const why = await this.diagnose(name);
+		return why === null ? { ok: true } : { ok: false, why };
+	}
+
+	/**
+	 * Why a package cannot be loaded, or `null` when it can.
+	 *
+	 * Imported through the loader's own tree so a relative specifier means the
+	 * same thing here as it does in `cordis.yml`. Importing runs the module's
+	 * top level, which for a plugin is only its declarations — this does not
+	 * start anything.
+	 */
+	private async diagnose(name: string): Promise<string | null> {
+		const specifier = this.specifier(name);
+		const tree = (this.ctx.fiber as any)?.entry?.parent?.tree;
+		try {
+			const exports = tree?.import
+				? await tree.import(specifier)
+				: await import(new URL(specifier, this.ctx.baseUrl).href);
+			const plugin = this.ctx.loader?.unwrapExports?.(exports) ?? (exports as any)?.default ?? exports;
+			if (typeof plugin === "function" || typeof plugin?.apply === "function") return null;
+			return `${specifier} imports cleanly but does not export a plugin — a Cordis plugin is a function, an object with \`apply\`, or a Service subclass, as the default export`;
+		} catch (error: any) {
+			return `${specifier} failed to import: ${error?.message ?? error}`;
+		}
 	}
 
 	/**
@@ -421,11 +474,25 @@ export class RlmPluginsService extends Service {
 		return last;
 	}
 
+	/** Wait for a row to be gone from the composition. Bounded; best effort. */
+	private async vanish(rowId: string): Promise<void> {
+		const deadline = Date.now() + (this.config.mountTimeout ?? 4000);
+		while (Date.now() < deadline) {
+			if (!this.ctx.get?.("rlmCompose")?.row?.(rowId)) return;
+			await new Promise((r) => setTimeout(r, 60));
+		}
+	}
+
 	/** Switch it off again by removing the row. It stays on disk. */
-	unmount(name: string) {
+	async unmount(name: string) {
 		const pkg = this.list().find((p) => p.name === name);
 		if (!pkg?.mountedAs) throw new Error(`${name} is not mounted`);
 		this.compose().reset(pkg.mountedAs);
+		// Same reason as the rollback path: "unmounted" should mean the row is
+		// gone, not that a file was written that will shortly remove it. Without
+		// this, `unmount` then `remove` deletes the source out from under a row
+		// that is still live, and the next hot reload cannot re-import it.
+		await this.vanish(pkg.mountedAs);
 		this.ctx.emit?.("rlm/plugins-changed", name, "unmounted");
 		return pkg.mountedAs;
 	}

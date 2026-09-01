@@ -119,6 +119,7 @@ export class RlmSelfService extends Service {
 				list: () => need("rlmPlugins").list(),
 				doctor: () => need("rlmPlugins").doctor(),
 				new: (name: string, description: string) => need("rlmPlugins").create(name, description),
+				check: (name: string) => need("rlmPlugins").check(name),
 				mount: (name: string, id?: string, config?: Record<string, unknown>) =>
 					need("rlmPlugins").mount(name, id, config),
 				unmount: (name: string) => need("rlmPlugins").unmount(name),
