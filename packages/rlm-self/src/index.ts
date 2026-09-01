@@ -95,11 +95,11 @@ export class RlmSelfService extends Service {
 
 		const surface = {
 			/** Every row rlm is composed of, and whether each one is running. */
-			rows: () => need("rlmCompose").rows(),
+			rows: async () => need("rlmCompose").rows(),
 			/** One row, with the parameters it documents — even when it is off. */
-			describe: (id: string) => need("rlmCompose").describe(id),
+			describe: async (id: string) => need("rlmCompose").describe(id),
 			/** Every live service key on the context, which is what `call` can reach. */
-			services: () => this.services(),
+			services: async () => this.services(),
 			/** Call a method on a live service by name. */
 			call: (service: string, method: string, ...args: unknown[]) => this.call(service, method, ...args),
 			/** Where this rlm keeps itself. */
@@ -109,23 +109,29 @@ export class RlmSelfService extends Service {
 			},
 
 			config: {
-				set: (id: string, key: string, value: unknown) => need("rlmCompose").set(id, { [key]: value }),
-				enable: (id: string) => need("rlmCompose").setEnabled(id, true),
-				disable: (id: string) => need("rlmCompose").setEnabled(id, false),
-				reset: (id: string) => need("rlmCompose").reset(id),
+				set: async (id: string, key: string, value: unknown) => need("rlmCompose").set(id, { [key]: value }),
+				enable: async (id: string) => need("rlmCompose").setEnabled(id, true),
+				disable: async (id: string) => need("rlmCompose").setEnabled(id, false),
+				reset: async (id: string) => need("rlmCompose").reset(id),
 			},
 
+			// Uniformly asynchronous, including the calls that have nothing to
+			// wait for. Half of these genuinely are async and half are not, and a
+			// caller cannot tell which from the name — the first model to use
+			// this surface wrote `self.plugin.remove(...).then(...)` and got
+			// "then is not a function", which is a wart, not information. An
+			// await on a value that was never a promise costs a tick.
 			plugin: {
-				list: () => need("rlmPlugins").list(),
-				doctor: () => need("rlmPlugins").doctor(),
-				new: (name: string, description: string) => need("rlmPlugins").create(name, description),
-				check: (name: string) => need("rlmPlugins").check(name),
-				mount: (name: string, id?: string, config?: Record<string, unknown>) =>
+				list: async () => need("rlmPlugins").list(),
+				doctor: async () => need("rlmPlugins").doctor(),
+				new: async (name: string, description: string) => need("rlmPlugins").create(name, description),
+				check: async (name: string) => need("rlmPlugins").check(name),
+				mount: async (name: string, id?: string, config?: Record<string, unknown>) =>
 					need("rlmPlugins").mount(name, id, config),
-				unmount: (name: string) => need("rlmPlugins").unmount(name),
-				adopt: (name: string, why: string) => need("rlmPlugins").adopt(name, why),
-				remove: (name: string) => need("rlmPlugins").remove(name),
-				sweep: (options?: { apply?: boolean }) => need("rlmPlugins").sweep(options),
+				unmount: async (name: string) => need("rlmPlugins").unmount(name),
+				adopt: async (name: string, why: string) => need("rlmPlugins").adopt(name, why),
+				remove: async (name: string) => need("rlmPlugins").remove(name),
+				sweep: async (options?: { apply?: boolean }) => need("rlmPlugins").sweep(options),
 			},
 		};
 		this.current = surface;
@@ -215,13 +221,15 @@ export class RlmSelfService extends Service {
 			"",
 			"From inside a code cell, `self` is your hands on your own wiring:",
 			"",
-			"  self.rows()                      // every row, and whether it is running",
-			"  self.describe(id)                // one row and the parameters it accepts",
-			"  self.services()                  // every live service you can call",
-			'  await self.call(svc, m, ...args) // call a method on one of them',
-			'  self.config.set(id, key, value)  // change a row. Takes effect at once',
-			"  self.config.disable(id) / .enable(id) / .reset(id)",
-			"  self.plugin.list() / .doctor() / .new() / .mount() / .unmount() / .adopt() / .remove()",
+			"Every one of them is async — await it.",
+			"",
+			"  await self.rows()                // every row, and whether it is running",
+			"  await self.describe(id)          // one row and the parameters it accepts",
+			"  await self.services()            // every live service you can call",
+			"  await self.call(svc, m, ...args) // call a method on one of them",
+			"  await self.config.set(id, key, value)   // change a row. Takes effect at once",
+			"  await self.config.disable(id) / .enable(id) / .reset(id)",
+			"  await self.plugin.list() / .doctor() / .new() / .check() / .mount() / .unmount() / .adopt() / .remove()",
 			"",
 			"Your changes are written to an overlay file, never to the shipped",
 			"configuration, so deleting the overlay returns you to stock. Read a row",
