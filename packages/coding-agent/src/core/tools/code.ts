@@ -15,7 +15,7 @@
  */
 import { createRequire } from "node:module";
 import vm from "node:vm";
-import { exec, execSync } from "node:child_process";
+import { exec as nodeExec, execSync, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -43,7 +43,11 @@ const DYNAMIC_IMPORT_LOADER = vm.constants?.USE_MAIN_CONTEXT_DEFAULT_LOADER;
 const codeSchema = Type.Object({
 	code: Type.String({
 		description:
-			"JavaScript scratchpad code or `%%bash` shell cells to execute in the agent kernel. Use the target project's own environment for project imports, tests, scripts, CLIs, and dependency checks instead of direct kernel imports.",
+			"JavaScript scratchpad code or `%%bash` shell cells to execute in the agent kernel. " +
+			"This kernel is a plain Node vm — the only globals are exec, execSync, sh, fs, path, os, process, fetch, require, console, cwd. " +
+			"Nothing else exists as a variable, so any capability outside this list must be reached by running a command: " +
+			"`const out = await sh(\"some-cli --flag\")` returns that command's stdout as a string, or use a `%%bash` cell. " +
+			"Use the target project's own environment for project imports, tests, scripts, CLIs, and dependency checks instead of direct kernel imports.",
 	}),
 });
 
@@ -154,8 +158,15 @@ export class CodeKernelProvisioner {
 		const cwd = this.options?.cwd ?? this.cwd;
 
 		const sandbox: Record<string, any> = {
-			// Node builtins
-			exec,
+			// Shelling out is the only way out of this sandbox, so the shell
+			// helpers hand back the command's OUTPUT as a string. `exec` keeps
+			// its familiar name but no longer resolves to a ChildProcess — a
+			// handle nobody in a cell can read. `sh` is the same function under
+			// the name the prompt teaches.
+			exec: (cmd: string, opts?: any) =>
+				runShell(cmd, { cwd: opts?.cwd ?? cwd, ...(opts ?? {}) }),
+			sh: (cmd: string, opts?: any) =>
+				runShell(cmd, { cwd: opts?.cwd ?? cwd, ...(opts ?? {}) }),
 			execSync,
 			fs,
 			path,
@@ -344,6 +355,13 @@ export class CodeKernelProvisioner {
 				stderr = stderr.slice(0, maxChars) + "\n... (truncated)";
 			}
 
+			// A cell that ran clean but printed nothing looks identical to a cell
+			// that silently failed. Say which it was, so the next step is not a
+			// blind retry of something that already worked.
+			if (!stdout && !stderr && resultStr === undefined) {
+				resultStr = "(ran without error; nothing printed and no value returned)";
+			}
+
 			return {
 				stdout,
 				stderr,
@@ -356,8 +374,18 @@ export class CodeKernelProvisioner {
 			let stderr = this.outputCapture.stderr.join("");
 
 			const ename = error instanceof Error ? error.name : "Error";
-			const evalue = error instanceof Error ? error.message : String(error);
+			let evalue = error instanceof Error ? error.message : String(error);
 			const traceback = error instanceof Error ? (error.stack ?? "").split("\n") : [String(error)];
+
+			// A bare "x is not defined" is a dead end: it says what failed but
+			// not what would have worked, so the next attempt is another guess.
+			// Replace it with the one instruction that actually resolves it.
+			// Not gated on `ename`: errors thrown inside the vm come from that
+			// realm's own Error constructor, so `instanceof Error` is false here
+			// and every one of them arrives named plain "Error". The message
+			// itself is the reliable signal.
+			const taught = teachReferenceError(evalue);
+			if (taught) evalue = taught;
 
 			return {
 				stdout,
@@ -538,12 +566,116 @@ async function executeWithBusyKernelChoice(
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const BUILTINS = new Set([
-	"exec", "execSync", "fs", "path", "os", "process", "console",
+	"exec", "execSync", "sh", "fs", "path", "os", "process", "console",
 	"Buffer", "TextEncoder", "TextDecoder", "URL", "URLSearchParams",
 	"setTimeout", "setInterval", "clearTimeout", "clearInterval",
 	"fetch", "import", "require", "rlm", "cwd",
 	"globalThis", "global",
 ]);
+
+/** Sandbox globals worth naming when an unknown identifier is reached for. */
+const SANDBOX_GLOBALS =
+	"exec, execSync, sh, fs, path, os, process, fetch, require, console, cwd";
+
+/**
+ * A shell run whose value is the command's *output*, not a handle to it.
+ *
+ * Node's own `exec` resolves to a ChildProcess, which serialises into pages of
+ * `_readableState` noise and tells the caller nothing about what the command
+ * printed. An agent that cannot read a result cannot tell success from failure,
+ * so it retries — which is how one "open this URL" becomes three browser
+ * windows. This returns a string, always.
+ */
+function runShell(
+	cmd: string,
+	opts?: { cwd?: string; timeout?: number; env?: Record<string, string> },
+): Promise<string> {
+	return new Promise((resolve, reject) => {
+		nodeExec(
+			cmd,
+			{
+				encoding: "utf8",
+				cwd: opts?.cwd,
+				timeout: opts?.timeout ?? 120000,
+				env: opts?.env ? { ...process.env, ...opts.env } : process.env,
+				maxBuffer: 16 * 1024 * 1024,
+			},
+			(error: any, stdout: string, stderr: string) => {
+				const out = String(stdout ?? "");
+				const err = String(stderr ?? "");
+				if (error) {
+					const code = error.code ?? error.signal ?? "?";
+					const detail = [err.trim(), out.trim()].filter(Boolean).join("\n");
+					reject(
+						new Error(
+							`Command failed (exit ${code}): ${cmd}\n${detail || "(no output on stdout or stderr)"}`,
+						),
+					);
+					return;
+				}
+				const combined = err.trim() ? `${out}${out && !out.endsWith("\n") ? "\n" : ""}${err}` : out;
+				// A command that succeeds silently is the common case for things
+				// like `open`, `mkdir`, `pkill`. Empty string reads as failure to
+				// an agent, so say plainly that it worked.
+				resolve(combined.trim() === "" ? `(exit 0 — command succeeded, no output)` : combined);
+			},
+		);
+	});
+}
+
+/** True when `name` resolves to an executable on PATH. */
+function isOnPath(name: string): boolean {
+	if (!/^[A-Za-z0-9_.-]+$/.test(name)) return false;
+	try {
+		const r = spawnSync("command", ["-v", name], {
+			shell: "/bin/sh",
+			encoding: "utf8",
+			timeout: 2000,
+		});
+		return r.status === 0 && Boolean(r.stdout?.trim());
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Turn a bare `ReferenceError: x is not defined` into a message that says what
+ * to do instead.
+ *
+ * The sandbox has exactly one way to reach the outside world: shelling out. An
+ * agent that has been told about a capability by name will reach for it as a
+ * JS global, get a dead-end ReferenceError, and guess again. If the name is a
+ * real program on PATH, the fix is one line — say so.
+ */
+function teachReferenceError(message: string): string | null {
+	// V8 hands this back sometimes bare ("x is not defined") and sometimes
+	// already prefixed with the error name; accept either.
+	const m = /^(?:ReferenceError:\s*)?([A-Za-z_$][\w$]*) is not defined$/.exec(message.trim());
+	if (!m) return null;
+	const name = m[1];
+	if (isOnPath(name)) {
+		return (
+			`${message}\n\n` +
+			`\`${name}\` is not a JavaScript global — it is a command-line program. ` +
+			`Run it as a shell command and read what it prints:\n` +
+			`    const out = await sh(\`${name} --help\`); console.log(out);\n` +
+			`or use a shell cell:\n` +
+			`    %%bash\n    ${name} --help`
+		);
+	}
+	const base = name.replace(/[^A-Za-z0-9].*$/, "");
+	const hint =
+		base !== name && isOnPath(base)
+			? `\n\`${base}\` IS a program on PATH, so try: await sh(\`${base} ...\`)`
+			: "";
+	return (
+		`${message}\n\n` +
+		`There is no \`${name}\` in this sandbox, and no program by that name on PATH. ` +
+		`The only globals are: ${SANDBOX_GLOBALS}.\n` +
+		`Anything outside the sandbox must be reached by shelling out — ` +
+		`\`await sh("<command>")\` returns the command's output as a string.${hint}`
+	);
+}
 
 /**
  * Transform `var x = val` → `globalThis.x = val` so variables persist

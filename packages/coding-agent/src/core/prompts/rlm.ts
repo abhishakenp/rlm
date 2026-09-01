@@ -44,7 +44,9 @@ const CODE_CONTROL_PROMPT = [
 	"",
 	"JavaScript state in the kernel persists across cells via `globalThis`: named variables assigned with `globalThis.x = ...`, helper functions, imports, notes, parsed outputs, and helper data structures all remain available in every later turn. The last expression's value is returned as the result. `console.log()` output is captured as stdout. `console.error()` and `console.warn()` are captured as stderr.",
 	"",
-	"Available globals: `fs`, `path`, `os`, `exec`, `execSync`, `fetch`, `import()` (dynamic ESM), `require` (CJS), `Buffer`, `URL`, `process`, `setTimeout`, `setInterval`, `TextEncoder`, `TextDecoder`. Top-level `await` is supported.",
+	"Available globals: `fs`, `path`, `os`, `sh`, `exec`, `execSync`, `fetch`, `import()` (dynamic ESM), `require` (CJS), `Buffer`, `URL`, `process`, `setTimeout`, `setInterval`, `TextEncoder`, `TextDecoder`. Top-level `await` is supported.",
+	"",
+	"That list is the whole namespace — there are no other globals. Any capability that is not in it lives outside the kernel and is reached by running a command, never by naming it as a variable. `await sh('some-cli --flag')` returns that command's stdout as a string (`exec` is the same function); a command that succeeds silently says so rather than returning an empty string, and a command that fails throws with its exit code and stderr. Reaching for an undefined name costs a turn and teaches you nothing, so when you are unsure whether something is a global or a program, run `sh('command -v <name>')` first.",
 	"",
 	"Subagent spawning: `rlm.run('sub-task')` spawns a child agent and returns a handle with `{ id, name, status, result }`. `rlm.spawn('sub-task')` spawns and awaits the result string. `rlm.listSubagents()` lists active children. `rlm.deleteSubagent(name)` disposes a child. `rlm.goal.create(objective)`, `rlm.goal.get()`, `rlm.goal.complete()` manage goals.",
 	"",
@@ -175,7 +177,7 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 		`Working directory: ${cwd}`,
 		`Conversation log: ${messagesPath}`,
 		`Recursive agent depth: ${depth}`,
-		`Pre-imported Node modules: fs, path, os, child_process (exec, execSync), fetch, Buffer, URL, process.`,
+		`Pre-imported Node modules: fs, path, os, child_process (sh, exec, execSync), fetch, Buffer, URL, process.`,
 		"Use `import()` for additional ESM modules or `require()` for CJS modules.",
 	];
 
