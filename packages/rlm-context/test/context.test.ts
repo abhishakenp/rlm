@@ -212,4 +212,138 @@ describe("RlmContextService", () => {
 			expect(snap.model.description).toBe("Primary model");
 		});
 	});
+
+	describe("clone", () => {
+		it("deep-copies a single variable to a new name", () => {
+			const svc = createService();
+			svc.set("auth.files", ["a.ts", "b.ts"]);
+			svc.clone("auth.files", "auth.files.bak");
+			const bak = svc.get("auth.files.bak");
+			expect(bak).toBeDefined();
+			expect(bak!.value).toEqual(["a.ts", "b.ts"]);
+			// Original still exists
+			expect(svc.value("auth.files")).toEqual(["a.ts", "b.ts"]);
+		});
+
+		it("clone is a deep copy — mutating clone does not affect original", () => {
+			const svc = createService();
+			svc.set("data.list", [1, 2, 3]);
+			svc.clone("data.list", "data.list.copy");
+			svc.mutate("data.list.copy", (v: any) => [...v, 4]);
+			expect(svc.value("data.list.copy")).toEqual([1, 2, 3, 4]);
+			expect(svc.value("data.list")).toEqual([1, 2, 3]);
+		});
+
+		it("clone with transform applies transform to value", () => {
+			const svc = createService();
+			svc.set("count", 5);
+			svc.clone("count", "count.doubled", { transform: (v: any) => v * 2 });
+			expect(svc.value("count.doubled")).toBe(10);
+		});
+	});
+
+	describe("cloneMany", () => {
+		it("clones many vars matching a pattern with a prefix", () => {
+			const svc = createService();
+			svc.set("auth.token", "abc");
+			svc.set("auth.user", "admin");
+			svc.cloneMany(["auth.*"], "backup.");
+			expect(svc.value("backup.auth.token")).toBe("abc");
+			expect(svc.value("backup.auth.user")).toBe("admin");
+			// Originals still exist
+			expect(svc.value("auth.token")).toBe("abc");
+			expect(svc.value("auth.user")).toBe("admin");
+		});
+
+		it("clones many with a transform function for names", () => {
+			const svc = createService();
+			svc.set("db.host", "localhost");
+			svc.set("db.port", 5432);
+			svc.cloneMany(["db.*"], (oldName: string) => "snapshot." + oldName);
+			expect(svc.value("snapshot.db.host")).toBe("localhost");
+			expect(svc.value("snapshot.db.port")).toBe(5432);
+		});
+	});
+
+	describe("mutate", () => {
+		it("mutates a let variable via function", () => {
+			const svc = createService();
+			svc.set("counter", 0);
+			svc.mutate("counter", (v: any) => v + 1);
+			expect(svc.value("counter")).toBe(1);
+			svc.mutate("counter", (v: any) => v + 10);
+			expect(svc.value("counter")).toBe(11);
+		});
+
+		it("mutate on array appends element", () => {
+			const svc = createService();
+			svc.set("files", ["a.ts"]);
+			svc.mutate("files", (v: any) => [...v, "b.ts"]);
+			expect(svc.value("files")).toEqual(["a.ts", "b.ts"]);
+		});
+	});
+
+	describe("mutateMany", () => {
+		it("mutates many vars matching a glob pattern", () => {
+			const svc = createService();
+			svc.set("nums.a", 1);
+			svc.set("nums.b", 2);
+			svc.set("nums.c", 3);
+			const count = svc.mutateMany("nums.*", (v: any) => v * 10);
+			expect(count).toBe(3);
+			expect(svc.value("nums.a")).toBe(10);
+			expect(svc.value("nums.b")).toBe(20);
+			expect(svc.value("nums.c")).toBe(30);
+		});
+	});
+
+	describe("batch", () => {
+		it("executes multiple ops atomically in one epoch bump", () => {
+			const svc = createService();
+			const epochBefore = svc.getEpoch();
+			svc.batch([
+				{ op: "set", name: "batch.x", value: 1 },
+				{ op: "set", name: "batch.y", value: 2 },
+				{ op: "mutate", name: "batch.x", fn: (v: any) => v + 100 },
+			]);
+			expect(svc.value("batch.x")).toBe(101);
+			expect(svc.value("batch.y")).toBe(2);
+			expect(svc.getEpoch()).toBe(epochBefore + 1);
+		});
+
+		it("batch with clone op", () => {
+			const svc = createService();
+			svc.set("orig", "hello");
+			svc.batch([
+				{ op: "clone", name: "orig", newName: "orig.copy" },
+			]);
+			expect(svc.value("orig.copy")).toBe("hello");
+			expect(svc.value("orig")).toBe("hello");
+		});
+	});
+
+	describe("epoch and prompt invalidation", () => {
+		it("set bumps epoch", () => {
+			const svc = createService();
+			const e1 = svc.getEpoch();
+			svc.set("x", 1);
+			expect(svc.getEpoch()).toBe(e1 + 1);
+		});
+
+		it("mutate bumps epoch", () => {
+			const svc = createService();
+			svc.set("x", 1);
+			const e1 = svc.getEpoch();
+			svc.mutate("x", (v: any) => v + 1);
+			expect(svc.getEpoch()).toBe(e1 + 1);
+		});
+
+		it("clone bumps epoch", () => {
+			const svc = createService();
+			svc.set("x", 1);
+			const e1 = svc.getEpoch();
+			svc.clone("x", "x.copy");
+			expect(svc.getEpoch()).toBe(e1 + 1);
+		});
+	});
 });

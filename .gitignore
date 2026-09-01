@@ -43,3 +43,6 @@ collect.sh
 
 __pycache__/
 *.pyc
+
+# Local tool state, not part of the app.
+.gitpixel/

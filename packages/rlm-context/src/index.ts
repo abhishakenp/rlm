@@ -666,6 +666,11 @@ export class RlmContextService extends Service {
 			curY += 1
 		}
 		for (let i = 0; i < visibleVars.length; i++) {
+			// Vertical gap before each block except first
+			if (i > 0) {
+				if (y === curY) return false
+				curY += 1
+			}
 			const v = visibleVars[i]
 			const mainLineY = curY
 			if (y === mainLineY) {
@@ -688,8 +693,7 @@ export class RlmContextService extends Service {
 				const valLinesCount = Math.min(valueLines.length, maxLines)
 				const hasOverflow = valueLines.length > maxLines
 				const hasDesc = !!v.description
-				const hasSep = i < visibleVars.length - 1
-				const blockLines = valLinesCount + (hasOverflow ? 1 : 0) + (hasDesc ? 1 : 0) + (hasSep ? 1 : 0)
+				const blockLines = valLinesCount + (hasOverflow ? 1 : 0) + (hasDesc ? 1 : 0)
 				if (y > mainLineY && y < mainLineY + 1 + blockLines) {
 					const globalIdx = all.indexOf(v)
 					st.focusedIndex = globalIdx
@@ -938,17 +942,17 @@ export class RlmContextService extends Service {
 		// with ANSI fallbacks when theme absent (headless tests).
 		const theme = getRlmTheme()
 		const useTheme = cfg.coloredBars && !!theme
-		const BLOCK = "▓"
-		const BLOCK_GAP = "░"
+		const BAR_ELEGANT = "▎"
+		const BAR_PLAIN = "▐"
 		const VERT = "│"
 		const barFor = (scope: string): string => {
-			if (!cfg.coloredBars) return BLOCK_GAP
+			if (!cfg.coloredBars) return BAR_PLAIN
 			const tColor = SCOPE_THEME_COLOR[scope] ?? "border"
 			const fallback = SCOPE_FALLBACK_ANSI[scope] ?? "\x1b[32m"
 			if (useTheme) {
-				try { return (theme as any).fg(tColor, BLOCK) } catch {}
+				try { return (theme as any).fg(tColor, BAR_ELEGANT) } catch {}
 			}
-			return `${fallback}${BLOCK}\x1b[0m`
+			return `${fallback}${BAR_ELEGANT}\x1b[0m`
 		}
 		const scopeBadge = (scope: string): string => {
 			if (!cfg.coloredBars) return scope
@@ -1029,8 +1033,8 @@ export class RlmContextService extends Service {
 				mainLine = themeBgSelected(theme, `${arrow}${mainLine}`)
 			}
 			mainLine = ensureWidth(mainLine, width)
-			// Gap line between blocks for visual separation
-			lines.push(dim("  " + "─".repeat(Math.min(width - 4, 12))))
+			// Vertical gap before each block (except first) — empty line for spacing
+			if (i > 0) lines.push("")
 			lines.push(mainLine)
 			if (isExpanded) {
 				const fullValueStr = formatValueDetailed(v.value)
@@ -1047,10 +1051,6 @@ export class RlmContextService extends Service {
 				if (v.description) {
 					const desc = truncate(v.description, Math.max(10, width - 4))
 					lines.push(ensureWidth(dim(`   ${desc}`), width))
-				}
-				if (i < visibleVars.length - 1) {
-					const sep = dim("─".repeat(Math.min(width - 2, 16)))
-					lines.push(ensureWidth(`  ${sep}`, width))
 				}
 			}
 		}
