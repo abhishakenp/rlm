@@ -72,7 +72,8 @@ rlm is a **prime-agent in JavaScript**. It takes the behavioral concepts of prim
 
 - Hot-swap any plugin source while running — no restart
 - Config file changes trigger `Include.refresh()` (transactional entry update)
-- Plugin source changes trigger `fiber.restart()` (dispose old, re-import new)
+- Plugin source changes trigger `partialReload()` — clears ESM loadCache + CJS require.cache, re-imports plugin entry, swaps registry runtime (mirrors official `@deepseek-ai/cordis-plugin-hmr`)
+- Node 22/23 and Node 24+ load-cache shapes both handled
 - Active work is **never** interrupted — old fiber finishes, new fiber serves next turn
 - System prompt rebuilds automatically on prompt/skill/refinement changes
 
@@ -91,7 +92,7 @@ rlm is a **prime-agent in JavaScript**. It takes the behavioral concepts of prim
 - 3 scopes: `project` (survives all sessions), `session` (one session), `task` (one subagent invocation)
 - Copy / move / mutate / clone / batch operations (1 or many variables)
 - Epoch-based cache invalidation — mutations auto-invalidate the next turn's prompt
-- Elegant TUI panel with colored scope bars, per-variable expand, scroll, followup queue
+- Elegant context panel — colored blocks with gaps, focus highlight, per-variable expand, scroll, followup queue with double-Enter send
 
 ### Subagents
 
@@ -106,8 +107,22 @@ rlm is a **prime-agent in JavaScript**. It takes the behavioral concepts of prim
 - InteractiveMode with theme, syntax highlighting, code highlighter
 - UiProvider override — full UI replacement via highest-priority provider
 - Slash commands, status bar items, custom components (all registerable)
-- Context panel with colored scope bars, focused navigation, auto-focus typing
-- Followup queue — keep typing while agent is busy, double-Enter to send
+- Context panel — colored blocks with gaps between each variable, focus highlight, click to expand, hjkl/arrow navigation, auto-focus typing
+- Followup queue — keep typing while agent is busy, queued as unassigned blocks below, double-Enter to send immediately
+
+#### Elegant UI — how it looks and works
+
+Every variable in the agent's context is a **colored block** with gaps between them, not a thin bar. Each block shows the variable kind (`let`/`const`), name, and a compact preview of its value. The currently focused block is **highlighted** so you always know exactly where you are.
+
+- **Navigate** with `hjkl` or arrow keys — focus hops between blocks
+- **Expand** any block by pressing Enter while focused — full value, type, and scope badges appear inside that block
+- **Click** any block to expand/retract just that one
+- **Auto-focus typing** — type any key except Enter and the input automatically focuses to the first variable, so you can start typing immediately
+- **Followup queue** — while the agent is busy, anything you type is collected as an unassigned block below the current ones. Press Enter twice (shown in the UI) to send it as a followup immediately, or it just inserts at turn end by default
+- **Scroll** — `↑`/`↓` or `PageUp`/`PageDown` scrolls the block list with indicators
+- All togglable via config flags, all `true` by default: `coloredBars`, `perVariableExpand`, `hjklNavigation`, `autoFocusTyping`, `doubleEnterToSend`, `followupQueueUi`, `scrollablePanel`
+
+Each block is its own micro-plugin — the colored bar renderer, the focus/highlight logic, the gap spacing, the navigation, the followup queue — all independent, all hot-reloadable via chordis, all switchable off without touching code.
 
 ### Shell
 
@@ -418,18 +433,28 @@ All 14 plugins. Service ID = how you access it via `ctx.get("serviceId")`.
 
 ### Prompt fragment priorities
 
-| Fragment | Plugin | Priority | When |
-|----------|--------|----------|------|
-| `context-doctrine` | `rlm-context` | 100 | always |
-| `sdk-doctrine` | `rlm-sdk` | 80 | always |
-| `refine-doctrine` | `rlm-refine` | 70 | always |
-| `past-learnings` | `rlm-learn` | 5 | always |
+Each plugin writes its own doctrine into the system prompt. The agent reads them all every turn — no AGENTS.md, no manual management, no duplication. The agent learns from the context what it should do.
+
+| Fragment | Plugin | Priority | What it says |
+|----------|--------|----------|--------------|
+| `context-doctrine` | `rlm-context` | 100 (highest) | "Context IS your working memory. Use `context.*` at every step" — copy, move, mutate, clone anything |
+| `sdk-doctrine` | `rlm-sdk` | 80 | "Use `rlm.run/spawn/listSubagents/delete` at every step" — recursive subagents |
+| `refine-doctrine` | `rlm-refine` | 70 | "Use `await refine.run()` when you see repeated failures" — self-improvement |
+| `past-learnings` | `rlm-learn` | 5 | "Don't repeat these mistakes" — self-evolution |
+
+The agent doesn't need to be told to copy/move/mutate/clone variables — the plugin system makes those operations available and on by default. The doctrine just reminds the agent that context is everything. That's the whole idea: the context of the LLM is all the previous context, and the harness makes it behave that way through plugins.
 
 ---
 
 ## Context Registry
 
 All agent knowledge lives in typed variables — `const` (immutable) or `let` (mutable). This is the agent's working memory. The harness doesn't keep a shadow copy — every mutation bumps `rlmContext.getEpoch()`, emits `rlm/prompt-changed`, and the next turn's system prompt is rebuilt with `context.summarize()` already inside it.
+
+### How the harness operates on its own context
+
+The whole point is that the agent's context is everything it knows — the user prompt, the model config, the tools, the skills, the files discovered, the tasks completed. It's all variables. And the harness makes the agent able to operate on those variables directly: copy, move, mutate, clone — one or many, with or without transfer to subagents. No prompt needed to tell it "you should use context". The doctrine fragment (priority 100) just says "Context IS your working memory. Use `context.*` automatically at every step" — and the agent already knows how because the plugin system makes those operations the default way to work.
+
+Every mutation auto-invalidates the next turn's prompt, so the system prompt is always fresh with the latest context summary. This means the agent's context evolves and the harness reflects it — no stale state, no manual refresh.
 
 ### Scopes
 
@@ -498,14 +523,18 @@ context.mutate('files.rlm-packages', v => [...v, 'rlm-new']); // mutate one
 context.mutateMany('files.*', v => Array.isArray(v) ? [...v].sort() : v); // mutate many
 ```
 
-### Micro-behaviour flags (all `true` by default, no LLM needed to toggle)
+### Micro-behaviour flags (all `true` by default — no LLM needed to toggle)
+
+These let the agent's harness control context directly through the plugin system, without the LLM having to be told what to do. The agent just operates on its own context — copy, move, mutate, clone — because the harness makes those behaviours available and on by default.
 
 | Flag | Gates |
 |------|-------|
-| `enableClone` | `clone` / `cloneMany` |
-| `enableMutate` | `mutate` / `mutateMany` |
+| `enableClone` | `clone` / `cloneMany` — deep copy variables |
+| `enableMutate` | `mutate` / `mutateMany` — update mutable variables in place |
 | `enableBulkOps` | `cloneMany` / `mutateMany` / `batch` / `copy-many` |
-| `enableSubagentTransfer` | `copy` / `move` transfer to subagents |
+| `enableSubagentTransfer` | `copy` / `move` transfer to subagents when spinning them up |
+
+The whole point: the agent's context is everything it knows. It can copy/move/mutate/clone any variable (one or many), transfer to subagents when needed, and the harness handles it all — no explicit instruction required because the plugin system makes it the default way to work.
 
 ### System-generated variables
 
@@ -579,7 +608,9 @@ The `rlm-learn` plugin registers a prompt fragment (`past-learnings`, priority 5
 - [PATTERNS] parallel spawns succeed; sequential loops timeout
 ```
 
-This is rebuilt on every prompt invalidation — the agent always sees its recent failures.
+The `rlm-agent` plugin wires this into the AgentSession's system prompt via `appendSystemPromptOverride` in `createServices()`. On every session creation, the override calls `rlmPrompt.buildCompositePrompt()` and appends the composite (all registered fragments from all plugins) to the base system prompt. This means the AI sees context registry state, past learnings, refinement guidance, and SDK subagent instructions in every turn.
+
+The fragment is rebuilt dynamically on each call — no caching. When a workflow fails and `onWorkflowError` appends to `~/.rlm/agent/workflows/learnings.jsonl`, the next turn's system prompt automatically includes the new failure.
 
 ---
 
@@ -667,12 +698,28 @@ for (const task of tasks) {
 
 HMR follows the Cordis philosophy: plugins are disposable, reloadable fibers. No `chokidar` — only Node built-in `fs.watch` registered as `ctx.effect()` (cleaned up on dispose).
 
+The implementation mirrors the official `@deepseek-ai/cordis-plugin-hmr` algorithm: cache-clear, re-import, registry-swap. `fiber.restart()` alone is insufficient because the imported module stays cached — the restart reruns the plugin callback but reuses stale code.
+
 ### Two kinds of watching
 
 | What changes | Trigger | Effect |
 |--------------|---------|--------|
 | Config files (`cordis.yml`, patches) | `fs.watch` → `Include.refresh()` | Re-reads YAML, transactionally updates entries, old fibers dispose |
-| Plugin source (`packages/*/src/*.ts`) | `fs.watch` → `entry.fiber.restart()` | Re-imports module, old fiber disposes, new fiber loads |
+| Plugin source (`packages/*/src/*.ts`) | `fs.watch` → `partialReload()` | Clears ESM loadCache + CJS require.cache, re-imports plugin entry, swaps registry runtime |
+
+### How partialReload() works
+
+1. **Classify changes** — stashed files are "accepted"; their dependents propagate acceptance via `job.linked` traversal. Files with no accepted dependents are "declined".
+2. **Find affected plugins** — for each loader entry, resolve its module URL. DELETE the URL from declined (so the entry file itself is included), traverse its dependency tree, check if any dependency is accepted.
+3. **Clear caches** — for each accepted file: backup and delete from ESM `loadCache` (via `Map.prototype.delete` for Node 24 compatibility) and CJS `require.cache`.
+4. **Re-import** — `loader.import(url, getOuterStack)` for each affected plugin entry URL.
+5. **Swap registry** — `ctx.registry.delete(oldPlugin)` disposes old fibers. For each old fiber: `oldFiber.parent.registry.plugin(newPlugin, oldFiber._config, getOuterStack)` creates a new fiber with the same config. Restore `fiber.entry` linkage.
+6. **Rollback on failure** — if re-import or re-registration throws, restore cached modules and re-register old plugins.
+
+### Node version compatibility
+
+- **Node 22/23**: `loadCache` is `Map<url, ModuleJob>` — `loadCache.get(url)` returns the job directly.
+- **Node 24+**: `loadCache` is `LoadCache extends Map<url, { [type]: ModuleJob }>` — the custom `.get(url)` method extracts the job from the wrapper, but `Map.prototype.get` returns the raw wrapper. The implementation uses `loadCache.get()` for reading job data and `Map.prototype.delete` for cache clearing.
 
 ### What triggers HMR
 
@@ -881,6 +928,18 @@ npm run build
 ```bash
 # Run specific tests (from package root, not repo root)
 npx tsx ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts
+
+# Context registry tests (35 tests: set/get/move/clone/cloneMany/mutate/mutateMany/batch/epoch)
+cd packages/rlm-context && npx tsx ../../node_modules/vitest/dist/cli.js --run test/context.test.ts
+
+# Learnings-in-prompt tests (7 tests: buildLearningsPrompt, fragment registration, composite prompt, failure persistence)
+cd packages/rlm-learn && npx tsx ../../node_modules/vitest/dist/cli.js --run test/learnings-prompt.test.ts
+
+# Recursive subagent depth enforcement tests (7 tests: depth check, maxDepth, goal API)
+cd packages/rlm-sdk && npx tsx ../../node_modules/vitest/dist/cli.js --run test/depth-enforcement.test.ts
+
+# HMR focused test (scripts/test-hmr.mjs — boot Cordis, edit plugin, verify v1→v2 reload)
+node --expose-internals --import ./node_modules/tsx/dist/loader.mjs scripts/test-hmr.mjs
 
 # Full test suite
 ./test.sh

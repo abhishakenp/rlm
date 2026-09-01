@@ -1187,6 +1187,28 @@ export class InteractiveMode {
 				return undefined;
 			}
 			if (!beforeFocused) {
+				// Arrows / hjkl should still focus and navigate even when panel not focused
+				if (panel?.handleKey) {
+					try {
+						const navKeys = ["arrowup","arrowdown","arrowleft","arrowright","k","j","h","l","pageup","pagedown","ctrl+u","ctrl+d","ctrl+o","tab","shift+tab"];
+						const lowerNav = data.toLowerCase();
+						if (navKeys.includes(lowerNav)) {
+							let navHandled = false;
+							try { navHandled = !!panel.handleKey(data); } catch {}
+							if (navHandled) {
+								this.renderRlmTuiPanel();
+								this.ui.requestRender();
+								return { consume: true };
+							}
+							const afterNav = getFocused();
+							if (!beforeFocused && afterNav) {
+								this.renderRlmTuiPanel();
+								this.ui.requestRender();
+							}
+							if (navHandled) return { consume: true };
+						}
+					} catch {}
+				}
 				if (panel?.handleKey) {
 					try {
 						const isPrintable = data.length === 1 && data >= " " && data <= "~";

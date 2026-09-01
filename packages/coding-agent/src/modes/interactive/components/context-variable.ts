@@ -5,10 +5,8 @@ import {
 } from "@earendil-works/pi-tui";
 import { theme } from "../theme/theme.js";
 
-const BLOCK = "▓"
-const BLOCK_GAP = "░"
+const BAR = "▎"
 const VERT = "│"
-const GAP_LINE = "  ──────────────────────────────────────────────"
 
 /**
  * Extract actual text content from a value, stripping API format.
@@ -65,11 +63,12 @@ function formatValue(value: any): string {
  * Inline context variable component — renders in the chat flow like
  * user messages, tool calls, and assistant turns. Not a separate panel.
  * Elegant micro-plugin: colored bar ▎ (theme accent/warning/muted per scope),
- * dim separators │, compact preview, expanded badges with theme.fg("dim").
+ * vertical gaps between blocks, focus highlight (block select), dim separators │,
+ * compact preview, expanded badges with theme.fg("dim").
  *
  * Format (collapsed, 1 line):
  *   ▎ let/varName = value-preview (Ctrl+O)
- *
+ *   <vertical gap>
  * Format (expanded):
  *   ▎ let varName [type] scope
  *   │ <full value>
@@ -114,10 +113,10 @@ export class ContextVariableComponent implements Component {
 
 		const scopeBar = (() => {
 			switch (scope) {
-				case "project": return theme.fg("accent", BLOCK)
-				case "session": return theme.fg("warning", BLOCK)
-				case "task": return theme.fg("muted", BLOCK)
-				default: return theme.fg("border", BLOCK)
+				case "project": return theme.fg("accent", BAR)
+				case "session": return theme.fg("warning", BAR)
+				case "task": return theme.fg("muted", BAR)
+				default: return theme.fg("border", BAR)
 			}
 		})()
 		const scopeBadge = (() => {
@@ -156,24 +155,23 @@ export class ContextVariableComponent implements Component {
 		const staticWidth = 2 + kind.length + 1 + this.name.length + 3 + hintCollapsed.length + 1
 		const previewWidth = Math.max(10, width - staticWidth - 1)
 		const valuePreview = truncateToWidth(valueStr.replace(/\n/g, " ").trim(), previewWidth)
-		const collapsedLine = `${scopeBar}${BLOCK_GAP} ${kindStyled} ${nameStyled} ${theme.fg("dim", "=")} ${theme.fg("muted", valuePreview)} ${theme.fg("dim", hintCollapsed)}`
+		const collapsedLine = `${scopeBar} ${kindStyled} ${nameStyled} ${theme.fg("dim", "=")} ${theme.fg("muted", valuePreview)} ${theme.fg("dim", hintCollapsed)}`
 		const wrappedCollapsed = focusWrap(collapsedLine)
 		if (visibleWidth(wrappedCollapsed) > width) {
 			const over = visibleWidth(wrappedCollapsed) - width
 			const adjustedPreviewWidth = Math.max(5, previewWidth - over - 1)
 			const adjPreview = truncateToWidth(valueStr.replace(/\n/g, " ").trim(), adjustedPreviewWidth)
-			const adjLine = `${scopeBar}${BLOCK_GAP} ${kindStyled} ${nameStyled} ${theme.fg("dim", "=")} ${theme.fg("muted", adjPreview)} ${theme.fg("dim", hintCollapsed)}`
+			const adjLine = `${scopeBar} ${kindStyled} ${nameStyled} ${theme.fg("dim", "=")} ${theme.fg("muted", adjPreview)} ${theme.fg("dim", hintCollapsed)}`
 			return [visibleWidth(focusWrap(adjLine)) > width ? truncateToWidth(focusWrap(adjLine), width) : focusWrap(adjLine)]
 		}
 		const result: string[] = [wrappedCollapsed]
 
 		if (!this._expanded) return result
 
-		// Expanded: block header + value lines + gap — colored blocks with spacing
+		// Expanded: bar header + value lines — vertical gaps handled by caller
 		const lines: string[] = []
-		const header = `${scopeBar}${BLOCK_GAP} ${kindStyled} ${nameStyled} ${theme.fg("dim", `[${type}]`)} ${scopeBadge}`
+		const header = `${scopeBar} ${kindStyled} ${nameStyled} ${theme.fg("dim", `[${type}]`)} ${scopeBadge}`
 		lines.push(visibleWidth(header) > width ? truncateToWidth(header, width) : header)
-		lines.push(GAP_LINE)
 
 		// Value lines with dim vertical guide
 		const valueLines = valueStr.split("\n");
@@ -249,27 +247,32 @@ export class ContextVariableGroupComponent implements Component {
 
 		if (!this._expanded) {
 			// Collapsed: O(1) — only first 5, bounded via truncateToWidth in child
-			const lines: string[] = [];
-			const max = Math.min(this.variables.length, COLLAPSED_MAX);
+			const lines: string[] = []
+			const max = Math.min(this.variables.length, COLLAPSED_MAX)
 			for (let i = 0; i < max; i++) {
-				const v = this.variables[i];
-				const comp = new ContextVariableComponent(v.name, v.value, v);
-				lines.push(...comp.render(width));
+				const v = this.variables[i]
+				const comp = new ContextVariableComponent(v.name, v.value, v)
+				lines.push(...comp.render(width))
+				// Vertical gap between blocks (empty line)
+				if (i < max - 1) lines.push("")
 			}
 			if (this.variables.length > COLLAPSED_MAX) {
-				lines.push(`  ${theme.fg("dim", `... +${this.variables.length - COLLAPSED_MAX} more vars (Ctrl+O)`)}`);
+				lines.push(`  ${theme.fg("dim", `... +${this.variables.length - COLLAPSED_MAX} more vars (Ctrl+O)`)}`)
 			}
-			return lines;
+			return lines
 		}
 
 		// Expanded: O(1) window — cap at EXPANDED_MAX (10) to avoid 50k render
 		// Theme colors and visibleWidth/truncateToWidth handled by ContextVariableComponent
 		const lines: string[] = [];
 		const visible = this.variables.length > EXPANDED_MAX ? this.variables.slice(0, EXPANDED_MAX) : this.variables;
-		for (const v of visible) {
+		for (let i = 0; i < visible.length; i++) {
+			const v = visible[i];
 			const comp = new ContextVariableComponent(v.name, v.value, v);
 			comp.setExpanded(true);
 			lines.push(...comp.render(width));
+			// Vertical gap between blocks (empty line)
+			if (i < visible.length - 1) lines.push("");
 		}
 		if (this.variables.length > EXPANDED_MAX) {
 			lines.push(`  ${theme.fg("dim", `... +${this.variables.length - EXPANDED_MAX} more vars (see panel, ↑/↓ to scroll)`)}`);
@@ -278,11 +281,19 @@ export class ContextVariableGroupComponent implements Component {
 	}
 
 	get height(): number {
-		// Bounded height: O(1) — collapsed ≤6, expanded ≤ ~10*3+1, never 50k*3
-		if (!this._expanded) {
-			return Math.min(this.variables.length, COLLAPSED_MAX) + (this.variables.length > COLLAPSED_MAX ? 1 : 0);
+		// Bounded height: sum of child heights + gap lines
+		const count = this.variables.length;
+		if (count === 0) return 0;
+		const visibleCount = this._expanded ? Math.min(count, EXPANDED_MAX) : Math.min(count, COLLAPSED_MAX);
+		let h = 0;
+		for (let i = 0; i < visibleCount; i++) {
+			const comp = new ContextVariableComponent(this.variables[i].name, this.variables[i].value, this.variables[i]);
+			if (this._expanded) comp.setExpanded(true);
+			h += comp.height;
+			if (i < visibleCount - 1) h++; // gap line between blocks
 		}
-		const visibleCount = Math.min(this.variables.length, EXPANDED_MAX);
-		return visibleCount * 3 + (this.variables.length > EXPANDED_MAX ? 1 : 0);
+		if (count > COLLAPSED_MAX && !this._expanded) h++; // more vars line
+		if (count > EXPANDED_MAX && this._expanded) h++; // more vars line
+		return h;
 	}
 }
