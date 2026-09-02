@@ -272,8 +272,15 @@ export class RlmDelegateService extends Service {
 						rows.push({ state: task.state, id: task.id, title: task.title, graph: id, why: task.reason?.split("\n")[0] });
 					}
 				}
-				const only = argv.slice(1).filter((a) => !a.startsWith("-"));
-				const shown = only.length ? rows.filter((r) => only.some((o) => r.state === o || r.id.includes(o))) : rows;
+				// Matched against the label he can see as well as the state
+				// underneath it, and case-insensitively: `rlm tasks FAILED`
+				// silently matched nothing because the label is shouted and the
+				// state is not, which is a filter that lies about an empty result.
+				const only = argv.slice(1).filter((a) => !a.startsWith("-")).map((a) => a.toLowerCase());
+				const shown = only.length
+					? rows.filter((r) => only.some((o) => r.state.toLowerCase() === o || (mark[r.state] ?? "").toLowerCase() === o || r.id.toLowerCase().includes(o)))
+					: rows;
+				if (only.length && !shown.length) console.log(`  nothing matches ${only.join(", ")} — states are: ${[...new Set(rows.map((r) => mark[r.state] ?? r.state))].join(", ")}`);
 				shown.sort((a, b) => (rank[a.state] ?? 9) - (rank[b.state] ?? 9) || a.id.localeCompare(b.id));
 
 				const verbose = argv.includes("--why");
