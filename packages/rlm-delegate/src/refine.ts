@@ -66,7 +66,30 @@ no criterion, because it turns an open job into a false receipt.
 
 If one task must not start until another finishes, say so in \`needs\`. Do not
 express ordering in the prose; nobody reads prose to schedule.
-`;
+
+
+The criterion is the hard part, and it is where every plan here has failed.
+Four ways it goes wrong, all observed, all of which get the plan refused:
+
+  1. It already passes. A check that is true before anybody starts is a
+     receipt, not a criterion. Ask yourself: would this command exit non-zero
+     right now, on the current tree? If not, it measures nothing.
+  2. It fails the same way with and without the work. "agent-browser search"
+     exited non-zero forever because there is no "search" subcommand — the
+     task could never pass however well it was done. Name a command you know
+     exists, with a subcommand you have seen in its help.
+  3. It points somewhere that will not be there. A path under /tmp or in the
+     agent's working directory exists only for the run that wrote it. Name a
+     durable path.
+  4. It checks something adjacent to the ask rather than the ask. "Did a file
+     get written" when the request was "does the command work" will pass while
+     the thing he wanted is still broken. Check the effect he asked for.
+
+Prefer a criterion whose verdict changes the moment the work is done, and
+which a stranger could run without knowing anything about how it was done.
+If you genuinely cannot write one, say so with {"kind":"unstated","note":"..."}
+rather than inventing a check that cannot fail — an honest unstated is worth
+more than a criterion that lies, and it becomes a question for him instead.`;
 
 /**
  * A criterion that already passes is not a criterion.
