@@ -221,6 +221,37 @@ export const run = async (
 				return;
 			}
 
+			// A criterion that fails byte-identically to how it failed before any
+			// of the work existed has been shown, not guessed, to be independent
+			// of the work. Charging that to the agent is how a broken check turns
+			// into a failed task and a cascade of unreachable ones behind it —
+			// `agent-browser … search …` has no `search` subcommand, so no amount
+			// of runway data was ever going to move it. Stop here and ask about
+			// the criterion, exactly as when it could not be run at all.
+			if (
+				verdict.verdict === "failed" &&
+				task.proof?.kind === "shell" &&
+				task.proof.inertIf &&
+				verdict.detail === task.proof.inertIf
+			) {
+				detail = `the criterion cannot tell whether this was done — ${verdict.detail}`;
+				record = { ...record, ok: false, detail, shape: shapeOf(detail) };
+				store.ended(graphId, task.id, "failed", record, {
+					reason:
+						`this check failed in exactly the same way before anybody started, so it is not ` +
+						`measuring the work: ${verdict.detail}. The work may well be done. Replace the ` +
+						`criterion with one whose answer can depend on it, using answer().`,
+				});
+				say("rlm/delegate-asked", {
+					graph: graphId,
+					task: task.id,
+					title: task.title,
+					why: "the criterion is inert — it fails the same with and without the work",
+					detail: verdict.detail,
+				});
+				return;
+			}
+
 			if (verdict.verdict !== "passed") {
 				ok = false;
 				detail = `it reported done, but the criterion did not hold — ${verdict.detail}`;

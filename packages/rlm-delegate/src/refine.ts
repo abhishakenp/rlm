@@ -105,6 +105,28 @@ export const alreadyTrue = async (
 	return found;
 };
 
+/**
+ * What each shell criterion printed *before* any of the work existed.
+ *
+ * Recorded on the proof as `inertIf`. Later, a criterion that fails with the
+ * exact same output has been shown to be independent of the work — it is not
+ * evidence that the work failed, it is evidence that the check never measured
+ * it. Nothing here judges: it only writes down what was true at the one moment
+ * when the answer is known for certain.
+ */
+export const noteBaselines = async (tasks: TaskInput[], cwd?: string): Promise<void> => {
+	for (const task of tasks) {
+		if (task.proof?.kind !== "shell") continue;
+		try {
+			const verdict = await check(task.proof, { cwd });
+			if (verdict.verdict === "failed") task.proof.inertIf = verdict.detail;
+		} catch {
+			/* a criterion that will not run at all is a separate fault, left to the
+			   run itself to report; guessing a baseline here would invent one. */
+		}
+	}
+};
+
 export const parsePlan = (text: string): TaskInput[] => {
 	const match = String(text ?? "").match(/\[[\s\S]*\]/);
 	if (!match) throw new Error("the planner returned no JSON array");
@@ -171,6 +193,12 @@ export const refineOne = async (
 				continue;
 			}
 		}
+
+		// The plan is about to be accepted, so this is the last moment at which
+		// "before the work" is still true. Every shell criterion is run once and
+		// what it printed is kept, so a later identical failure can be told
+		// apart from a real one.
+		await noteBaselines(tasks, options.cwd);
 
 		try {
 			store.refine(graph.id, task.id, tasks);

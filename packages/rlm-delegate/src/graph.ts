@@ -49,7 +49,18 @@ export type TaskState =
  */
 export type Proof =
 	/** Exit zero. A test, a build, a command that actually does the thing. */
-	| { kind: "shell"; run: string; cwd?: string; timeoutMs?: number }
+	/**
+	 * A command exits zero.
+	 *
+	 * `inertIf` is what the command printed when it was run *before* any work
+	 * existed. A criterion is only a criterion if its verdict can depend on the
+	 * work; one that fails byte-identically before and after distinguishes
+	 * nothing, and reading that as "the work failed" is how a broken check gets
+	 * charged to the agent. `agent-browser … search …` exited the same way twice
+	 * because there is no `search` subcommand, and three tasks were marked
+	 * unreachable behind it.
+	 */
+	| { kind: "shell"; run: string; cwd?: string; timeoutMs?: number; inertIf?: string }
 	/**
 	 * A file exists, and optionally contains something — or has been touched
 	 * since a moment that was noted before the work started. `changedSince` is

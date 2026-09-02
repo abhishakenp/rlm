@@ -20,7 +20,7 @@ import { check } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/proof.ts";
 import { Gate, Stop } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/stop.ts";
 import { diagnose } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/lapse.ts";
 import { askIn, derive } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/derive.ts";
-import { alreadyTrue } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/refine.ts";
+import { alreadyTrue, noteBaselines } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/refine.ts";
 
 let pass = 0, fail = 0;
 const t = (name: string, fn: () => void) => {
@@ -538,9 +538,6 @@ console.log("\nbeing cut off is not the same as being refused");
 		eq(diagnose([], "it reported done, but the criterion did not hold — x is not registered").cause, "only-after-the-fact"));
 }
 
-console.log(`\n${pass} passed, ${fail} failed`);
-if (fail) process.exit(1);
-
 // ─────────────────────────────────────────────────────────────────────────────
 console.log("\nan empty list of graph ids means every graph, not none");
 {
@@ -582,3 +579,55 @@ console.log("\nan empty list of graph ids means every graph, not none");
 			renderReport({ ...report, graphs: 0, ended: "settled" }).split("\n")[0],
 		));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\na criterion that fails the same with and without the work is not a criterion");
+{
+	// The real one: `agent-browser --headless --engine lightpanda search …`.
+	// There is no `search` subcommand, so it exited non-zero before anybody
+	// looked at a runway and would have exited non-zero after. It was recorded
+	// as the agent failing twice, and three tasks went unreachable behind it.
+	const store = new Store(path.join(DIR, "inert"));
+	const work = path.join(DIR, "inert-work");
+	fs.mkdirSync(work, { recursive: true });
+
+	// Exactly the real order: the plan exists, the baseline is taken while
+	// "before the work" is still true, and only then is any of it written down.
+	const plan: any[] = [
+		{
+			id: "collect",
+			title: "collect it",
+			prompt: "collect it",
+			// Nothing the runner can do changes this. It is a broken check, not
+			// a hard job.
+			proof: { kind: "shell", run: "definitely-not-a-real-command --search", cwd: work },
+		},
+	];
+	await noteBaselines(plan, work);
+	t("the baseline of a failing criterion is written down at acceptance", () =>
+		ok(plan[0].proof.inertIf, JSON.stringify(plan[0].proof)));
+	store.create("collect the data", plan);
+	const id = store.ids().find((g) => store.load(g)!.tasks.some((t) => t.id === "collect"))!;
+
+	let handed = 0;
+	const report = await drive(store, {
+		runner: async () => {
+			handed += 1;
+			// The work really is done — it just cannot be seen by this check.
+			fs.writeFileSync(path.join(work, "runway.json"), "[]\n", "utf8");
+			return "collected";
+		},
+		stop: stopFor("inert"),
+		maxSweeps: 4,
+	});
+
+	const after = store.load(id)!.tasks.find((t) => t.id === "collect")!;
+	t("it is not retried against a check that cannot move", () => eq(handed, 1, `handed=${handed}`));
+	t("the reason names the criterion, not the agent", () =>
+		ok(/not measuring the work/.test(after.reason ?? ""), after.reason ?? "(no reason)"));
+	t("and it is asked about rather than silently left failing", () =>
+		ok(report.questions.some((q) => q.task.id === "collect"), JSON.stringify(report.questions.map((q) => q.task.id))));
+}
+
+console.log(`\n${pass} passed, ${fail} failed`);
+if (fail) process.exit(1);
