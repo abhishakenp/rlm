@@ -162,12 +162,6 @@
 # the delegator workflow itself.
 - id: delegate
   name: './packages/rlm-delegate/src/index.ts'
-  config:
-    # concurrency is deliberately absent: left unset, the limit is measured from
-    # this machine between tasks — descriptors first, since that is what wedged
-    # it — and anything over the limit waits in the journal instead of being
-    # refused. Set it to a number to pin it.
-    headroomFloor: 0.2
 
 - id: learn
   name: './packages/rlm-learn/src/index.ts'
