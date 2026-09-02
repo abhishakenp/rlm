@@ -38,6 +38,10 @@ import { capacity, explain as explainCapacity, type CapacityVerdict } from "./ca
 import { derive } from "./derive.ts";
 import { check, type Probe } from "./proof.ts";
 import { run as runGraph, type Runner, type RunOptions } from "./scheduler.ts";
+import { drive as driveGraphs, renderReport, type DriveOptions, type DriveReport } from "./drive.ts";
+import { impasses, renderImpasses, type Impasse } from "./impasse.ts";
+import { rlmAgent } from "./agent.ts";
+import { Stop } from "./stop.ts";
 import { Store, defaultDir } from "./store.ts";
 
 export const name = "rlm-delegate";
@@ -53,6 +57,10 @@ export interface RlmDelegateConfig {
 	skeletonPath?: string;
 	teachSkeleton?: boolean;
 	cwd?: string;
+	stopFile?: string;
+	entry?: string;
+	attemptTimeoutMs?: number;
+	maxSweeps?: number;
 }
 
 export const configFields = [
@@ -104,6 +112,30 @@ export const configFields = [
 		description: "Where relative paths in a request are resolved from when reading a criterion out of it. Defaults to the process working directory.",
 	},
 	{
+		key: "stopFile",
+		type: "string",
+		description:
+			"The file that stops the drive. Defaults to ~/Desktop/.rlm-drive-off, next to Iris's own kill switch and for the same reason: it has to work when you are annoyed and not at a terminal. ~/Desktop/.iris-autonomy-off stops it too, and is never written by rlm.",
+	},
+	{
+		key: "entry",
+		type: "string",
+		description: "rlm's own entry point, used by the default runner to hand a task to a fresh rlm in print mode. Defaults to the cordis-shell.mjs this process was started from.",
+	},
+	{
+		key: "attemptTimeoutMs",
+		type: "number",
+		default: 2700000,
+		description:
+			"Give up on one attempt after this long and kill the whole process group. Forty-five minutes, not the fifteen that was there before: a fifteen-minute ceiling killed every multi-task delegation partway through and every one of them came back reading like incapacity.",
+	},
+	{
+		key: "maxSweeps",
+		type: "number",
+		default: 25,
+		description: "The hard bound on one drive. A sweep only happens because the last one changed something, so reaching this means something is oscillating.",
+	},
+	{
 		key: "skeletonPath",
 		type: "string",
 		description: "The delegator loop's own source, shown to the agent as the shape of the flow. Read when the prompt is built, never copied.",
@@ -130,6 +162,7 @@ export class RlmDelegateService extends Service {
 	declare config: RlmDelegateConfig;
 
 	private store!: Store;
+	private mode: { dispose(): void } | null = null;
 	private teardowns = new Set<() => void>();
 
 	constructor(ctx: any, config: RlmDelegateConfig = {}) {
@@ -145,6 +178,7 @@ export class RlmDelegateService extends Service {
 		// time the prompt row reloads.
 		this.ctx.effect(() => {
 			return () => {
+				this.mode = null;
 				for (const off of this.teardowns) {
 					try {
 						off();
@@ -157,8 +191,10 @@ export class RlmDelegateService extends Service {
 		}, "rlm-delegate prompt fragments");
 
 		this.attachPrompt();
+		this.attachMode();
 		const reattach = this.ctx.on?.("internal/service", (key: string) => {
 			if (key === "rlmPrompt") this.attachPrompt();
+			if (key === "rlmModes") this.attachMode();
 		});
 		if (typeof reattach === "function") this.teardowns.add(reattach);
 
@@ -202,6 +238,50 @@ export class RlmDelegateService extends Service {
 			});
 			if (skeleton?.dispose) this.teardowns.add(() => skeleton.dispose());
 		}
+	}
+
+	/**
+	 * `rlm drive`, `rlm drive stop`, `rlm drive status` — one obvious command.
+	 *
+	 * A surface rather than a script, so the stop is reachable through the
+	 * binary he already has on PATH. Priority above `print` because `print`
+	 * claims any invocation with nothing on a TTY, which includes this one.
+	 */
+	private attachMode() {
+		const modes = this.ctx.get?.("rlmModes") as any;
+		if (!modes?.register || this.mode) return;
+		const handle = modes.register({
+			id: "drive",
+			priority: 60,
+			claims: (argv: string[]) => argv[0] === "drive",
+			run: async (argv: string[]) => {
+				const verb = argv[1] ?? "start";
+				if (verb === "stop") {
+					console.log(`stopped — ${this.stop(argv.slice(2).join(" ") || "stopped by hand")} is now there; delete it to resume`);
+					return 0;
+				}
+				if (verb === "resume") {
+					console.log(this.resume() ? "resumed" : "it was not stopped");
+					return 0;
+				}
+				if (verb === "status") {
+					const halted = this.stopped();
+					console.log(halted ? `STOPPED — ${halted}` : "running is allowed");
+					console.log(this.status());
+					const asking = this.impasses();
+					if (asking.length) console.log(renderImpasses(asking));
+					return 0;
+				}
+				const report = await this.drive({
+					follow: argv.includes("--follow"),
+					only: argv.filter((a) => a.startsWith("g-")),
+				});
+				console.log(renderReport(report));
+				return report.owed.length ? 1 : 0;
+			},
+		});
+		this.mode = handle;
+		if (handle?.dispose) this.teardowns.add(() => handle.dispose());
 	}
 
 	/** What is still owed, read from disk every time the prompt is built. */
@@ -320,6 +400,11 @@ export class RlmDelegateService extends Service {
 	 */
 	intake(request: string, options: { source?: string; taskId?: string } = {}): { graph: Graph; taskId: string } | null {
 		if (this.config.enabled === false) return null;
+		// An attempt the drive is making is already journalled against the task
+		// it belongs to. Recording it again here as a fresh top-level request
+		// would mean working the backlog lengthens it, once per attempt, without
+		// end — see agent.ts.
+		if (process.env.RLM_DELEGATE_CHILD) return null;
 		const text = String(request ?? "").trim();
 		if (!text) return null;
 		const taskId = options.taskId ?? "the-request";
@@ -550,6 +635,94 @@ export class RlmDelegateService extends Service {
 		});
 	}
 
+	// ─── The drive ───────────────────────────────────────────────────────────
+
+	/** How this drive is stopped, and by whom. */
+	stopper(): Stop {
+		return new Stop({ file: this.config.stopFile });
+	}
+
+	/** Stop the drive, right now, whatever is running. Creates the file. */
+	stop(why = "stopped by hand"): string {
+		const file = this.stopper().raise(why);
+		this.ctx.emit?.("rlm/drive-halted", { file, why });
+		this.ctx.logger?.warn?.(`rlm-delegate: stopped — ${file} is now there; delete it to resume`);
+		return file;
+	}
+
+	/** Take our own stop file away. Iris's is hers. */
+	resume(): boolean {
+		const lowered = this.stopper().lower();
+		if (lowered) this.ctx.emit?.("rlm/drive-halted", { file: this.config.stopFile, why: null });
+		return lowered;
+	}
+
+	stopped(): string | null {
+		return this.stopper().reason();
+	}
+
+	/** Every job that is stopped and needs one sentence from a person. */
+	impasses(): Impasse[] {
+		return impasses(this.open());
+	}
+
+	/**
+	 * Work everything that is owed, without being asked which.
+	 *
+	 * This is the half that was missing. The graph could not forget and the
+	 * criterion could tell done from claimed, and the backlog still did not
+	 * move, because both of them waited for somebody to name a graph id.
+	 *
+	 * The default runner hands each task to a fresh rlm in print mode, in its
+	 * own process, so a task that wedges takes a child down rather than the
+	 * thing keeping the list.
+	 */
+	async drive(options: Partial<DriveOptions> = {}): Promise<DriveReport> {
+		if (this.config.enabled === false) throw new Error("rlm-delegate is switched off");
+		const stop = options.stop ?? this.stopper();
+		const makeRunner =
+			options.makeRunner ??
+			((signal: AbortSignal) =>
+				rlmAgent({
+					entry: this.config.entry ?? process.argv[1],
+					cwd: this.config.cwd ?? process.cwd(),
+					timeoutMs: this.config.attemptTimeoutMs ?? 2_700_000,
+					signal,
+				}));
+
+		// The planner is the same agent, asked a different question. Cheap to
+		// build here and worth having by default: without one, a request that is
+		// fifteen jobs in a paragraph can only become a question.
+		const makePlanner =
+			options.makePlanner ??
+			((signal: AbortSignal) => {
+				const ask = rlmAgent({
+					entry: this.config.entry ?? process.argv[1],
+					cwd: this.config.cwd ?? process.cwd(),
+					timeoutMs: Math.min(this.config.attemptTimeoutMs ?? 2_700_000, 600_000),
+					signal,
+				});
+				return (prompt: string, task: any, graph: any) => ask({ ...task, prompt }, graph);
+			});
+
+		const report = await driveGraphs(this.store, {
+			probe: this.probe(),
+			cwd: this.config.cwd,
+			maxAttempts: this.config.maxAttempts ?? 3,
+			repeatFloor: this.config.repeatFloor ?? 2,
+			maxSweeps: this.config.maxSweeps ?? 25,
+			concurrency:
+				typeof this.config.concurrency === "number" ? this.config.concurrency : () => this.capacity().limit,
+			onEvent: (event, data) => this.ctx.emit?.(event, data),
+			...options,
+			makeRunner: options.runner ? undefined : makeRunner,
+			makePlanner: options.planner ? undefined : makePlanner,
+			stop,
+		});
+		this.ctx.logger?.info?.(renderReport(report));
+		return report;
+	}
+
 	// ─── The reviewer's seam ─────────────────────────────────────────────────
 
 	/**
@@ -608,3 +781,11 @@ export { run as runGraph, effectivePrompt, type Runner, type RunOptions } from "
 export { check as checkProof, type Probe, type ProofResult } from "./proof.ts";
 export { judge, shapeOf, similarity, normalise, carry } from "./lapse.ts";
 export { capacity, readings, explain as explainCapacity, type CapacityVerdict, type Reading } from "./capacity.ts";
+export { drive, renderReport, type DriveOptions, type DriveReport } from "./drive.ts";
+export { impasses, renderImpasses, type Impasse, type ImpasseKind } from "./impasse.ts";
+export { Stop, Gate, DESKTOP_STOP, IRIS_STOP } from "./stop.ts";
+export { rlmAgent, type AgentOptions } from "./agent.ts";
+export { refineOne, needsRefining, parsePlan, PLAN_INSTRUCTIONS, type Planner } from "./refine.ts";
+export { askIn } from "./derive.ts";
+export { diagnose, type Diagnosis, type Carrier, type CauseKind } from "./lapse.ts";
+export { nextAttempt } from "./scheduler.ts";

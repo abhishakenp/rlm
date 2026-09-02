@@ -155,6 +155,105 @@ words and the evidence that satisfied it; `review(graphId, taskId, verdict, by,
 reason)` records the answer. A rejection is treated exactly like a failure. No
 reviewer is implemented here.
 
+## The drive — the part that is not asked
+
+Everything above could not forget, and the backlog still did not move, because
+all of it waited to be asked. `run(graphId)` needs a graph id from somebody who
+went and looked; nothing ever went and looked. Iris was handed the same fifteen
+jobs roughly twelve times in one night and finished none of them.
+
+`drive()` is the loop that is not asked. It reads what is owed off the disk,
+across **every** graph, works all of it against one shared budget, and comes
+back with each task either proven done or stopped with a specific question
+against its name.
+
+```
+rlm drive            work everything that is owed
+rlm drive --follow   and keep waiting for more
+rlm drive status     what is owed, and what is waiting on him
+rlm drive stop       stop it, now
+rlm drive resume
+```
+
+It is bounded three ways, independently: attempts per task, sweeps per run, and
+a stop file it re-reads before every single task. A sweep only happens because
+the last one changed something — `fingerprint()` compares the whole store before
+and after — so "nothing moved" ends the run instead of repeating it.
+
+### Refining first, because a paragraph is not a criterion
+
+On real traffic every recorded request is fifteen jobs written as prose, and no
+single command exits zero when "the backlog" is done. So before the drive gives
+up on a request nobody can judge, it asks a model for the one thing a model is
+needed for: what the separate jobs are, what each depends on, and how anybody
+could tell each is finished. Only on `unstated`, only written down if the graph
+accepts the plan — a decomposition that gets refused leaves the task exactly as
+it was, because a bad plan on disk looks like progress.
+
+The ask is cut out of the envelope first (`askIn`). Her preamble is eleven
+kilobytes; his words are the two lines under `## The request`. Handing a planner
+the whole envelope gets a plan for the instructions.
+
+### What a retry is, and is not
+
+Not the same prompt. Not the same prompt with the error stapled to it either —
+that is the same attempt with more words. Which **carrier** of the guidance
+failed decides what changes, the way `@iris/lapse` decides it: `standing` (the
+task text, written before anybody tried), `in-turn` (the failure carried next to
+the decision), `posthoc` (the criterion — it can refuse, it cannot redirect) and
+`affordance` (whether the thing reached for was there at all).
+
+| what the last failure was | the cause | what the next attempt is told |
+|---|---|---|
+| it was killed, or ran out of time | `cut-off` | it was not refused — do the smallest provable piece first, and check what is already there |
+| it reported done, the criterion said no | `only-after-the-fact` | run the check yourself before saying anything |
+| what it reached for was not there | `not-offered` | establish what *does* exist first; that route is closed |
+| anything else, first time | `never-carried` | here is how it failed |
+| the same shape survived a changed approach | `exhausted` | nothing — this is a question now |
+
+`cut-off` is not a nicety. A fifteen-minute delegation ceiling killed every
+multi-task backlog partway through, and each one came back as a failure whose
+sentence said nothing about time; reading those as refusals is how a bound gets
+mistaken for incapacity.
+
+### When it stops and asks
+
+The judgement is written out in `impasse.ts`, and it is a rule about
+information, not effort: **another attempt is worth making only if it would have
+something the last one did not.** New failure shape → hard, retry. Repeated
+shape → hard, but a different carrier gets it. Same shape after a changed
+approach, or the budget spent → stop and ask.
+
+Three things are asked about with no attempt spent at all, because no attempt
+could move them: nobody said how to tell (a standard cannot be invented from
+below); the criterion cannot be *run* from here (the work may well be done —
+retrying it does not make the checker able to see); and it stands on something
+that died. Every one of them is a question with the sentence to put to him, on
+disk in `QUESTIONS.md`, and answering any of them puts the task straight back
+into the pool.
+
+### Stopping it
+
+A file, the way `@iris/autonomy` does it, because it has to work when you are
+annoyed and not at a terminal:
+
+```
+~/Desktop/.rlm-drive-off      this drive        (`rlm drive stop` writes it)
+~/Desktop/.iris-autonomy-off  Iris's own switch (honoured, never written)
+```
+
+Checked with `existsSync` before every task and on a one-second poll, never
+cached. The drive's own abort signal reaches the runner, so a fifteen-minute
+attempt already in the air is killed too — and the default runner kills the
+whole process group, because rlm re-executes itself under tsx and killing the
+child alone leaves the grandchild holding the machine.
+
+Attempts run in their own process. A task hands the machine to an agent that
+spawns things and writes files; when that goes wrong it should take a child down
+and not the thing keeping the list. `RLM_DELEGATE_CHILD` is set in that child so
+its `--print` is not recorded at the door as a fresh request — without it,
+working the backlog lengthens it, once per attempt, for ever.
+
 ## Parallelism, and the queue
 
 Two tasks with no path between them run at the same time — the graph is what
@@ -207,7 +306,10 @@ journalled fact rather than a rendering.
 | `answer(graphId, taskId, proof, by?)` | Record how to judge it, and put it back into the pool. |
 | `declare(goal, tasks, id?)` | Write down what was asked. Throws — before writing — on a cycle, an unknown dependency, or a missing criterion. |
 | `add(graphId, tasks)` | Extend a graph, refusing a cycle across the whole thing. |
-| `run(graphId, runner?, options?)` | Work it. Defaults to `rlmSdk.spawn` per task. |
+| `run(graphId, runner?, options?)` | Work one graph. Defaults to `rlmSdk.spawn` per task. |
+| `drive(options?)` | Work **everything** that is owed, unasked, until proven or asked. |
+| `impasses()` | Everything that is stopped and needs one sentence from a person. |
+| `stop(why?)` / `resume()` / `stopped()` | The kill switch, as a file. |
 | `status(graphId?)` | A one-screen account, including what did not happen. |
 | `open()` / `ids()` / `get(id)` | What is still owed. |
 | `verify(graphId, taskId)` | Run one criterion now, without touching the graph. |
@@ -239,9 +341,15 @@ Two fragments, both read from disk when the prompt is built and never at mount:
 node --experimental-strip-types packages/rlm-delegate/index.test.ts
 node --experimental-strip-types packages/rlm-delegate/intake.test.ts
 node --experimental-strip-types packages/rlm-delegate/workflow.test.ts
+node --experimental-strip-types packages/rlm-delegate/drive.test.ts
 ```
 
 The first proves the graph cannot forget — including a child process that really
 does `SIGKILL` itself mid-graph. The second proves the boundary records a request
 before the model runs, and still records it when the model throws. The third
-drives the delegator workflow end to end against a stand-in for the model.
+drives the delegator workflow end to end against a stand-in for the model. The
+fourth is the drive: three owed tasks across three graphs finished unattended
+with every criterion re-run afterwards by somebody else, a criterion that cannot
+pass bounded and turned into a question, a retry whose difference from its
+predecessor is journalled and pointed at, and the stop file killing an attempt
+that was already in the air.

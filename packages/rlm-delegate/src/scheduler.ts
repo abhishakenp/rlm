@@ -19,7 +19,7 @@
  */
 import { capacity as measure } from "./capacity.ts";
 import { runnable, settle, type Attempt, type Graph, type Task } from "./graph.ts";
-import { carry, judge, shapeOf } from "./lapse.ts";
+import { diagnose, judge, shapeOf, type Diagnosis } from "./lapse.ts";
 import { check, type Probe } from "./proof.ts";
 import type { Store } from "./store.ts";
 
@@ -49,20 +49,64 @@ export interface RunOptions {
 	onEvent?: (event: string, data: Record<string, unknown>) => void;
 	/** Stop early. Whatever was journalled stays journalled. */
 	signal?: AbortSignal;
+	/**
+	 * One budget shared with everything else running.
+	 *
+	 * `concurrency` caps this graph; a machine working several graphs at once
+	 * needs a cap across all of them, or three graphs of two tasks each is six
+	 * agents on a laptop that measured room for two. The drive passes one gate
+	 * to every graph it works; on its own, a graph does not need one.
+	 */
+	gate?: { take(): Promise<() => void> };
+	/**
+	 * Refuse a task before it is handed to anybody. Return a sentence and the
+	 * task is left alone, still owed, with that sentence on it — never quietly
+	 * dropped. This is where a fence plugs in.
+	 */
+	fence?: (task: Task, graph: Graph) => string | null | undefined;
 }
 
 /**
- * The prompt a retry actually gets.
+ * The prompt a retry actually gets, and why it is not the last one.
  *
- * Never the same text a second time. If the last attempt failed, how it failed
- * is carried into the task text itself — next to the decision, not up in a
- * system prompt somewhere above it. Handing back an identical prompt is how an
- * agent fails the same way six times.
+ * Never the same text a second time, and — the part that matters — never the
+ * same text with the error stapled on either. Which carrier of the guidance
+ * failed decides what changes: a criterion that refused work the agent thought
+ * it had finished is a different problem from a command that was not there, and
+ * "here is the error, try again" is the right answer to neither.
+ *
+ * See `diagnose` in lapse.ts. The failure text is always included as well, at
+ * the bottom, because a directive with no evidence under it is just an opinion.
  */
-export const effectivePrompt = (task: Task): string => {
+export const nextAttempt = (task: Task, options: { similarity?: number } = {}): {
+	prompt: string;
+	diagnosis: Diagnosis | null;
+} => {
 	const lastFailure = [...task.attempts].reverse().find((a) => !a.ok);
-	return lastFailure ? carry(task.prompt, lastFailure.detail) : task.prompt;
+	if (!lastFailure) return { prompt: task.prompt, diagnosis: null };
+
+	const earlier = task.attempts.filter((a) => a !== lastFailure);
+	const diagnosis = diagnose(earlier, lastFailure.detail, options);
+	return {
+		prompt: [
+			task.prompt,
+			"",
+			`## This is attempt ${task.attempts.length + 1}. The last one failed, and this is what has to be different.`,
+			"",
+			diagnosis.sentence.charAt(0).toUpperCase() + diagnosis.sentence.slice(1) + ".",
+			"",
+			...diagnosis.directive,
+			"",
+			"How the last attempt ended, verbatim:",
+			"",
+			lastFailure.detail.split("\n").slice(0, 20).join("\n").trim(),
+		].join("\n"),
+		diagnosis,
+	};
 };
+
+/** Kept for callers that only want the text. */
+export const effectivePrompt = (task: Task): string => nextAttempt(task).prompt;
 
 export const run = async (
 	store: Store,
@@ -79,6 +123,8 @@ export const run = async (
 	};
 	let announced = -1;
 	const inFlight = new Map<string, Promise<void>>();
+	/** Refused by the fence this run. Still owed; simply not touched by us. */
+	const fenced = new Map<string, string>();
 
 	const load = (): Graph => {
 		const graph = store.load(graphId, { recoverRunning: false });
@@ -109,20 +155,32 @@ export const run = async (
 
 	const attempt = async (task: Task, graph: Graph): Promise<void> => {
 		const at = new Date().toISOString();
+		const { prompt, diagnosis } = nextAttempt(task, { similarity: options.similarity });
 		store.began(graphId, task.id, at);
-		say("rlm/delegate-began", { graph: graphId, task: task.id, title: task.title, at });
+		say("rlm/delegate-began", {
+			graph: graphId,
+			task: task.id,
+			title: task.title,
+			at,
+			attempt: task.attempts.length + 1,
+			approach: diagnosis?.cause,
+		});
 
 		let ok = false;
 		let detail = "";
+		const release = options.gate ? await options.gate.take() : () => {};
 		try {
-			detail = await runner({ ...task, prompt: effectivePrompt(task) }, graph);
+			if (options.signal?.aborted) throw new Error("stopped before this attempt started");
+			detail = await runner({ ...task, prompt }, graph);
 			ok = true;
 		} catch (error: any) {
 			detail = String(error?.stack ?? error?.message ?? error);
+		} finally {
+			release();
 		}
 
 		// Coming back is not finishing.
-		let record: Attempt = { at, endedAt: new Date().toISOString(), ok, detail };
+		let record: Attempt = { at, endedAt: new Date().toISOString(), ok, detail, approach: diagnosis?.cause };
 		if (ok) {
 			const verdict = await check(task.proof, { cwd: options.cwd, probe: options.probe, needsAllDone: true });
 			record = { ...record, proof: verdict.verdict as Attempt["proof"], proofDetail: verdict.detail };
@@ -136,6 +194,30 @@ export const run = async (
 					reason: `it came back, and ${verdict.detail}`,
 				});
 				say("rlm/delegate-unproven", { graph: graphId, task: task.id, title: task.title });
+				return;
+			}
+
+			// A criterion that could not be RUN is a different thing from one that
+			// ran and said no. Blaming the agent for a blind checker spends the
+			// whole attempt budget on work that may well already be finished, and
+			// the next attempt cannot possibly change it — nothing an agent does
+			// makes this process able to see a registry it is not connected to.
+			// So it stops here, with the question pointed at the criterion.
+			if (verdict.verdict === "errored") {
+				detail = `the criterion could not be checked — ${verdict.detail}`;
+				record = { ...record, ok: false, detail, shape: shapeOf(detail) };
+				store.ended(graphId, task.id, "failed", record, {
+					reason:
+						`no attempt can settle this: ${verdict.detail}. The work may well be done; nothing here ` +
+						`can tell. Give it a criterion this process can run, with answer().`,
+				});
+				say("rlm/delegate-asked", {
+					graph: graphId,
+					task: task.id,
+					title: task.title,
+					why: "the criterion cannot be checked from here",
+					detail: verdict.detail,
+				});
 				return;
 			}
 
@@ -165,6 +247,13 @@ export const run = async (
 		} else {
 			store.ended(graphId, task.id, "failed", record, { reason: `${verdict.why}\n${detail}`.trim() });
 			say("rlm/delegate-failed", { graph: graphId, task: task.id, repeats: verdict.repeats, reason: verdict.why });
+			say("rlm/delegate-asked", {
+				graph: graphId,
+				task: task.id,
+				title: task.title,
+				why: verdict.why,
+				detail: record.shape,
+			});
 		}
 	};
 
@@ -177,7 +266,7 @@ export const run = async (
 		if (options.signal?.aborted) break;
 
 		const graph = load();
-		const ready = runnable(graph.tasks).filter((t) => !inFlight.has(t.id));
+		const ready = runnable(graph.tasks).filter((t) => !inFlight.has(t.id) && !fenced.has(t.id));
 		const concurrency = await limitNow();
 		if (concurrency !== announced) {
 			announced = concurrency;
@@ -193,6 +282,14 @@ export const run = async (
 
 		while (ready.length && inFlight.size < concurrency) {
 			const task = ready.shift()!;
+			const refusal = options.fence?.(task, graph);
+			if (refusal) {
+				// Left alone, still `ready`, with the refusal on it. A fence that
+				// makes work disappear is the same bug as no queue at all.
+				fenced.set(task.id, refusal);
+				say("rlm/delegate-fenced", { graph: graphId, task: task.id, refusal });
+				continue;
+			}
 			const promise = attempt(task, graph).finally(() => inFlight.delete(task.id));
 			inFlight.set(task.id, promise);
 		}

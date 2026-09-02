@@ -119,3 +119,155 @@ export const carry = (prompt: string, failure: string): string =>
 		"The previous attempt at this exact task failed. Do not repeat it:",
 		failure.split("\n").slice(0, 20).join("\n").trim(),
 	].join("\n");
+
+// ─── Which carrier of the guidance failed ───────────────────────────────────
+//
+// `judge()` above answers "is another go worth anything?". It does not answer
+// the more useful question: *what should be different about the next one?*
+//
+// `@iris/lapse` answers that with a model of carriers — the positions guidance
+// can occupy relative to the decision — and a diagnosis that names the one that
+// failed. Its four kinds are `standing` (loaded once, far above the decision),
+// `in-turn` (injected next to it), `posthoc` (speaks only after the attempt: it
+// can refuse, it cannot redirect) and `affordance` (whether the right thing was
+// reachable at all). Reproduced rather than imported, for the same reason the
+// clustering above is: that package is welded to Iris's Cordis services, and it
+// re-derives its own Dice for exactly this reason.
+//
+// One task attempt has all four, and they are concrete here:
+//
+//   standing    the task text as declared, written before anybody tried
+//   in-turn     how the last attempt failed, carried into the task text
+//   posthoc     the criterion — it runs after the work and can only refuse
+//   affordance  whether the thing the agent reached for was there at all
+//
+// Reading a failure that way says what to change, and the answers differ:
+//
+//   only-after-the-fact  the criterion refused and nothing else ever spoke.
+//                        Move it in front: tell the next attempt what will be
+//                        run against it, and have it run that itself.
+//   not-offered          what it reached for was not there. Nothing said can
+//                        fix that, so stop saying things — establish what does
+//                        exist first, and forbid the route that was missing.
+//   never-carried        nothing anywhere had the failure on it. Carry it.
+//
+// The last one is the ordinary case and the weakest change, which is why it is
+// last: it is the only rung that is "the same attempt, better informed".
+
+export type Carrier = "standing" | "in-turn" | "posthoc" | "affordance";
+
+export type CauseKind = "not-offered" | "only-after-the-fact" | "never-carried" | "cut-off" | "exhausted";
+
+export interface Diagnosis {
+	cause: CauseKind;
+	/** The carrier that failed, in one word. */
+	carrier: Carrier;
+	/** Said in the loop's own words, for the journal and for a person. */
+	sentence: string;
+	/** What the next attempt must do differently. Empty when there is no next. */
+	directive: string[];
+}
+
+/**
+ * A criterion refusing is not the same failure as a command not existing.
+ *
+ * These are read out of the failure sentence because that is all there is —
+ * the runner is handed text. They are deliberately few: a taxonomy nobody can
+ * tell apart is worse than none, and every branch here has to change what the
+ * next attempt does or it has no business existing.
+ */
+const NOT_OFFERED =
+	/\b(command not found|no such file|not found|is not registered|cannot find|could not find|unknown command|enoent|not recognised|not recognized|permission denied|eacces|is not mounted|no such command)\b/i;
+
+/**
+ * The criterion pushed back, which means the work may have happened and still
+ * not counted. Tested before the one above, and that order is load-bearing: a
+ * criterion refusing says "dirsize.of is not registered", which reads exactly
+ * like something the agent could not find. It is not — the agent found nothing
+ * missing; the check did. Getting that backwards sends the wrong instruction.
+ */
+/**
+ * The attempt was cut off rather than refused.
+ *
+ * Worth its own branch, and worth testing before either of the others, because
+ * the journal is full of these and they read like incapacity: a fifteen-minute
+ * delegation timeout killed every multi-task backlog partway through, and each
+ * one came back as a failure whose sentence said nothing about time. Telling an
+ * agent "you failed, here is the error" when what happened is that it was
+ * killed mid-sentence teaches it the wrong lesson, and clustering two of them
+ * as "the same failure" gives up on work that was never actually refused.
+ */
+const CUT_OFF = /\b(ran past|timed ?out|timeout|etimedout|sigkill|sigterm|killed|stopped mid-attempt|socket hang ?up)\b/i;
+
+const CRITERION_REFUSED = /it reported done, but the criterion did not hold/i;
+
+export const diagnose = (
+	previous: Array<{ ok: boolean; shape?: string; detail?: string }>,
+	latest: string,
+	options: { similarity?: number } = {},
+): Diagnosis => {
+	const near = options.similarity ?? 0.6;
+	const shape = shapeOf(latest);
+	const failures = previous.filter((a) => !a.ok);
+	const sameShape = failures.filter((a) => a.shape && similarity(a.shape, shape) >= near);
+
+	// Every carrier has now been used, and used with this exact failure on it.
+	// There is nothing left to move and nothing left to say.
+	if (sameShape.length >= 2) {
+		return {
+			cause: "exhausted",
+			carrier: "affordance",
+			sentence:
+				`the same failure survived a changed approach — every carrier has now had it on it ` +
+				`(${sameShape.length + 1} attempts, all "${shape || "no message"}") and none of them reached the decision`,
+			directive: [],
+		};
+	}
+
+	if (CRITERION_REFUSED.test(latest)) {
+		return {
+			cause: "only-after-the-fact",
+			carrier: "posthoc",
+			sentence: "the work was reported finished and only the criterion disagreed, which it can only do afterwards",
+			directive: [
+				"The last attempt believed it had finished. The check disagreed, and the check is the only",
+				"thing that decides. So run the check YOURSELF, before you say anything, and keep working",
+				"until it passes. Reporting success without having run it is the failure being repeated.",
+			],
+		};
+	}
+
+	if (CUT_OFF.test(latest)) {
+		return {
+			cause: "cut-off",
+			carrier: "affordance",
+			sentence: "the last attempt was cut off rather than refused — it ran out of time or was killed",
+			directive: [
+				"The last attempt did not fail; it was stopped partway through, so nothing it says about",
+				"what is impossible can be trusted. Do the SMALLEST piece that can be proven on its own",
+				"first, and prove it, before going near the rest. Do not restart from the beginning if the",
+				"earlier part is already done — check what is there before redoing it.",
+			],
+		};
+	}
+
+	if (NOT_OFFERED.test(latest)) {
+		return {
+			cause: "not-offered",
+			carrier: "affordance",
+			sentence: "what the last attempt reached for was not there, so nothing said to it can fix that",
+			directive: [
+				"The last attempt reached for something that does not exist. Do not reach for it again.",
+				"Before doing anything else, establish what actually IS there — list the directory, run the",
+				"command with no arguments, read the file — and say what you found. Then use only that.",
+			],
+		};
+	}
+
+	return {
+		cause: "never-carried",
+		carrier: "in-turn",
+		sentence: "nothing the last attempt was given mentioned this failure, because it had not happened yet",
+		directive: ["The previous attempt at this exact task failed. Do not repeat it."],
+	};
+};

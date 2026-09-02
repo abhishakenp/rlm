@@ -90,12 +90,45 @@ const pathsIn = (text: string, cwd: string): string[] =>
  * explicitly quoted command the asker said should pass is nearly their own
  * words, while a path mentioned in passing is a guess.
  */
+/**
+ * The ask, inside the envelope it arrived in.
+ *
+ * The length rule below is right and it was also, on real traffic, refusing
+ * everything: Iris wraps every delegation in an eleven-kilobyte preamble, so
+ * every request she has ever handed over was longer than an ask and fell
+ * through to "nobody said" — seven journalled turns, not one of them provable.
+ * The guard that correctly stopped false positives out of her template stopped
+ * every true positive as well, and her traffic is the only traffic there is.
+ *
+ * Her template puts his words under a `## The request` heading and the next
+ * heading ends them. So the ask is cut out first and the length rule is applied
+ * to *that* — the guard keeps doing what it was for, which is refusing to mine
+ * a document written to instruct, while the line or two a person actually wrote
+ * becomes readable.
+ *
+ * The heading is her convention, not a law. When it is not there, this returns
+ * null and the whole thing is judged by length exactly as before, because
+ * guessing where somebody's words start is how the preamble got mined in the
+ * first place.
+ */
+export const askIn = (text: string): string | null => {
+	const heading = /^[ \t]*#{1,6}[ \t]+the request[ \t]*:?[ \t]*$/im.exec(text);
+	if (!heading) return null;
+	const from = heading.index + heading[0].length;
+	const rest = text.slice(from);
+	const next = /^[ \t]*#{1,6}[ \t]+\S/m.exec(rest);
+	const ask = (next ? rest.slice(0, next.index) : rest).trim();
+	return ask || null;
+};
+
 export const derive = (
 	request: string,
 	options: { cwd?: string; now?: string } = {},
 ): Derived | null => {
-	const text = String(request ?? "");
-	if (!text.trim()) return null;
+	const whole = String(request ?? "");
+	if (!whole.trim()) return null;
+	// What he actually wrote, if it can be found inside what was sent.
+	const text = askIn(whole) ?? whole;
 
 	/**
 	 * Only read a criterion out of something short enough to be an ask.

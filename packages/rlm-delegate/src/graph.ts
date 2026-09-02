@@ -86,6 +86,14 @@ export interface Attempt {
 	detail: string;
 	/** Normalised failure sentence — see lapse.ts. Absent on success. */
 	shape?: string;
+	/**
+	 * Which approach this attempt was handed, when it was not the first.
+	 *
+	 * Recorded so "the retry was different" is a fact in the journal rather
+	 * than a thing somebody remembers about the code. See `diagnose` in
+	 * lapse.ts for what the values mean.
+	 */
+	approach?: string;
 	/** What the criterion said, and what it printed. Data a reviewer can read. */
 	proof?: "passed" | "failed" | "errored";
 	proofDetail?: string;
