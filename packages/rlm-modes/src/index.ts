@@ -128,7 +128,38 @@ export class RlmModesService extends Service {
 							this.ctx.logger?.warn?.('modes: nothing to do — pass --print "..." or pipe something in');
 							return 1;
 						}
-						return (await service.run({ mode: "text", initialMessage: prompt })) ?? 0;
+
+						// Write the request down before running it.
+						//
+						// This is the only moment that is guaranteed to happen. Six
+						// jobs once arrived here as one string, one was done, and the
+						// other five ended when this process did — with nothing on
+						// disk saying they had ever been asked for. Telling the model
+						// to keep a list does not fix that, because a model that
+						// ignores the instruction loses the work exactly as before.
+						// So the recording is four lines of code at the door, needs
+						// no plan and no decomposition, and still happens when the
+						// model is unavailable, confused or lying. `refine()` turns
+						// it into real tasks afterwards; that part is allowed to fail.
+						const graphs = this.ctx.get("rlmDelegate") as any;
+						const recorded = graphs?.intake?.(prompt, { source: "--print" }) ?? null;
+
+						try {
+							const code = (await service.run({ mode: "text", initialMessage: prompt })) ?? 0;
+							recorded?.graph &&
+								graphs.close(recorded.graph.id, recorded.taskId, {
+									ok: code === 0,
+									detail: `the run exited ${code}`,
+								});
+							return code;
+						} catch (error: any) {
+							recorded?.graph &&
+								graphs.close(recorded.graph.id, recorded.taskId, {
+									ok: false,
+									detail: String(error?.stack ?? error?.message ?? error),
+								});
+							throw error;
+						}
 					},
 				}),
 				this.register({

@@ -76,7 +76,7 @@ export default (api: any) => ({
 
 		// 1. Finish what is already owed before taking on anything new. This is
 		//    the whole reason the graph exists, and it is one line.
-		const owed = graphs.open();
+		const owed = graphs.open().filter((g: any) => g.goal !== input);
 		for (const graph of owed) {
 			api.emit("rlm/delegator-resuming", { graph: graph.id, goal: graph.goal });
 			await graphs.run(graph.id, (task: any) => api.sdk.spawn(task.prompt, { name: task.id }));
@@ -111,9 +111,16 @@ export default (api: any) => ({
 			];
 		}
 
+		// If the boundary already wrote this request down — it does, in code,
+		// before any of this ran — refine that record rather than opening a
+		// second graph beside it. One request, one row.
+		const recorded = graphs
+			.open()
+			.find((g: any) => g.goal === input && g.tasks.length === 1 && g.tasks[0].proof?.kind === "unstated");
+
 		let graph: any;
 		try {
-			graph = graphs.declare(input, plan);
+			graph = recorded ? graphs.refine(recorded.id, recorded.tasks[0].id, plan) : graphs.declare(input, plan);
 		} catch (error: any) {
 			// A cycle or a missing criterion is refused here, at declaration, with
 			// nothing written — so the planner is told precisely what to fix
@@ -122,7 +129,10 @@ export default (api: any) => ({
 				`${PLAN_INSTRUCTIONS}\n\nRequest:\n${input}\n\nThe graph refused your plan: ${error?.message}\nReturn a corrected array.`,
 				{ name: "planner-again" },
 			);
-			graph = graphs.declare(input, parseTasks(answer));
+			const corrected = parseTasks(answer);
+			graph = recorded
+				? graphs.refine(recorded.id, recorded.tasks[0].id, corrected)
+				: graphs.declare(input, corrected);
 		}
 		api.emit("rlm/delegator-plan", { graph: graph.id, tasks: graph.tasks.length });
 

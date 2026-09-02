@@ -30,6 +30,7 @@ export type TaskState =
 	| "ready" // every dependency is done; may be picked up
 	| "running" // in an agent's hands right now
 	| "done" // came back AND its criterion passed
+	| "unproven" // came back, and nobody had said how to tell whether it worked
 	| "failed" // tried, did not work, and says why
 	| "rejected" // its criterion passed, and a reviewer disputed it anyway
 	| "unreachable"; // cannot be tried, because something it needs died
@@ -54,7 +55,21 @@ export type Proof =
 	/** A composition row reached a fiber state — mounted, not merely written. */
 	| { kind: "row"; id: string; state?: string }
 	/** A command or tool is actually in the live registry under this name. */
-	| { kind: "command"; name: string };
+	| { kind: "command"; name: string }
+	/**
+	 * Done when everything it needs is done. Costs nothing to check and needs
+	 * nobody to run it — it is what a task becomes once it has been broken into
+	 * the tasks that actually do the work.
+	 */
+	| { kind: "rollup" }
+	/**
+	 * Nobody said how to tell. This is what the boundary writes down when a
+	 * request arrives and no model has looked at it yet, and it is the one kind
+	 * that can never pass: a task holding it ends `unproven`, which is a
+	 * recorded wound rather than a claim. Refining it into real tasks is how it
+	 * stops being one.
+	 */
+	| { kind: "unstated"; note?: string };
 
 export interface Attempt {
 	/** ISO, when the agent was handed the task. */
@@ -161,12 +176,35 @@ export class CycleError extends DeclarationError {
 const DERIVED = "never runnable:";
 
 /** States `settle` will not recompute — they were decided by something happening. */
-const SETTLED: TaskState[] = ["done", "failed", "rejected"];
-/** States that stop everything downstream. */
-const DEAD: TaskState[] = ["failed", "rejected", "unreachable"];
+const SETTLED: TaskState[] = ["done", "unproven", "failed", "rejected"];
+/**
+ * States that stop everything downstream.
+ *
+ * `unproven` is in here deliberately. Work that came back with no way to check
+ * it is not a foundation; building the next thing on top of it is how a
+ * scaffold ends up announced as a capability.
+ */
+const DEAD: TaskState[] = ["failed", "rejected", "unreachable", "unproven"];
 
 /** What is still owed to the asker — the answer to "what is left?". */
 export const outstanding = (tasks: Task[]): Task[] => tasks.filter((t) => t.state !== "done");
+
+/**
+ * Work that still has somewhere to go: something could pick it up, or somebody
+ * needs to look at why it stopped.
+ */
+export const owed = (tasks: Task[]): Task[] =>
+	tasks.filter((t) => t.state !== "done" && t.state !== "unproven");
+
+/**
+ * Turns that ended with nobody able to say whether the work happened.
+ *
+ * Not "still owed" — nothing more is going to be done about them on their own,
+ * and listing them beside live work would drown it. They are the wounds: a
+ * request was received, something ran, and there was never a way to check. The
+ * record exists whether or not anything intelligent noticed at the time.
+ */
+export const unverified = (tasks: Task[]): Task[] => tasks.filter((t) => t.state === "unproven");
 
 /** No task can move again without someone intervening. */
 export const isFinished = (tasks: Task[]): boolean =>
@@ -194,6 +232,9 @@ export const validateProof = (proof: Proof | undefined, id: string): void => {
 			return;
 		case "command":
 			if (!p.name || typeof p.name !== "string") throw new DeclarationError(`task "${id}": command criterion needs a name`);
+			return;
+		case "rollup":
+		case "unstated":
 			return;
 		default:
 			throw new DeclarationError(`task "${id}": unknown criterion kind "${p.kind}"`);
@@ -381,6 +422,10 @@ export const describeProof = (proof: Proof): string => {
 			return `row ${proof.id} reaches ${proof.state ?? "ACTIVE"}`;
 		case "command":
 			return `command ${proof.name} is in the registry`;
+		case "rollup":
+			return "everything it was broken into is done";
+		case "unstated":
+			return proof.note ?? "nobody said how to tell — this cannot pass until it is refined";
 	}
 };
 
@@ -388,6 +433,7 @@ export const describeProof = (proof: Proof): string => {
 export const render = (graph: Graph): string => {
 	const mark: Record<TaskState, string> = {
 		done: "done       ",
+		unproven: "UNPROVEN   ",
 		failed: "FAILED     ",
 		rejected: "REJECTED   ",
 		unreachable: "unreachable",
@@ -403,9 +449,11 @@ export const render = (graph: Graph): string => {
 		return `  ${mark[task.state]}  ${task.id}: ${task.title}${needs}\n                 criterion: ${describeProof(task.proof)}${why}${taint}${judged}`;
 	});
 	const left = outstanding(graph.tasks).length;
+	const unchecked = unverified(graph.tasks).length;
 	return [
 		`${graph.id} — ${graph.goal}`,
 		...lines,
-		`  ${graph.tasks.length - left}/${graph.tasks.length} done, ${left} still owed`,
+		`  ${graph.tasks.length - left}/${graph.tasks.length} done, ${left} still owed` +
+			(unchecked ? `, ${unchecked} of those never checkable` : ""),
 	].join("\n");
 };

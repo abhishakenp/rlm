@@ -18,7 +18,7 @@ import { existsSync, readFileSync } from "node:fs";
 import type { Proof } from "./graph.ts";
 
 export interface ProofResult {
-	verdict: "passed" | "failed" | "errored";
+	verdict: "passed" | "failed" | "errored" | "unstated";
 	detail: string;
 }
 
@@ -54,9 +54,25 @@ const shell = (
 
 export const check = async (
 	proof: Proof,
-	options: { cwd?: string; probe?: Probe } = {},
+	options: { cwd?: string; probe?: Probe; needsAllDone?: boolean } = {},
 ): Promise<ProofResult> => {
 	switch (proof.kind) {
+		case "unstated": {
+			// The one kind that never passes. A request written down at the door
+			// before any model has looked at it has no criterion yet, and saying
+			// so is worth more than pretending either way.
+			return {
+				verdict: "unstated",
+				detail: proof.note ?? "nobody said how to tell whether this was finished, so nobody can",
+			};
+		}
+
+		case "rollup": {
+			return options.needsAllDone
+				? { verdict: "passed", detail: "everything it was broken into is done" }
+				: { verdict: "failed", detail: "something it was broken into is not done" };
+		}
+
 		case "file": {
 			if (!existsSync(proof.path)) return { verdict: "failed", detail: `${proof.path} does not exist` };
 			if (proof.contains) {

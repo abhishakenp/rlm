@@ -155,6 +155,13 @@ export class RlmDelegateService extends Service {
 		});
 		if (typeof reattach === "function") this.teardowns.add(reattach);
 
+		try {
+			const gone = this.store.prune();
+			if (gone.length) this.ctx.logger?.info?.(`rlm-delegate: forgot ${gone.length} finished journal(s)`);
+		} catch {
+			/* pruning is housekeeping; never let it stop the row starting */
+		}
+
 		const open = this.open();
 		const owed = open.reduce((n, g) => n + outstanding(g.tasks).length, 0);
 		this.ctx.logger?.info?.(
@@ -193,7 +200,8 @@ export class RlmDelegateService extends Service {
 	/** What is still owed, read from disk every time the prompt is built. */
 	owedFragment(): string {
 		const open = this.open();
-		if (!open.length) return "";
+		const wounds = this.unverified();
+		if (!open.length && !wounds.length) return "";
 		const lines = open.flatMap((graph) => [
 			`  ${graph.id} — ${graph.goal}`,
 			...outstanding(graph.tasks).map(
@@ -201,17 +209,35 @@ export class RlmDelegateService extends Service {
 					`    [${t.state}] ${t.id}: ${t.title}${t.reason ? ` — ${t.reason.split("\n")[0]}` : ""}`,
 			),
 		]);
+		const woundLines = wounds.length
+			? [
+					"",
+					`### ${wounds.length} turn(s) in the last day ended with no way to check`,
+					"",
+					"Each of these was recorded at the door and never refined into anything a",
+					"criterion could be run against, so nobody can say whether the work happened.",
+					"That is the thing worth fixing, and `refine()` is how.",
+					"",
+					...wounds.slice(0, 8).map((w) => `  ${w.graph}/${w.task.id}: ${w.task.title}`),
+				]
+			: [];
+
 		return [
 			"## Still owed",
 			"",
-			"These were asked for and are not finished. They survive restarts; they are not",
-			"in your context because someone repeated them. Do not start new work while",
-			"something here is `ready`, and never report a turn complete because the turn",
-			"ended — a task is done when its criterion passes.",
+			"These were asked for and are not finished. They are on disk, written down when",
+			"they arrived — they are not in your context because someone repeated them, and",
+			"they survive you. Do not start new work while something here is `ready`, and",
+			"never report a turn complete because the turn ended: a task is done when its",
+			"criterion passes and at no other moment.",
 			"",
 			...lines,
+			...woundLines,
 			"",
-			"Work them with rlmDelegate: `status()`, `run(graphId)`, `declare(goal, tasks)`.",
+			"Through rlmDelegate: `status()`, `run(graphId)`, `declare(goal, tasks)`, and",
+			"`refine(graphId, taskId, tasks)` to break a recorded request into real tasks —",
+			"each with `needs` for anything it must wait for, and a `proof` that some",
+			"command, file, row or registry entry can settle without asking anybody.",
 		].join("\n");
 	}
 
@@ -256,6 +282,107 @@ export class RlmDelegateService extends Service {
 		this.ctx.emit?.("rlm/delegate-declared", { graph: graph.id, goal, tasks: graph.tasks.length });
 		this.ctx.logger?.info?.(`rlm-delegate: declared ${graph.id} with ${graph.tasks.length} task(s)`);
 		return graph;
+	}
+
+	/**
+	 * Write down a request the moment it arrives, before anything intelligent
+	 * has looked at it.
+	 *
+	 * This is the floor, and the reason it is here rather than in a prompt: a
+	 * model that ignores an instruction loses the work exactly as before, so the
+	 * recording cannot be something a model chooses to do. One task, the request
+	 * verbatim, and the honest criterion — nobody has said how to tell yet. It
+	 * needs no plan, no decomposition and no model, so it still happens when the
+	 * model is unavailable, confused, or lying.
+	 *
+	 * What it is not is useful on its own. `refine()` turns it into real tasks
+	 * with real criteria; until something does, the request ends `unproven`,
+	 * which is a wound with a record rather than a wound without one.
+	 */
+	intake(request: string, options: { source?: string; taskId?: string } = {}): { graph: Graph; taskId: string } | null {
+		if (this.config.enabled === false) return null;
+		const text = String(request ?? "").trim();
+		if (!text) return null;
+		const taskId = options.taskId ?? "the-request";
+		const title = (text.split("\n").find((l) => l.trim()) ?? text).trim().slice(0, 140);
+		try {
+			const graph = this.store.create(text, [
+				{
+					id: taskId,
+					title,
+					prompt: text,
+					proof: {
+						kind: "unstated",
+						note: options.source
+							? `arrived from ${options.source}; nobody has said how to tell it is finished`
+							: undefined,
+					},
+				},
+			]);
+			this.ctx.emit?.("rlm/delegate-intake", { graph: graph.id, source: options.source, title });
+			this.ctx.logger?.info?.(`rlm-delegate: recorded ${graph.id} at intake — ${title}`);
+			return { graph, taskId };
+		} catch (error: any) {
+			// The floor must never be the thing that stops a request being
+			// handled. A recording that fails is bad; a request refused because
+			// the recording failed is worse.
+			this.ctx.logger?.warn?.(`rlm-delegate: could not record the request: ${error?.message ?? error}`);
+			return null;
+		}
+	}
+
+	/**
+	 * Break a recorded request into the tasks that actually do the work.
+	 *
+	 * The improvement on top of the mechanical floor, and optional by design:
+	 * splitting a paragraph into jobs is a reading, and readings need a model.
+	 * The parent becomes the sum of its children and needs nobody to run it.
+	 */
+	refine(graphId: string, taskId: string, tasks: TaskInput[]): Graph {
+		const graph = this.store.refine(graphId, taskId, tasks);
+		this.ctx.emit?.("rlm/delegate-refined", { graph: graphId, task: taskId, into: tasks.length });
+		this.ctx.logger?.info?.(`rlm-delegate: ${graphId}/${taskId} refined into ${tasks.length} task(s)`);
+		return graph;
+	}
+
+	/**
+	 * Record how a recorded request turned out.
+	 *
+	 * If something refined it, this does nothing — the children already say. If
+	 * nothing did, the turn ends `unproven` when it came back and `failed` when
+	 * it did not, and either way the request is still on disk with the answer
+	 * attached.
+	 */
+	close(graphId: string, taskId: string, outcome: { ok: boolean; detail?: string }): Graph | null {
+		const graph = this.store.load(graphId);
+		const task = graph?.tasks.find((t) => t.id === taskId);
+		if (!graph || !task) return null;
+		if (task.proof.kind === "rollup" || task.state === "done") return graph;
+
+		const at = new Date().toISOString();
+		const detail = String(outcome.detail ?? "").slice(0, 4000);
+		if (outcome.ok) {
+			this.store.ended(graphId, taskId, "unproven", { at, endedAt: at, ok: true, detail, proof: "unstated" }, {
+				result: detail,
+				reason: "it came back, and nobody had said how to tell whether it worked",
+			});
+			this.ctx.emit?.("rlm/delegate-unproven", { graph: graphId, task: taskId, title: task.title });
+		} else {
+			this.store.ended(graphId, taskId, "failed", { at, endedAt: at, ok: false, detail, shape: detail.split("\n")[0] }, {
+				reason: detail || "the run did not come back cleanly",
+			});
+			this.ctx.emit?.("rlm/delegate-failed", { graph: graphId, task: taskId, reason: detail });
+		}
+		return this.store.load(graphId);
+	}
+
+	/** Turns that ended with no way to tell whether the work happened. */
+	unverified(sinceMs?: number) {
+		try {
+			return this.store.unverified(sinceMs);
+		} catch {
+			return [];
+		}
 	}
 
 	/** Add to a graph that already exists, refusing a cycle across the whole thing. */

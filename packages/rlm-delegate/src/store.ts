@@ -14,11 +14,13 @@
  * kept next to the work would be deleted along with it, which is the same bug
  * wearing a different hat.
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
 	declare,
+	findCycle,
+	owed,
 	settle,
 	type Attempt,
 	type Graph,
@@ -27,6 +29,7 @@ import {
 	type TaskInput,
 	type TaskState,
 } from "./graph.ts";
+import { CycleError } from "./graph.ts";
 
 type Entry =
 	| { k: "declared"; at: string; goal: string; tasks: TaskInput[] }
@@ -34,7 +37,8 @@ type Entry =
 	| { k: "began"; at: string; id: string }
 	| { k: "ended"; at: string; id: string; state: TaskState; attempt: Attempt; result?: string; reason?: string }
 	| { k: "reviewed"; at: string; id: string; review: Review }
-	| { k: "recovered"; at: string; id: string; why: string };
+	| { k: "recovered"; at: string; id: string; why: string }
+	| { k: "refined"; at: string; id: string; tasks: TaskInput[] };
 
 /** `~/.rlm/agent/delegate`, honouring $RLM_HOME the way the rest of rlm does. */
 export const defaultDir = (): string =>
@@ -148,6 +152,21 @@ export class Store {
 					}
 					break;
 				}
+				case "refined": {
+					const parent = graph.tasks.find((t) => t.id === entry.id);
+					if (!parent) break;
+					graph = declare(graphId, graph.goal, entry.tasks, entry.at, graph.tasks);
+					const reopened = graph.tasks.find((t) => t.id === entry.id)!;
+					reopened.needs = [...reopened.needs, ...entry.tasks.map((t) => t.id)];
+					// It is no longer a thing anybody does; it is the sum of the
+					// things somebody does. And it stops being unproven, because
+					// there is now something to prove.
+					reopened.proof = { kind: "rollup" };
+					reopened.state = "blocked";
+					reopened.reason = undefined;
+					reopened.updatedAt = entry.at;
+					break;
+				}
 				case "recovered": {
 					const task = graph.tasks.find((t) => t.id === entry.id);
 					if (task) {
@@ -208,6 +227,42 @@ export class Store {
 		return graph;
 	}
 
+	/**
+	 * Break one task into the tasks that actually do the work.
+	 *
+	 * This is the seam between the mechanical floor and the useful version. The
+	 * boundary writes down one task with no criterion because that needs no
+	 * model and cannot fail; a model that reads it can turn it into several with
+	 * real criteria and real edges. If none ever does, the floor still holds —
+	 * the request is on disk either way.
+	 *
+	 * Refused, before writing, if the children would close a loop.
+	 */
+	refine(graphId: string, taskId: string, tasks: TaskInput[]): Graph {
+		const existing = this.load(graphId);
+		if (!existing) throw new Error(`no such graph: ${graphId}`);
+		const parent = existing.tasks.find((t) => t.id === taskId);
+		if (!parent) throw new Error(`no such task: ${graphId}/${taskId}`);
+
+		const at = new Date().toISOString();
+		// Validate the children on their own first — ids, titles, criteria.
+		declare(graphId, existing.goal, tasks, at, existing.tasks);
+		// Then the edge the refinement itself adds, which the line above cannot
+		// see: the parent comes to depend on every child.
+		const proposed = [
+			...existing.tasks.map((t) => ({
+				id: t.id,
+				needs: t.id === taskId ? [...t.needs, ...tasks.map((c) => c.id)] : t.needs,
+			})),
+			...tasks.map((t) => ({ id: t.id, needs: t.needs ?? [] })),
+		];
+		const cycle = findCycle(proposed);
+		if (cycle) throw new CycleError(cycle);
+
+		this.append(graphId, { k: "refined", at, id: taskId, tasks });
+		return this.load(graphId)!;
+	}
+
 	began(graphId: string, id: string, at = new Date().toISOString()): void {
 		this.append(graphId, { k: "began", at, id });
 	}
@@ -247,14 +302,65 @@ export class Store {
 		return stranded;
 	}
 
-	/** Every graph that still owes something. This is the answer to "what is left?". */
+	/**
+	 * Every graph that still owes something.
+	 *
+	 * `unproven` does not count as owed. Nothing more is going to happen to it
+	 * on its own, and a request that arrived, ran, and had no criterion would
+	 * otherwise sit in front of the model for ever and drown the live work. It
+	 * is still on disk and still readable through `unverified()`.
+	 */
 	open(): Graph[] {
 		const out: Graph[] = [];
 		for (const id of this.ids()) {
 			const graph = this.load(id);
-			if (graph && graph.tasks.some((t) => t.state !== "done")) out.push(graph);
+			if (graph && owed(graph.tasks).length) out.push(graph);
 		}
 		return out;
+	}
+
+	/** Turns that ended with no way to tell whether the work happened. */
+	unverified(sinceMs = 24 * 60 * 60 * 1000): Array<{ graph: string; goal: string; task: Task }> {
+		const cutoff = Date.now() - sinceMs;
+		const out: Array<{ graph: string; goal: string; task: Task }> = [];
+		for (const id of this.ids()) {
+			const graph = this.load(id);
+			if (!graph) continue;
+			for (const task of graph.tasks) {
+				if (task.state === "unproven" && Date.parse(task.updatedAt) >= cutoff) {
+					out.push({ graph: graph.id, goal: graph.goal, task });
+				}
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * Forget the noise, never the wounds.
+	 *
+	 * A journal whose every task is done or unproven, and which nothing has
+	 * touched in a fortnight, is a receipt. A journal with anything failed,
+	 * unreachable, rejected or still runnable in it is evidence, and stays
+	 * whatever its age.
+	 */
+	prune(maxAgeMs = 14 * 24 * 60 * 60 * 1000): string[] {
+		const cutoff = Date.now() - maxAgeMs;
+		const removed: string[] = [];
+		for (const id of this.ids()) {
+			const graph = this.load(id);
+			if (!graph) continue;
+			const keep =
+				graph.tasks.some((t) => t.state !== "done" && t.state !== "unproven") ||
+				graph.tasks.some((t) => Date.parse(t.updatedAt) >= cutoff);
+			if (keep) continue;
+			try {
+				rmSync(this.path(id));
+				removed.push(id);
+			} catch {
+				/* somebody else may have taken it already */
+			}
+		}
+		return removed;
 	}
 }
 

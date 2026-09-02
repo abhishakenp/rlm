@@ -18,6 +18,36 @@ Two failures, from one night, both structural:
 
 So the loop no longer owns the list, and no longer takes an agent's word for it.
 
+## The floor
+
+The graph could not forget, but that was worth nothing while nothing ever
+created one. The delegator reached the model as a prompt fragment saying a graph
+was available — which is a protocol a model has to remember to follow, which is
+the thing that failed in the first place.
+
+So the recording happens at the boundary, in `rlm-modes`, in four lines, before
+the model runs:
+
+```ts
+const recorded = graphs?.intake?.(prompt, { source: "--print" }) ?? null;
+```
+
+Every caller passes through there, Iris included (`node cordis-shell.mjs
+--print "…"`). It needs no plan, no decomposition and no model call, so it still
+happens when the model is unavailable, confused, or lying — verified by killing
+the session mid-run and finding the request and the failure both on disk.
+
+What it records is one task holding the request verbatim and the honest
+criterion, `unstated`: *nobody has said how to tell.* That criterion can never
+pass. A turn that comes back ends `unproven` — a wound with a record rather than
+a wound without one — and a turn that does not come back ends `failed`.
+
+`refine(graphId, taskId, tasks)` is the improvement on top: a model reads the
+recorded request and turns it into real tasks with real criteria and real edges.
+The parent becomes a `rollup` — done when everything it was broken into is done,
+checked for free, run by nobody. **The floor is mechanical; the refinement is
+optional.** If nothing ever refines, the request is still on disk.
+
 ## What a task is
 
 ```ts
@@ -33,7 +63,9 @@ So the loop no longer owns the list, and no longer takes an agent's word for it.
 `proof` is not optional. A task nobody can tell is finished is refused at
 declaration, the same way a cycle is. The four kinds are all things the graph
 can run itself — `shell` (exits zero), `file` (exists / contains), `row` (a
-composition row reached ACTIVE), `command` (a name is really in the registry) —
+composition row reached ACTIVE), `command` (a name is really in the registry),
+`rollup` (everything it was broken into is done), and `unstated` (nobody said,
+so this can never pass) —
 because a criterion is only worth anything if it still answers when the model is
 down and the agent is confidently wrong.
 
@@ -44,10 +76,16 @@ second claim standing behind the first and it fails in the same direction.
 
 ```
 blocked → ready → running → done
+                          ↘ unproven      came back; nobody had said how to check
                           ↘ failed        tried, did not work, says why
                           ↘ rejected      criterion passed; a reviewer disputed it
         unreachable                       something it needs died
 ```
+
+`unproven` is not "still owed" — nothing more will happen to it on its own, and
+listing it beside live work would drown the live work. It is reported separately
+by `unverified()` and in its own quieter section of the prompt. It *is* dead for
+dependents: work that came back with no way to check it is not a foundation.
 
 `unreachable` is derived from the edges, never stored as a decision — so a
 dependent comes back on its own if the thing that failed is later fixed. A
@@ -118,6 +156,10 @@ journalled fact rather than a rendering.
 
 | Method | Does |
 |---|---|
+| `intake(request, {source})` | The floor. One task, the request verbatim, criterion `unstated`. Never throws at the caller. |
+| `refine(graphId, taskId, tasks)` | Break a recorded request into real tasks; the parent becomes a rollup. |
+| `close(graphId, taskId, {ok, detail})` | Record how the turn went: `unproven` if it came back, `failed` if it did not. |
+| `unverified(sinceMs?)` | Turns nobody could check — the wounds. |
 | `declare(goal, tasks, id?)` | Write down what was asked. Throws — before writing — on a cycle, an unknown dependency, or a missing criterion. |
 | `add(graphId, tasks)` | Extend a graph, refusing a cycle across the whole thing. |
 | `run(graphId, runner?, options?)` | Work it. Defaults to `rlmSdk.spawn` per task. |
@@ -128,8 +170,13 @@ journalled fact rather than a rendering.
 | `review(...)` / `forReview(id)` | The reviewer's seam. |
 | `owedFragment()` / `skeletonFragment()` | The two prompt contributions, as text. |
 
-Events: `rlm/delegate-declared`, `-began`, `-done`, `-retry`, `-failed`,
-`-recovered`, `-capacity`, `-reviewed`, `-settled`, `-outstanding`.
+Events: `rlm/delegate-intake`, `-declared`, `-refined`, `-began`, `-done`,
+`-unproven`, `-retry`, `-failed`, `-recovered`, `-capacity`, `-reviewed`,
+`-settled`, `-outstanding`.
+
+Journals are pruned after a fortnight — but only the receipts. A journal with
+anything failed, unreachable, rejected or still runnable in it is evidence and
+stays whatever its age.
 
 ## The prompt
 
@@ -145,9 +192,11 @@ Two fragments, both read from disk when the prompt is built and never at mount:
 
 ```
 node --experimental-strip-types packages/rlm-delegate/index.test.ts
+node --experimental-strip-types packages/rlm-delegate/intake.test.ts
 node --experimental-strip-types packages/rlm-delegate/workflow.test.ts
 ```
 
 The first proves the graph cannot forget — including a child process that really
-does `SIGKILL` itself mid-graph. The second drives the delegator workflow end to
-end against a stand-in for the model.
+does `SIGKILL` itself mid-graph. The second proves the boundary records a request
+before the model runs, and still records it when the model throws. The third
+drives the delegator workflow end to end against a stand-in for the model.

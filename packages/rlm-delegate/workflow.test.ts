@@ -138,6 +138,24 @@ t("and the prompt says so, in the asker's words", () => {
 	});
 }
 
+console.log("\none request, one row");
+{
+	// The boundary records the request in code before any of this runs. The loop
+	// must refine that record, not open a second graph beside it.
+	const request = "a request that arrived at the door";
+	const recorded = graphs.intake(request, { source: "test" })!;
+	const before = store.ids().length;
+	await makeDelegator(api).run(request);
+
+	t("no second graph was opened for the same request", () => eq(store.ids().length, before));
+	t("the record the boundary wrote is the one that got refined", () => {
+		const after = store.load(recorded.graph.id)!;
+		ok(after.tasks.length > 1, `still ${after.tasks.length} task(s)`);
+		eq(after.tasks.find((x) => x.id === "the-request")!.proof.kind, "rollup");
+	});
+	t("and the request is still there in the asker's words", () => eq(store.load(recorded.graph.id)!.goal, request));
+}
+
 fork.dispose();
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);

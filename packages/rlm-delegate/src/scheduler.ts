@@ -86,6 +86,27 @@ export const run = async (
 		return graph;
 	};
 
+	/**
+	 * A task that is only the sum of its parts is not handed to anybody.
+	 *
+	 * By the time a rollup is `ready` every task it was broken into is done, so
+	 * there is nothing left to do and nobody to ask. Spawning an agent to
+	 * discover that would cost a model call to learn something the edges
+	 * already say.
+	 */
+	const closeRollup = (task: Task): void => {
+		const at = new Date().toISOString();
+		store.ended(graphId, task.id, "done", {
+			at,
+			endedAt: at,
+			ok: true,
+			detail: "everything it was broken into is done",
+			proof: "passed",
+			proofDetail: "everything it was broken into is done",
+		}, { result: "everything it was broken into is done" });
+		say("rlm/delegate-done", { graph: graphId, task: task.id, proof: "rollup" });
+	};
+
 	const attempt = async (task: Task, graph: Graph): Promise<void> => {
 		const at = new Date().toISOString();
 		store.began(graphId, task.id, at);
@@ -103,8 +124,21 @@ export const run = async (
 		// Coming back is not finishing.
 		let record: Attempt = { at, endedAt: new Date().toISOString(), ok, detail };
 		if (ok) {
-			const verdict = await check(task.proof, { cwd: options.cwd, probe: options.probe });
-			record = { ...record, proof: verdict.verdict, proofDetail: verdict.detail };
+			const verdict = await check(task.proof, { cwd: options.cwd, probe: options.probe, needsAllDone: true });
+			record = { ...record, proof: verdict.verdict as Attempt["proof"], proofDetail: verdict.detail };
+
+			// A criterion nobody ever wrote is its own outcome. Calling it a
+			// failure would cry wolf on every request that arrived before a model
+			// had looked at it; calling it done is the original lie.
+			if (verdict.verdict === "unstated") {
+				store.ended(graphId, task.id, "unproven", record, {
+					result: detail,
+					reason: `it came back, and ${verdict.detail}`,
+				});
+				say("rlm/delegate-unproven", { graph: graphId, task: task.id, title: task.title });
+				return;
+			}
+
 			if (verdict.verdict !== "passed") {
 				ok = false;
 				detail = `it reported done, but the criterion did not hold — ${verdict.detail}`;
@@ -148,6 +182,13 @@ export const run = async (
 		if (concurrency !== announced) {
 			announced = concurrency;
 			say("rlm/delegate-capacity", { graph: graphId, limit: concurrency, waiting: Math.max(0, ready.length - concurrency) });
+		}
+
+		// Rollups first and for free: they cost nothing and unblock real work.
+		const rollups = ready.filter((t) => t.proof.kind === "rollup");
+		if (rollups.length) {
+			for (const task of rollups) closeRollup(task);
+			continue;
 		}
 
 		while (ready.length && inFlight.size < concurrency) {
