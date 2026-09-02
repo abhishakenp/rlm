@@ -26,7 +26,8 @@
  *     worse than none, because it looks like progress.
  */
 import { askIn } from "./derive.ts";
-import type { Graph, Task, TaskInput } from "./graph.ts";
+import { describeProof, type Graph, type Proof, type Task, type TaskInput } from "./graph.ts";
+import { check } from "./proof.ts";
 import type { Store } from "./store.ts";
 
 export type Planner = (prompt: string, task: Task, graph: Graph) => Promise<string>;
@@ -64,6 +65,46 @@ If one task must not start until another finishes, say so in \`needs\`. Do not
 express ordering in the prose; nobody reads prose to schedule.
 `;
 
+/**
+ * A criterion that already passes is not a criterion.
+ *
+ * The first real drive proved five tasks and three of them were proved by
+ * `echo 'Write a skill'`, `echo tool-loop-alive` and `echo 'skill' | grep -q
+ * 'skill'`. Every one exits zero on a machine where nothing has happened. The
+ * graph did exactly what it promised — it ran the criterion and the criterion
+ * held — and the result was three receipts for nothing, which is the failure
+ * this whole package was written about, arriving through the one door left
+ * open.
+ *
+ * The reviewer's seam is the general answer to a criterion written to be easy,
+ * and it is still where judgement belongs. But a criterion that passes *before
+ * the work starts* needs no judgement at all: it is decidable, here, by running
+ * it. So it is run, once, before the plan is accepted, and a plan that could
+ * not have failed is handed back to the planner saying so.
+ *
+ * Only `shell` is checked, and only for passing. `file` criteria are already
+ * safe against this — the interesting ones say `contains`, and a file that
+ * already contains the answer means the work really is done. A criterion that
+ * *errors* is not gaming and is left alone; that is a different question, and
+ * impasse.ts asks it.
+ */
+export const alreadyTrue = async (
+	tasks: TaskInput[],
+	cwd?: string,
+): Promise<Array<{ id: string; proof: Proof }>> => {
+	const found: Array<{ id: string; proof: Proof }> = [];
+	for (const task of tasks) {
+		if (task.proof?.kind !== "shell") continue;
+		try {
+			const verdict = await check(task.proof, { cwd });
+			if (verdict.verdict === "passed") found.push({ id: task.id, proof: task.proof });
+		} catch {
+			/* a criterion that will not run is not a criterion that cannot fail */
+		}
+	}
+	return found;
+};
+
 export const parsePlan = (text: string): TaskInput[] => {
 	const match = String(text ?? "").match(/\[[\s\S]*\]/);
 	if (!match) throw new Error("the planner returned no JSON array");
@@ -94,6 +135,7 @@ export const refineOne = async (
 	task: Task,
 	plan: Planner,
 	say: (event: string, data: Record<string, unknown>) => void = () => {},
+	options: { cwd?: string; allowVacuous?: boolean } = {},
 ): Promise<number> => {
 	// The ask, not the envelope. Handing a model eleven kilobytes of standing
 	// instructions and asking what the jobs are gets it a plan for the
@@ -115,6 +157,21 @@ export const refineOne = async (
 			say("rlm/delegate-refine-refused", { graph: graph.id, task: task.id, why: refusal });
 			continue;
 		}
+		// Before it is written down: did any of these already pass, with nobody
+		// having done anything? Those are receipts, not criteria.
+		if (!options.allowVacuous) {
+			const vacuous = await alreadyTrue(tasks, options.cwd);
+			if (vacuous.length) {
+				refusal =
+					`${vacuous.length} of your criteria pass right now, before anybody has done any of the work: ` +
+					`${vacuous.map((v) => `${v.id} (${describeProof(v.proof)})`).join("; ")}. ` +
+					`A check that cannot fail is a receipt for nothing. Replace each one with a command that ` +
+					`exits non-zero today and zero only once the work is actually finished.`;
+				say("rlm/delegate-refine-refused", { graph: graph.id, task: task.id, why: refusal, vacuous: vacuous.map((v) => v.id) });
+				continue;
+			}
+		}
+
 		try {
 			store.refine(graph.id, task.id, tasks);
 			say("rlm/delegate-refined", { graph: graph.id, task: task.id, into: tasks.length });

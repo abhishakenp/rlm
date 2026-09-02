@@ -194,6 +194,22 @@ The ask is cut out of the envelope first (`askIn`). Her preamble is eleven
 kilobytes; his words are the two lines under `## The request`. Handing a planner
 the whole envelope gets a plan for the instructions.
 
+### A criterion that already passes is refused
+
+The first real drive proved five tasks. Three of them were proved by
+`echo 'Write a skill'`, `echo tool-loop-alive` and `echo 'skill' | grep -q
+'skill'` — every one of which exits zero on a machine where nothing has
+happened. The graph did exactly what it promised and the result was three
+receipts for nothing.
+
+The reviewer's seam is the general answer to a criterion written to be easy, and
+that is still where judgement belongs. But a criterion that passes *before the
+work starts* needs no judgement: it is decidable by running it. So every `shell`
+criterion in a plan is run once before the plan is accepted, and a plan that
+could not have failed goes back to the planner naming which checks were vacuous.
+Twice refused and the request stays unrefined, which makes it a question — the
+bias is toward asking.
+
 ### What a retry is, and is not
 
 Not the same prompt. Not the same prompt with the error stapled to it either —

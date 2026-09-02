@@ -20,6 +20,7 @@ import { check } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/proof.ts";
 import { Gate, Stop } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/stop.ts";
 import { diagnose } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/lapse.ts";
 import { askIn, derive } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/derive.ts";
+import { alreadyTrue } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/refine.ts";
 
 let pass = 0, fail = 0;
 const t = (name: string, fn: () => void) => {
@@ -463,6 +464,60 @@ console.log("\nfifteen jobs in one paragraph become fifteen jobs");
 	t("the request is still owed, and becomes a question rather than a fiction", () => {
 		eq(badReport.owed.length, 1);
 		eq(badReport.questions[0].kind, "no-criterion");
+	});
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\na criterion that already passes is a receipt for nothing");
+{
+	// Not hypothetical. The first real drive proved five tasks and three of them
+	// were proved by `echo 'Write a skill'`, `echo tool-loop-alive` and
+	// `echo 'skill' | grep -q 'skill'` — all of which exit zero on a machine
+	// where nothing has happened.
+	t("a plan whose checks pass before any work is spotted", async () => {});
+	const vacuous = await alreadyTrue([
+		{ id: "a", title: "a", proof: { kind: "shell", run: "echo 'Write a skill'" } },
+		{ id: "b", title: "b", proof: { kind: "shell", run: "echo 'skill' | grep -q 'skill'" } },
+		{ id: "c", title: "c", proof: { kind: "shell", run: `test -f ${path.join(DIR, "not-yet.txt")}` } },
+	]);
+	t("the two that cannot fail are named, and the honest one is left alone", () =>
+		eq(vacuous.map((v) => v.id).join(","), "a,b", vacuous.map((v) => v.id).join(",")));
+
+	const store = new Store(path.join(DIR, "vacuous"));
+	const want = path.join(DIR, "vacuous-work.txt");
+	const graph = store.create("## The request\n\ndo the thing", [
+		{ id: "the-request", title: "do the thing", prompt: "## The request\n\ndo the thing", proof: { kind: "unstated" } },
+	]);
+	const plans: string[] = [];
+	const report = await drive(store, {
+		planner: async (prompt) => {
+			plans.push(prompt);
+			// First a criterion that cannot fail; then, once told, a real one.
+			return plans.length === 1
+				? JSON.stringify([{ id: "thing", title: "the thing", proof: { kind: "shell", run: "echo done" } }])
+				: JSON.stringify([{ id: "thing", title: "the thing", proof: { kind: "shell", run: `test -f ${want}` } }]);
+		},
+		runner: async () => {
+			fs.writeFileSync(want, "real\n", "utf8");
+			return "did it";
+		},
+		stop: stopFor("vacuous"),
+		concurrency: 1,
+		maxSweeps: 4,
+	});
+	t("the planner is told exactly which check could not fail", () => {
+		ok(plans.length >= 2, `asked ${plans.length} times`);
+		ok(plans[1].includes("pass right now, before anybody has done any of the work"), plans[1].slice(-400));
+		ok(plans[1].includes("echo done"), plans[1].slice(-400));
+	});
+	t("and only the criterion that could fail is written down", () => {
+		const after = store.load(graph.id)!;
+		const thing = after.tasks.find((x) => x.id === "thing")!;
+		eq((thing.proof as any).run, `test -f ${want}`);
+	});
+	t("which then passes because the work really happened", () => {
+		eq(report.owed.length, 0, report.owed.join(","));
+		eq(fs.readFileSync(want, "utf8").trim(), "real");
 	});
 }
 

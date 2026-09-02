@@ -192,7 +192,7 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 					for (const task of needsRefining(graph)) {
 						if (refined >= (options.refineLimit ?? 4) || stop.reason()) break;
 						say("rlm/drive-refining", { graph: graph.id, task: task.id, title: task.title });
-						const into = await refineOne(store, graph, task, planner, say).catch((error: any) => {
+						const into = await refineOne(store, graph, task, planner, say, { cwd: options.cwd }).catch((error: any) => {
 							say("rlm/drive-graph-error", { graph: graph.id, error: String(error?.message ?? error) });
 							return 0;
 						});
