@@ -26,7 +26,7 @@
  *     stopping may be that the child is wedged.
  */
 import { spawn } from "node:child_process";
-import type { Graph, Task } from "./graph.ts";
+import { describeProof, type Graph, type Task } from "./graph.ts";
 import type { Runner } from "./scheduler.ts";
 
 export interface AgentOptions {
@@ -73,6 +73,27 @@ export interface AgentOptions {
 export const sessionFor = (graph: Graph, task: Task): string =>
 	`rlm-delegate-${graph.id}-${task.id}`.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 120);
 
+/**
+ * The task, plus how anyone will tell it is finished.
+ *
+ * `describeProof` already renders a criterion in a sentence a person can read,
+ * and it is what the graph shows him — so the doer gets exactly the same words
+ * the reviewer will use, rather than a paraphrase that could drift from it.
+ */
+const withCriterion = (task: Task): string => {
+	const prompt = task.prompt ?? task.title;
+	if (!task.proof || task.proof.kind === "unstated" || task.proof.kind === "rollup") return prompt;
+	return (
+		`${prompt}\n\n---\n\nHow this will be judged, by something that did not watch you work:\n\n` +
+		`  ${describeProof(task.proof)}\n\n` +
+		`Make that true. If it names a file, write that file; if it names a string, the string has to be in ` +
+		`there. Saying you are done does not count for anything — the check is run against the machine ` +
+		`afterwards, and only the check decides.\n\n` +
+		`If the check cannot be made true because it is checking the wrong thing, say so plainly in your ` +
+		`answer and say what it should have checked. That is a useful result and it is not a failure.`
+	);
+};
+
 export const rlmAgent = (options: AgentOptions): Runner => {
 	return async (task: Task, graph: Graph): Promise<string> => {
 		const command = options.node ?? process.execPath;
@@ -82,7 +103,21 @@ export const rlmAgent = (options: AgentOptions): Runner => {
 		// the fleet was asked to do the word "--session-id" for eight hours. The
 		// end-of-options marker is the one spelling that cannot be re-read as an
 		// option, whatever the prompt happens to start with.
-		const args = [options.entry, "--print", "--session-id", sessionFor(graph, task), "--", task.prompt];
+		// The agent is told how it will be judged.
+		//
+		// It was not, and that is why work that was actually done kept failing.
+		// `check-omniroute-selection-logic` is the clean example: the prompt said
+		// "inspect the connection selection logic", the criterion said the file
+		// /tmp/omniroute-selection-analysis.md must contain the literal string
+		// "selection logic analysis complete", and the agent was handed only the
+		// prompt. It did the analysis. It wrote the file. It failed, twice, for
+		// not producing a sentinel nobody had mentioned to it.
+		//
+		// A criterion the doer cannot see is not a specification, it is a riddle.
+		// Describing it costs a sentence and removes an entire class of failure —
+		// and it cannot be gamed, because the criterion is still checked
+		// independently afterwards by something that did not do the work.
+		const args = [options.entry, "--print", "--session-id", sessionFor(graph, task), "--", withCriterion(task)];
 		const [bin, ...rest] = options.confine ? options.confine(command, args) : [command, ...args];
 
 		return await new Promise<string>((resolve, reject) => {

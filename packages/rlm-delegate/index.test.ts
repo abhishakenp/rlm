@@ -422,5 +422,38 @@ console.log("\nit is a plugin, and it says what is owed");
 	t("and the service is gone from the context", () => eq(root.rlmDelegate, undefined));
 }
 
+console.log("\nan unstated task is not run through the service — it is left for the planner");
+{
+	// The production pattern: a graph with one `unstated` task is handed to
+	// `svc.run()`. Before the fix, `run()` did not set `replanCriterion`, so
+	// `runnable()` used `canRefine=false` and the unstated task was selected,
+	// run, came back `unproven`, and the drive set it back to `unstated` —
+	// forever. 80% of all negative outcomes in six hours were this loop.
+	const stateDir = path.join(DIR, "unstated-not-run");
+	const skeleton = path.join(DIR, "delegator-skeleton-unstated.ts");
+	fs.writeFileSync(skeleton, "export default (api) => ({ name: 'delegator', async run(input) { return input } })\n");
+
+	const root: any = new Context();
+	const fork = root.plugin(RlmDelegateService, { dir: stateDir, skeletonPath: skeleton, concurrency: 1 });
+	await settleMs(300);
+	const svc = root.rlmDelegate;
+
+	const g = svc.declare("a request nobody decomposed", [
+		{ id: "the-request", title: "the request", prompt: "do it", proof: { kind: "unstated", note: "nobody said how to tell" } },
+	]);
+
+	let attempts = 0;
+	const result = await svc.run(g.id, async () => { attempts++; return "I did it"; });
+	const task = result.tasks.find((x: any) => x.id === "the-request")!;
+
+	t("the unstated task was not handed to an agent", () => eq(attempts, 0, `runner was called ${attempts} times`));
+	t("it was not marked unproven — that is the symptom of the loop", () => eq(task.state, "ready", task.state));
+	t("it has no attempts recorded", () => eq(task.attempts.length, 0, `${task.attempts.length} attempts`));
+	t("it is still owed, so the planner can refine it", () => ok(svc.open().some((open: any) => open.id === g.id), "graph was closed"));
+
+	fork.dispose();
+	await settleMs(150);
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);

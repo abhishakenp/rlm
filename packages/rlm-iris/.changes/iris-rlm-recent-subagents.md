@@ -1,0 +1,1 @@
+- Added `recentSubagents()` method to rlm-sdk, tracking up to 20 most-recently-completed subagents with ISO timestamps, exposed via `iris rlm.status` as the `recent` field

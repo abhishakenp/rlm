@@ -823,6 +823,16 @@ export class RlmDelegateService extends Service {
 			repeatFloor: this.config.repeatFloor ?? 2,
 			probe: this.probe(),
 			onEvent: (event, data) => (this.ctx.emit as unknown as (n: string, d: unknown) => void)?.(event, data),
+			// An unstated task has no criterion, so running it can only end
+			// `unproven` — and the drive sets every `unproven` task back to
+			// `unstated` each sweep, which means a task run through this path
+			// comes back `unproven`, gets reset, and is run again, forever.
+			// This was 80% of all negative outcomes in six hours. With
+			// `replanCriterion` set, `runnable()` filters `unstated` tasks out:
+			// they are left for the drive's planner to refine, not handed to an
+			// agent that cannot prove them. A caller who wants the old behaviour
+			// can pass `{ replanCriterion: false }` explicitly.
+			replanCriterion: true,
 			...options,
 		});
 	}

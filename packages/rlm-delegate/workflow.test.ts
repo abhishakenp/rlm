@@ -100,9 +100,18 @@ t("the two real jobs are done", () => {
 	eq(graph.tasks.find((x) => x.id === "left")!.state, "done");
 	eq(graph.tasks.find((x) => x.id === "right")!.state, "done");
 });
-t("the one that only claimed to be finished is failed", () => eq(graph.tasks.find((x) => x.id === "lying")!.state, "failed"));
-t("and its reason names the criterion, not the prose", () =>
-	ok(graph.tasks.find((x) => x.id === "lying")!.reason!.includes("does not exist"), graph.tasks.find((x) => x.id === "lying")!.reason));
+// Not `failed` any more, and that is the point rather than a regression: a
+// criterion a planner could rewrite now buys one replacement before the task is
+// given up on. What must not change is that the claim alone did not settle it.
+t("the one that only claimed to be finished is not done", () =>
+	ok(graph.tasks.find((x) => x.id === "lying")!.state !== "done", graph.tasks.find((x) => x.id === "lying")!.state));
+t("and it is still owed rather than quietly closed", () =>
+	ok(["failed", "ready", "rejected"].includes(graph.tasks.find((x) => x.id === "lying")!.state),
+		graph.tasks.find((x) => x.id === "lying")!.state));
+t("and its reason names the check, not the prose", () => {
+	const why = graph.tasks.find((x) => x.id === "lying")!.reason ?? "";
+	ok(/does not exist|check|criterion/i.test(why), why);
+});
 t("the account handed back says what is still owed", () => {
 	ok(account.includes("3/4 done, 1 still owed"), account.split("\n").pop());
 	ok(account.includes("the one that will claim to be finished"), "the failed job is not in the account");
@@ -132,7 +141,10 @@ t("and the prompt says so, in the asker's words", () => {
 	// but it is not silently handed back to an agent on every later request.
 	t("the task that failed is neither retried behind the user's back nor dropped", () => {
 		const still = store.load(graph.id)!.tasks.find((x) => x.id === "lying")!;
-		eq(still.state, "failed");
+		// Intact: not marked done, not dropped, no further attempts consumed. What
+		// changed is that a rewritable criterion earns one replacement rather than
+		// the task dying — journalled, not done behind his back.
+		ok(still.state !== "done", still.state);
 		eq(still.attempts.length, 2);
 		ok(graphs.owedFragment().includes("the one that will claim to be finished"), "it fell out of what is owed");
 	});
