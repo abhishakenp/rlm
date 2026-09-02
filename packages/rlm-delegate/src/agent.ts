@@ -76,7 +76,13 @@ export const sessionFor = (graph: Graph, task: Task): string =>
 export const rlmAgent = (options: AgentOptions): Runner => {
 	return async (task: Task, graph: Graph): Promise<string> => {
 		const command = options.node ?? process.execPath;
-		const args = [options.entry, "--print", "--session-id", sessionFor(graph, task), task.prompt];
+		// `--` before the prompt, always. Without it the prompt is just another
+		// token on a command line, and the moment a flag was added between
+		// `--print` and it, the reader took the flag instead and every child in
+		// the fleet was asked to do the word "--session-id" for eight hours. The
+		// end-of-options marker is the one spelling that cannot be re-read as an
+		// option, whatever the prompt happens to start with.
+		const args = [options.entry, "--print", "--session-id", sessionFor(graph, task), "--", task.prompt];
 		const [bin, ...rest] = options.confine ? options.confine(command, args) : [command, ...args];
 
 		return await new Promise<string>((resolve, reject) => {

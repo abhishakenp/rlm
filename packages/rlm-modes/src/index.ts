@@ -178,10 +178,41 @@ export class RlmModesService extends Service {
 		}, "rlm-modes builtins");
 	}
 
+	/**
+	 * The prompt, which is the first positional after `--print` — not the next
+	 * token.
+	 *
+	 * "The next token" is what this used to say, and it cost a day. On
+	 * 2026-09-02T06:48:45Z the delegate started spawning children as
+	 * `--print --session-id <id> <prompt>` so a retry could resume; from that
+	 * commit until this one every delegated child — and every planner call,
+	 * which is the same runner asked a different question — was handed the
+	 * literal string `--session-id` as its entire task. 870 of the 886 sessions
+	 * in the eight hours that followed begin with that one word. The agents did
+	 * exactly what they were told, which was nothing, and the drive recorded
+	 * 478 `unproven` against 5 `done`.
+	 *
+	 * So: skip flags and the values they carry, and take the first thing that
+	 * is not one. A flag consumes the token after it only when that token is
+	 * not itself a flag — the same rule `parseArgs` uses for anything it does
+	 * not recognise, so both parsers read one command line the same way. A lone
+	 * `--` ends options, and whatever follows is the prompt however it is spelled.
+	 *
+	 * A single dash is left alone on purpose: `- fix the thing` is a Markdown
+	 * bullet, not an option, and prompts arrive looking like that.
+	 */
 	private printPrompt(argv: string[]): string | null {
 		const index = argv.indexOf("--print");
 		if (index === -1) return null;
-		return argv[index + 1] ?? null;
+		for (let i = index + 1; i < argv.length; i++) {
+			const arg = argv[i];
+			if (arg === "--") return argv[i + 1] ?? null;
+			if (!arg.startsWith("--")) return arg;
+			if (arg.includes("=")) continue;
+			const next = argv[i + 1];
+			if (next !== undefined && !next.startsWith("--")) i++;
+		}
+		return null;
 	}
 }
 
