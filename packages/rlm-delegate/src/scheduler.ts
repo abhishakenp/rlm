@@ -53,6 +53,14 @@ export interface RunOptions {
 	 * answers from him, so they must not collapse into each other.
 	 */
 	replanCriterion?: boolean;
+	/**
+	 * Who is running the work, recorded on every attempt.
+	 *
+	 * Defaults to "unnamed", never to a guess. A journal that says "rlm" when
+	 * a Claude subagent did the work is worse than one that admits it does not
+	 * know — the whole reason this field exists is to be able to tell.
+	 */
+	executor?: string;
 	repeatFloor?: number;
 	similarity?: number;
 	/** Called on every transition, for logging and for the event bus. */
@@ -190,7 +198,7 @@ export const run = async (
 		}
 
 		// Coming back is not finishing.
-		let record: Attempt = { at, endedAt: new Date().toISOString(), ok, detail, approach: diagnosis?.cause };
+		let record: Attempt = { at, endedAt: new Date().toISOString(), ok, detail, approach: diagnosis?.cause, executor: options.executor ?? "unnamed" };
 		if (ok) {
 			const verdict = await check(task.proof, { cwd: options.cwd, probe: options.probe, needsAllDone: true });
 			record = { ...record, proof: verdict.verdict as Attempt["proof"], proofDetail: verdict.detail };

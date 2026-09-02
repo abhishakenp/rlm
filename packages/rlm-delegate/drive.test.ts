@@ -863,3 +863,50 @@ console.log("\na stopped task whose criterion passes now is done, without redoin
 	t("the task behind it is unstuck", () => eq(after.tasks.find((x) => x.id === "behind")?.state, "done"));
 	t("nothing left owed", () => eq(report.owed.length, 0, report.owed.join(",")));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\nevery attempt says who ran it");
+{
+	// "Iris did this herself" and "a Claude subagent did it for her" were the
+	// same entry in the journal, so after a night of work nobody could tell
+	// which had happened. He is trying to automate himself and me out of the
+	// loop; that has to be a number he can watch, not a claim at the end.
+	const store = new Store(path.join(DIR, "executor"));
+	const work = path.join(DIR, "executor-work");
+	fs.mkdirSync(work, { recursive: true });
+	store.create("do it", [
+		{ id: "thing", title: "the thing", prompt: "the thing", proof: { kind: "shell", run: `test -s ${path.join(work, "thing.txt")}` } },
+	]);
+	const id = store.ids().find((g) => store.load(g)!.tasks.some((t) => t.id === "thing"))!;
+
+	await drive(store, {
+		executor: "iris-herself",
+		runner: async (task: any) => {
+			fs.writeFileSync(path.join(work, `${task.id}.txt`), "x\n", "utf8");
+			return "done";
+		},
+		stop: stopFor("executor"),
+		maxSweeps: 3,
+	} as any);
+
+	const attempt = store.load(id)!.tasks.find((t) => t.id === "thing")!.attempts.at(-1)!;
+	t("the journal names who did the work", () => eq(attempt.executor, "iris-herself", JSON.stringify(attempt)));
+
+	// And when nobody says, it must admit that rather than guess. A journal
+	// that says "rlm" when a subagent did it is worse than one saying nothing.
+	const store2 = new Store(path.join(DIR, "executor-unnamed"));
+	store2.create("do it", [
+		{ id: "thing", title: "the thing", prompt: "the thing", proof: { kind: "shell", run: `test -s ${path.join(work, "thing2.txt")}` } },
+	]);
+	const id2 = store2.ids()[0];
+	await drive(store2, {
+		runner: async () => {
+			fs.writeFileSync(path.join(work, "thing2.txt"), "x\n", "utf8");
+			return "done";
+		},
+		stop: stopFor("executor-unnamed"),
+		maxSweeps: 3,
+	});
+	const anon = store2.load(id2)!.tasks[0].attempts.at(-1)!;
+	t("and admits when nobody said, rather than guessing", () => eq(anon.executor, "unnamed", JSON.stringify(anon)));
+}

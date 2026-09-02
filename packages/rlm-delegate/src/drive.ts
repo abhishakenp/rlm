@@ -52,6 +52,8 @@ export interface DriveOptions {
 	probe?: Probe;
 	cwd?: string;
 	maxAttempts?: number;
+	/** Who is running this drive, stamped on every attempt it records. */
+	executor?: string;
 	repeatFloor?: number;
 	similarity?: number;
 	/** How the stop is read. Defaults to the Desktop files. */
@@ -291,6 +293,7 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 						// A dead-end criterion is only worth handing back if there is
 						// somebody to write a better one.
 						replanCriterion: Boolean(planner),
+						executor: options.executor,
 						repeatFloor: options.repeatFloor,
 						similarity: options.similarity,
 						onEvent: say,

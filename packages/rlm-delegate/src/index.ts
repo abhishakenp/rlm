@@ -288,6 +288,26 @@ export class RlmDelegateService extends Service {
 					console.log(`  ${(mark[row.state] ?? row.state).padEnd(9)} ${row.id.slice(0, 30).padEnd(31)} ${row.title.slice(0, 62)}`);
 					if (verbose && row.why) console.log(`  ${" ".repeat(9)} ${" ".repeat(31)} ${row.why.slice(0, 100)}`);
 				}
+				// Who has been doing the work. This is the number he is actually
+				// waiting on: "Iris is doing her own work now" has to be watchable
+				// going up, not a claim somebody makes at the end of a night.
+				const by: Record<string, number> = {};
+				for (const id of this.store.ids()) {
+					for (const task of this.store.load(id)?.tasks ?? []) {
+						for (const attempt of task.attempts ?? []) by[attempt.executor ?? "unnamed"] = (by[attempt.executor ?? "unnamed"] ?? 0) + 1;
+					}
+				}
+				const attempts = Object.values(by).reduce((a, b) => a + b, 0);
+				if (attempts) {
+					console.log(
+						`\n  ${attempts} attempt(s) — ` +
+							Object.entries(by)
+								.sort((a, b) => b[1] - a[1])
+								.map(([who, n]) => `${who} ${n}`)
+								.join(", "),
+					);
+				}
+
 				const count: Record<string, number> = {};
 				for (const row of rows) count[row.state] = (count[row.state] ?? 0) + 1;
 				const order = Object.keys(count).sort((a, b) => (rank[a] ?? 9) - (rank[b] ?? 9));
@@ -325,6 +345,8 @@ export class RlmDelegateService extends Service {
 				}
 				const report = await this.drive({
 					follow: argv.includes("--follow"),
+					// Named so the journal can answer "did Iris do this herself".
+					executor: process.env.RLM_EXECUTOR || "rlm-drive",
 					// No graph ids on the line means every graph, not none. An empty
 					// array is truthy, so passing it through as `only` would have
 					// restricted the drive to zero graphs and then reported that it

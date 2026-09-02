@@ -108,6 +108,20 @@ export interface Attempt {
 	/** What the criterion said, and what it printed. Data a reviewer can read. */
 	proof?: "passed" | "failed" | "errored";
 	proofDetail?: string;
+	/**
+	 * Who actually ran it.
+	 *
+	 * Nothing recorded this, so "Iris did this herself" and "a Claude subagent
+	 * did it for her" were the same entry in the journal, and after a night of
+	 * work nobody could tell which had happened. The point is not bookkeeping:
+	 * he is trying to automate himself and me out of this loop, and that is a
+	 * number that has to be watchable going up rather than a claim somebody
+	 * makes at the end.
+	 *
+	 * Free text on purpose — the set of things that can run a task is not
+	 * closed, and a new one appearing must not need a change here.
+	 */
+	executor?: string;
 }
 
 /**
