@@ -1,1 +1,1 @@
-- Added `recentSubagents()` method to rlm-sdk, tracking up to 20 most-recently-completed subagents with ISO timestamps, exposed via `iris rlm.status` as the `recent` field
+- Added `/rlm status` slash command in the TUI, exposing `recent` as a non-empty array of `completedAt`-stamped subagents when any have finished recently; return `iris()` method now returns a `recent` field alongside `graphs` and `subagents`
