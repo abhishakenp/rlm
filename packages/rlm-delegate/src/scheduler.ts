@@ -249,6 +249,19 @@ export const run = async (
 					why: "the criterion is inert — it fails the same with and without the work",
 					detail: verdict.detail,
 				});
+				// And then hand it back rather than leaving it stopped. A question
+				// nobody is awake to answer is still a task nobody finished, and
+				// what is wrong here is knowable without him: the check does not
+				// measure the work. Clearing it to `unstated` puts the task back in
+				// the pool for the planner to give it a criterion that can move.
+				// This cannot loosen anything — a replacement that already passes
+				// is refused as vacuous, and one that still cannot move is refused
+				// again as inert. The two guards close on each other.
+				try {
+					store.answered(graphId, task.id, { kind: "unstated" }, "the drive, because the criterion was inert");
+				} catch (error: any) {
+					say("rlm/delegate-graph-error", { graph: graphId, task: task.id, error: String(error?.message ?? error) });
+				}
 				return;
 			}
 

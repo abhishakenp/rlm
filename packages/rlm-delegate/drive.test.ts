@@ -610,23 +610,50 @@ console.log("\na criterion that fails the same with and without the work is not 
 	const id = store.ids().find((g) => store.load(g)!.tasks.some((t) => t.id === "collect"))!;
 
 	let handed = 0;
+	let inertSeen = "";
+	// The real drive has a planner, and the whole point is that the loop closes
+	// without him: the broken check is thrown out and a working one written in
+	// its place, by the same machinery, in the same run.
+	const planner = async () =>
+		JSON.stringify([
+			{
+				id: "collect-again",
+				title: "collect it, checkably",
+				prompt: "collect it",
+				proof: { kind: "shell", run: `test -s ${path.join(work, "collect-again.txt")}` },
+			},
+		]);
+
 	const report = await drive(store, {
-		runner: async () => {
+		planner,
+		runner: async (task: any) => {
 			handed += 1;
-			// The work really is done — it just cannot be seen by this check.
-			fs.writeFileSync(path.join(work, "runway.json"), "[]\n", "utf8");
-			return "collected";
+			// The work really is done — it just cannot be seen by the first check.
+			fs.writeFileSync(path.join(work, `${task.id}.txt`), "[]\n", "utf8");
+			return `collected for ${task.id}`;
 		},
 		stop: stopFor("inert"),
-		maxSweeps: 4,
-	});
+		maxSweeps: 6,
+		onEvent: (event: string, data: any) => {
+			if (event === "rlm/delegate-asked" && /inert/.test(String(data?.why ?? ""))) inertSeen = String(data.why);
+		},
+	} as any);
 
-	const after = store.load(id)!.tasks.find((t) => t.id === "collect")!;
-	t("it is not retried against a check that cannot move", () => eq(handed, 1, `handed=${handed}`));
-	t("the reason names the criterion, not the agent", () =>
-		ok(/not measuring the work/.test(after.reason ?? ""), after.reason ?? "(no reason)"));
-	t("and it is asked about rather than silently left failing", () =>
-		ok(report.questions.some((q) => q.task.id === "collect"), JSON.stringify(report.questions.map((q) => q.task.id))));
+	const graphAfter = store.load(id)!;
+	const after = graphAfter.tasks.find((t) => t.id === "collect")!;
+	t("the inert check was named as the fault, not the agent", () => ok(inertSeen, "(never said)"));
+	// Cleared to `unstated`, then refined — so by the end it is a rollup over
+	// the replacement. What matters is that the broken shell check is gone.
+	t("the broken criterion was thrown out rather than retried against", () =>
+		ok(after.proof.kind !== "shell", JSON.stringify(after.proof)));
+	t("the planner replaced it with one whose answer depends on the work", () =>
+		ok(graphAfter.tasks.some((x) => x.id === "collect-again"), graphAfter.tasks.map((x) => x.id).join(",")));
+	t("and that one is proven done — the loop closed with nobody awake", () =>
+		eq(graphAfter.tasks.find((x) => x.id === "collect-again")?.state, "done",
+			JSON.stringify(graphAfter.tasks.map((x) => [x.id, x.state]))));
+	t("nothing is left owed", () => eq(report.owed.length, 0, report.owed.join(",")));
+	t("and it did not spin — the runner was asked a bounded number of times", () =>
+		ok(handed <= 3, `handed=${handed}`));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
