@@ -111,7 +111,8 @@ export class RlmAgentService extends Service {
 		};
 
 		const settingsManager = rlmConfig?.getSettingsManager?.();
-		const cwd = this.config.cwd ?? settingsManager?.getCwd?.() ?? process.cwd();
+    const cwd = this.config.cwd ?? (settingsManager?.getCwd?.() ?? process.cwd());
+    const cwd = this.config.cwd ?? (settingsManager?.getCwd?.() ?? process.cwd());
 		const agentDir = this.config.agentDir ?? getAgentDir();
 
 		this.services = await createAgentSessionServices({
