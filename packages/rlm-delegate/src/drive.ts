@@ -200,10 +200,25 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 			// loop.
 			if (planner) {
 				let refined = 0;
+				// Bound the refusals, not the refinements.
+				//
+				// The cap was four a sweep, to stop a planner that keeps producing
+				// refusable plans becoming the loop. But it counted every plan,
+				// including the good ones, so with 195 unstated tasks — every
+				// single one of the ready set, and none of them runnable until it
+				// has a criterion — the drive faced 49 sweeps of nothing but
+				// planning before it could do a minute of real work. Measured:
+				// zero attempts in forty minutes while looking perfectly busy.
+				//
+				// A refusal is the thing that can spin, so that is what is
+				// counted. Refinements that the graph accepts are progress and
+				// cost one model call each, which is cheap beside a delegation.
+				let refused = 0;
+				const refusalCap = options.refineLimit ?? 4;
 				for (const graph of open) {
-					if (refined >= (options.refineLimit ?? 4) || stop.reason()) break;
+					if (refused >= refusalCap || stop.reason()) break;
 					for (const task of needsRefining(graph)) {
-						if (refined >= (options.refineLimit ?? 4) || stop.reason()) break;
+						if (refused >= refusalCap || stop.reason()) break;
 						say("rlm/drive-refining", { graph: graph.id, task: task.id, title: task.title });
 						const into = await refineOne(store, graph, task, planner, say, { cwd: options.cwd }).catch((error: any) => {
 							say("rlm/drive-graph-error", { graph: graph.id, error: String(error?.message ?? error) });
@@ -211,6 +226,7 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 						});
 						refined += 1;
 						if (into) say("rlm/drive-refined", { graph: graph.id, task: task.id, into });
+						else refused += 1;
 					}
 				}
 				if (refined) open = store.open().filter((g) => !options.only?.length || options.only.includes(g.id));
