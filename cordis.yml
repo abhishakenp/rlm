@@ -163,6 +163,33 @@
 - id: delegate
   name: './packages/rlm-delegate/src/index.ts'
 
+# The row that keeps the fleet from editing the thing that bounds the fleet.
+#
+# `capacity()` in the delegate row decides how many children may run at once,
+# and it reads that off the machine rather than from a setting. Every child is
+# an rlm with a `code` tool, so without this row a task that will not start can
+# be "fixed" by raising the ceiling that stopped it — which is how the laptop
+# hosting the fleet dies.
+#
+# Two layers, and both are in the row rather than bolted into what they defend:
+# a `tool_call` handler that refuses a cell writing a protected path, and a
+# watcher that puts back an unauthorised change however it got there.
+#
+# `protect` extends the list; it cannot shorten it. The guard's own source and
+# this file are protected whatever is written here, because otherwise the
+# shortest way through the door is to edit the door or delete this row.
+#
+# Above `learn` in reading order only. Load order comes from `inject`.
+- id: guard
+  name: './packages/rlm-guard/src/index.ts'
+  config:
+    cwd: .
+    protect:
+      - 'packages/rlm-delegate/src/capacity.ts'
+    restore: true
+    debounceMs: 400
+    unlockMaxMinutes: 60
+
 - id: learn
   name: './packages/rlm-learn/src/index.ts'
   config:
