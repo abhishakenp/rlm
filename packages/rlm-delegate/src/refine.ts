@@ -217,10 +217,30 @@ export const parsePlan = (text: string): TaskInput[] => {
  * Never a task something has already been broken into (it is a `rollup` by
  * then), and never one already carrying a real criterion.
  */
+/**
+ * Everything a planner should still be asked about.
+ *
+ * The exclusions are not a tidy list, they are each a way of burning a model
+ * call for nothing. `done` needs no criterion. `running` already has somebody
+ * on it. And `rejected` is the one that cost real money: it is what
+ * `refineOne` sets after three refused plans, meaning *nobody could write a
+ * criterion for this and it is now a question for him* — but this predicate
+ * did not know that, so the drive handed the same task back to the planner on
+ * every sweep, forever.
+ *
+ * Measured before the fix: four tasks at 350 attempts each in ninety minutes,
+ * 1,176 planner calls, and three real delegations in the same window. The
+ * stopping rule worked perfectly at attempt three and was simply not consulted
+ * by the thing doing the picking.
+ *
+ * Same shape as two other bugs tonight — a rule enforced in one place and not
+ * the next. It is the third time, so it is not bad luck: when a state means
+ * "stop", every reader of that state has to be checked, not just the writer.
+ */
+const NOT_WORTH_PLANNING: ReadonlySet<Task["state"]> = new Set(["done", "running", "rejected", "unreachable"]);
+
 export const needsRefining = (graph: Graph): Task[] =>
-	graph.tasks.filter(
-		(task) => task.proof.kind === "unstated" && task.state !== "done" && task.state !== "running",
-	);
+	graph.tasks.filter((task) => task.proof.kind === "unstated" && !NOT_WORTH_PLANNING.has(task.state));
 
 /**
  * Ask, and write the answer down only if the graph accepts it.

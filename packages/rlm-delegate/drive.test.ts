@@ -21,7 +21,7 @@ import { check } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/proof.ts";
 import { Gate, Stop } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/stop.ts";
 import { diagnose, wall } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/lapse.ts";
 import { askIn, derive } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/derive.ts";
-import { alreadyTrue, ephemeral, noteBaselines } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/refine.ts";
+import { alreadyTrue, ephemeral, needsRefining, noteBaselines } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/refine.ts";
 import { me2 } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/me2.ts";
 import { askModel, route as modelRoute } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/ask.ts";
 import * as http from "node:http";
@@ -1550,4 +1550,39 @@ console.log("\nwired: the CLI drive builds me-2 and it really reaches the router
 	await new Promise<void>((r) => server.close(() => r()));
 	if (wasHome === undefined) delete process.env.RLM_HOME;
 	else process.env.RLM_HOME = wasHome;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\na task nobody could write a criterion for is not asked about again");
+{
+	// This cost 1,176 planner calls in ninety minutes. `refineOne` sets a task
+	// to `rejected` after three refused plans — meaning nobody could write a
+	// criterion and it is now a question for him — and `needsRefining` did not
+	// know what that state meant, so the drive handed the same four tasks back
+	// to the planner on every sweep. 350 attempts each. The stopping rule fired
+	// correctly at attempt three and was simply not consulted by the picker.
+	const store = new Store(path.join(DIR, "no-replan-rejected"));
+	store.create("something nobody can judge", [
+		{ id: "vague", title: "vague", prompt: "vague", proof: { kind: "unstated", note: "nobody said" } },
+	] as any);
+	const id = store.ids().find((g) => store.load(g)!.tasks.some((t) => t.id === "vague"))!;
+
+	t("an unstated task is asked about while it is still open", () =>
+		eq(needsRefining(store.load(id)!).length, 1));
+
+	// Only the states that actually persist. `unreachable` is derived from what
+	// a task stands on and `running` is recovered into the pool on the next
+	// sweep, so neither survives being written here — asserting on them would
+	// be testing the store's derivation, not this predicate.
+	for (const state of ["rejected", "done"] as const) {
+		store.ended(id, "vague", state, { ok: false, detail: state, shape: "unrefinable" } as any, { reason: state });
+		t(`and never again once it is ${state}`, () =>
+			eq(needsRefining(store.load(id)!).length, 0, `${state} still asked about`));
+	}
+
+	// Failed is deliberately still asked about: a criterion that could not be
+	// met is a different thing from one nobody could write, and the first
+	// deserves another plan.
+	store.ended(id, "vague", "failed", { ok: false, detail: "failed", shape: "x" } as any, { reason: "failed" });
+	t("but a failed one is still worth another plan", () => eq(needsRefining(store.load(id)!).length, 1));
 }
