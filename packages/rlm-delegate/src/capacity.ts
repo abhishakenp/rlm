@@ -143,6 +143,63 @@ const availableMemory = (): number => {
 };
 
 /**
+ * What the kernel itself says about memory — the floor rule's signal, and not
+ * the same question as `availableMemory()`.
+ *
+ * These are two different questions and conflating them is the bug this exists
+ * to fix. `available ÷ total` answers "how many more children fit", and it is
+ * right for that; it is *wrong* as an answer to "is this machine in trouble",
+ * which is what his 30% floor is asking. Measured here at the same instant:
+ * the arithmetic said 25% free while the kernel said 49%, so the floor fired
+ * and the fleet sat at zero on a laptop with 4.3 GB genuinely available, 90%
+ * of its cores idle and room measured for thirteen. That is precisely the
+ * `free ÷ total` category error this file's header was written about, left
+ * standing in the one place nobody re-read — the third time that same mistake
+ * has been made in this file, in a third signal.
+ *
+ * So the floor reads what macOS reads. `memory_pressure` reports the kernel's
+ * own system-wide free percentage — the number behind Activity Monitor's
+ * pressure graph, which is what a person looking at this machine would call
+ * "free" — and `kern.memorystatus_vm_pressure_level` is the kernel's verdict
+ * rather than a percentage: 1 normal, 2 warning, 4 critical. Anything above
+ * normal is the machine saying it is in trouble in its own words, and that
+ * outranks any percentage, because "everything else that matters" was part of
+ * his rule too.
+ *
+ * Both are free to ask: measured at 0.00s real, three runs each. Cached for
+ * two seconds anyway, because capacity is re-asked between every task.
+ *
+ * Off darwin there is no equivalent and the caller falls back to the
+ * arithmetic, which is what `freemem()` already means on Linux.
+ */
+let kernelCache: { at: number; free: number | null; level: number | null } | null = null;
+const kernelMemory = (): { free: number | null; level: number | null } => {
+	if (platform() !== "darwin") return { free: null, level: null };
+	if (kernelCache && Date.now() - kernelCache.at < 2000) return kernelCache;
+	let free: number | null = null;
+	let level: number | null = null;
+	try {
+		const out = execFileSync("/usr/bin/memory_pressure", { encoding: "utf8", timeout: 2000 });
+		const pct = Number(out.match(/free percentage:\s*(\d+)/)?.[1]);
+		if (Number.isFinite(pct)) free = Math.max(0, Math.min(1, pct / 100));
+	} catch {
+		/* not there, or slow — the arithmetic stands in */
+	}
+	try {
+		const out = execFileSync("sysctl", ["-n", "kern.memorystatus_vm_pressure_level"], {
+			encoding: "utf8",
+			timeout: 2000,
+		});
+		const n = Number(out.trim());
+		if (Number.isFinite(n)) level = n;
+	} catch {
+		/* no verdict claimed */
+	}
+	kernelCache = { at: Date.now(), free, level };
+	return kernelCache;
+};
+
+/**
  * What one delegated child actually costs in memory, in bytes.
  *
  * Measured on this machine rather than estimated, because the estimate was
@@ -329,14 +386,25 @@ export const readings = (): Reading[] => {
 		// The budget, and the whole point of this file: not what fraction is
 		// free, but how many children fit in what is actually there.
 		const fits = Math.max(0, Math.floor((free * MEMORY_SHARE) / cost.bytes));
+		// The floor's number is a different number, from the kernel — see
+		// kernelMemory(). The arithmetic only stands in when it cannot answer.
+		const kernel = kernelMemory();
+		const strained = kernel.level !== null && kernel.level > 1;
+		const headroom = strained ? 0 : (kernel.free ?? Math.max(0, Math.min(1, free / total)));
+		const source = strained
+			? `the kernel reports memory pressure level ${kernel.level} — above normal, so this reads as no headroom at all`
+			: kernel.free !== null
+				? "kernel-reported free"
+				: "available ÷ total, no kernel reading";
 		out.push({
 			name: "memory",
-			headroom: Math.max(0, Math.min(1, free / total)),
+			headroom,
 			fits,
 			detail:
 				`${Math.round(free / 1e6)} MB available of ${Math.round(total / 1e6)} MB` +
 				` — room for ${fits} at ${Math.round(cost.bytes / 1e6)} MB each` +
-				` (${cost.seen ? `${cost.seen} live child(ren) measured` : "no children live, measured default"})`,
+				` (${cost.seen ? `${cost.seen} live child(ren) measured` : "no children live, measured default"});` +
+				` floor reads ${Math.round(headroom * 100)}% free (${source})`,
 		});
 	}
 
