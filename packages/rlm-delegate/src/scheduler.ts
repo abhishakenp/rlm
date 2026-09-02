@@ -482,7 +482,17 @@ export const run = async (
 		if (options.signal?.aborted) break;
 
 		const graph = load();
-		const ready = runnable(graph.tasks).filter((t) => !inFlight.has(t.id) && !fenced.has(t.id));
+		// The same rule the drive applies when it picks graphs, applied where the
+		// work is actually handed out. Fixing only the drive's two call sites left
+		// this one, and this is the one that matters: four delegations in the last
+		// thirteen minutes were spent on tasks with no criterion, and three came
+		// straight back "nobody said how to tell whether this was finished".
+		//
+		// `replanCriterion` is true exactly when a planner exists to give the task
+		// a criterion instead, which is the same condition the drive uses.
+		const ready = runnable(graph.tasks, Boolean(options.replanCriterion)).filter(
+			(t) => !inFlight.has(t.id) && !fenced.has(t.id),
+		);
 		const concurrency = await limitNow();
 		if (concurrency !== announced) {
 			announced = concurrency;
