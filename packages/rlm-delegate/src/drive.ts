@@ -499,7 +499,16 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 						if (!stopped) continue;
 						// A shell criterion can be replaced; an unstated one is
 						// already back in the planner's hands.
-						if (task.proof?.kind !== "shell" && task.proof?.kind !== "unstated") continue;
+						// Any criterion a planner can rewrite — the same rule the
+						// scheduler uses. I fixed it there and not here, and these
+						// two are not interchangeable: the scheduler acts when a task
+						// exhausts while running, this acts on tasks that already
+						// stopped and are therefore never runnable again. Three
+						// `kind: "file"` tasks sat failed across two fixes because of
+						// it — check-omniroute-selection-logic,
+						// inspect-omniroute-timeout-config, analyze-triggerless-skills
+						// — and `stuck` went 73 to 84 behind them.
+						if (task.proof?.kind === undefined || task.proof.kind === "rollup") continue;
 						if (task.proof?.kind === "unstated" && task.state === "unproven" && !task.attempts.length) continue;
 						if (task.attempts.length >= 2 * (options.maxAttempts ?? 3)) continue;
 						try {
