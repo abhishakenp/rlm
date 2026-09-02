@@ -718,3 +718,66 @@ console.log("\nexhausted against a check that never moved asks for a different c
 	t("nothing was left owed behind it", () => eq(report.owed.length, 0, report.owed.join(",")));
 	t("the planner was not turned into the loop", () => ok(planned <= 2, `planned=${planned}`));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\na task that was given up on before any of this existed is picked back up");
+{
+	// The real state on disk at 11:15: four tasks in `failed` against criteria
+	// that never moved, seventeen unreachable behind them, and nothing that
+	// would ever reach them again — a failed task is not runnable, so the
+	// scheduler's own hand-back never fires for it. It took a person noticing
+	// and running a repair script. It must not.
+	const store = new Store(path.join(DIR, "already-stopped"));
+	const work = path.join(DIR, "already-stopped-work");
+	fs.mkdirSync(work, { recursive: true });
+
+	store.create("collect the data", [
+		{
+			id: "collect",
+			title: "collect it",
+			prompt: "collect it",
+			proof: { kind: "shell", run: "definitely-not-a-real-command --search", cwd: work },
+		},
+		{
+			id: "behind",
+			title: "the one stuck behind it",
+			prompt: "the one behind",
+			needs: ["collect"],
+			proof: { kind: "shell", run: `test -s ${path.join(work, "behind.txt")}` },
+		},
+	]);
+	const id = store.ids().find((g) => store.load(g)!.tasks.some((t) => t.id === "collect"))!;
+
+	// Put it in exactly the state the repair script found: stopped, with the
+	// dead criterion still on it, before the drive is ever started.
+	store.ended(id, "collect", "failed", { ok: false, detail: "gave up", shape: "gave up" } as any, {
+		reason: "gave up after failing the same way 2 times",
+	});
+	eq(store.load(id)!.tasks.find((x) => x.id === "collect")!.state, "failed", "setup");
+
+	const report = await drive(store, {
+		planner: async () =>
+			JSON.stringify([
+				{
+					id: "collect-checkably",
+					title: "collect it, checkably",
+					prompt: "collect it",
+					proof: { kind: "shell", run: `test -s ${path.join(work, "collect-checkably.txt")}` },
+				},
+			]),
+		runner: async (task: any) => {
+			fs.writeFileSync(path.join(work, `${task.id}.txt`), "[]\n", "utf8");
+			return `did ${task.id}`;
+		},
+		stop: stopFor("already-stopped"),
+		maxSweeps: 8,
+	} as any);
+
+	const after = store.load(id)!;
+	const state = (x: string) => after.tasks.find((k) => k.id === x)?.state;
+	t("nobody had to run a repair — the drive picked the stopped task back up", () =>
+		ok(after.tasks.some((x) => x.id === "collect-checkably"), after.tasks.map((x) => x.id).join(",")));
+	t("and it is proven done", () => eq(state("collect-checkably"), "done", JSON.stringify(after.tasks.map((x) => [x.id, x.state]))));
+	t("the task stuck behind it is unstuck, not unreachable", () => eq(state("behind"), "done", String(state("behind"))));
+	t("nothing is left owed", () => eq(report.owed.length, 0, report.owed.join(",")));
+}

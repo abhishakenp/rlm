@@ -203,6 +203,28 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 				if (refined) open = store.open().filter((g) => !options.only?.length || options.only.includes(g.id));
 			}
 
+			// Tasks that were given up on before any of this existed are not
+			// runnable, so nothing ever reaches them again — they just sit in
+			// `failed` with everything behind them unreachable. The scheduler
+			// hands a dead end back as it runs; this is the same rule applied to
+			// the ones that already stopped, every sweep, so it is the drive's
+			// own job rather than a repair somebody has to remember to run.
+			if (planner) {
+				for (const graph of open) {
+					for (const task of graph.tasks) {
+						if (task.state !== "failed" || task.proof?.kind !== "shell") continue;
+						if (task.attempts.length >= 2 * (options.maxAttempts ?? 3)) continue;
+						try {
+							store.answered(graph.id, task.id, { kind: "unstated" }, "the drive, because this check never once moved");
+							say("rlm/drive-replanning", { graph: graph.id, task: task.id, was: task.proof.run });
+						} catch (error: any) {
+							say("rlm/drive-graph-error", { graph: graph.id, error: String(error?.message ?? error) });
+						}
+					}
+				}
+				open = store.open().filter((g) => !options.only?.length || options.only.includes(g.id));
+			}
+
 			for (const graph of open) touched.add(graph.id);
 			const workable = open.filter((g) => runnable(g.tasks).length);
 
