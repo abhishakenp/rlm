@@ -178,6 +178,237 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 	 */
 	const touched = new Set<string>();
 
+	/** The graphs this drive is allowed to look at, read fresh off the disk. */
+	const read = (): Graph[] => store.open().filter((g) => !options.only?.length || options.only.includes(g.id));
+
+	/**
+	 * Refinement finished something, so there may be work now.
+	 *
+	 * The work loop below runs *beside* refinement rather than after it, so it
+	 * has to hear that a plan landed at the moment it lands rather than on a
+	 * timer. One waiter, because there is one work loop.
+	 */
+	let wake: (() => void) | null = null;
+	const produced = (): void => {
+		const woken = wake;
+		wake = null;
+		woken?.();
+	};
+	const waitForWork = (ms: number): Promise<void> =>
+		new Promise<void>((resolve) => {
+			const timer = setTimeout(() => {
+				wake = null;
+				resolve();
+			}, ms);
+			timer.unref?.();
+			wake = () => {
+				clearTimeout(timer);
+				resolve();
+			};
+		});
+
+	/**
+	 * Refinement, several at a time, against the same budget the work uses.
+	 *
+	 * It used to be one at a time — a plain double `for` loop `await`ing
+	 * `refineOne`, with the whole of execution waiting below it. Measured on
+	 * the real backlog: 229 requests needing a criterion and 3 tasks runnable,
+	 * because with a planner mounted an `unstated` task is deliberately not
+	 * runnable. Every runner on the machine therefore sat idle behind a
+	 * single-file queue of planner calls, each of which is a spawned child with
+	 * a ten-minute cap. That is not a slow loop, it is a stopped one.
+	 *
+	 * Three things make running them together safe, and none of them is
+	 * optimism:
+	 *
+	 *   - **The journal cannot be raced from here.** `store.refine` loads the
+	 *     graph, validates the plan against it and appends the line with no
+	 *     `await` anywhere in between — there is not one in the whole of
+	 *     store.ts — so on one thread it is a single indivisible step. Two
+	 *     plans for two tasks of the SAME graph are each validated against
+	 *     what is on disk at the instant they are written, so a second plan
+	 *     that collides on an id is refused exactly as it would have been in a
+	 *     serial loop, and the planner is handed that objection to fix.
+	 *   - **The bound is unchanged.** `refineLimit` bounds refusals, not
+	 *     refinements. Once the cap is reached nothing further is picked up and
+	 *     what is already in the air finishes. A planner producing refusable
+	 *     plans still cannot become the loop.
+	 *   - **The stop is unchanged.** It is re-read before every task is picked
+	 *     up and again after the gate is taken, so a stop file appearing while
+	 *     eight plans are in the air refuses the ninth at once and kills the
+	 *     eight through the abort signal the planner was built with.
+	 *
+	 * The gate is the one the work uses, so planning and running compete for a
+	 * single measured budget rather than refinement being free and unbounded
+	 * beside a capped runner.
+	 */
+	const refineAll = async (open: Graph[], state: { active: number; done: boolean }): Promise<void> => {
+		try {
+			if (!planner) return;
+			// Bound the refusals, not the refinements.
+			//
+			// A refusal is the thing that can spin, so that is what is counted.
+			// Refinements the graph accepts are progress and cost one model call
+			// each, which is cheap beside a delegation.
+			const refusalCap = options.refineLimit ?? 4;
+			let refused = 0;
+
+			// Most wanted first, here as well as at the door of the runner.
+			// `runnable()` has sorted by priority since me-1 and me-2 sat behind
+			// fashion trends — but with two hundred requests waiting for a
+			// criterion, WHICH of them gets one is what decides what is runnable
+			// at all, so the same ordering has to be applied a step earlier or
+			// the priority never gets the chance to matter. Stable, so an
+			// unprioritised backlog is refined in the order it was written down.
+			const queue = open
+				.flatMap((graph) => needsRefining(graph).map((task) => ({ graph, task })))
+				.sort((a, b) => (b.task.priority ?? 0) - (a.task.priority ?? 0));
+			let next = 0;
+
+			const worker = async (): Promise<void> => {
+				for (;;) {
+					if (refused >= refusalCap || stop.reason() || abort.signal.aborted) return;
+					const item = queue[next++];
+					if (!item) return;
+					const release = await gate.take();
+					// Re-read after the wait: this may have queued behind a
+					// forty-minute delegation, and the stop file is never cached.
+					if (stop.reason() || abort.signal.aborted) {
+						release();
+						return;
+					}
+					state.active += 1;
+					say("rlm/drive-refining", {
+						graph: item.graph.id,
+						task: item.task.id,
+						title: item.task.title,
+						atOnce: state.active,
+					});
+					let into = 0;
+					try {
+						into = await refineOne(store, item.graph, item.task, planner, say, { cwd: options.cwd });
+					} catch (error: any) {
+						say("rlm/drive-graph-error", { graph: item.graph.id, error: String(error?.message ?? error) });
+					} finally {
+						state.active -= 1;
+						release();
+					}
+					if (into) {
+						say("rlm/drive-refined", { graph: item.graph.id, task: item.task.id, into });
+						// Said at once. The work loop is running beside this, and
+						// the whole point is that it starts on the first plan that
+						// lands rather than on the two hundredth.
+						produced();
+					} else refused += 1;
+				}
+			};
+
+			// The pool is sized to the same measured limit, and re-sized as the
+			// machine changes under it. The gate is the real cap — an extra
+			// worker only ever waits — but too few workers would leave the
+			// budget unspent, which is the whole bug this is about.
+			const alive = new Set<Promise<void>>();
+			for (;;) {
+				while (
+					alive.size < Math.max(1, limit()) &&
+					next < queue.length &&
+					refused < refusalCap &&
+					!stop.reason() &&
+					!abort.signal.aborted
+				) {
+					const running: Promise<void> = worker().finally(() => alive.delete(running));
+					alive.add(running);
+				}
+				if (!alive.size) break;
+				const tick = new Promise<void>((resolve) => {
+					const timer = setTimeout(resolve, 2_000);
+					timer.unref?.();
+				});
+				await Promise.race([...alive, tick]);
+			}
+		} finally {
+			state.done = true;
+			produced();
+		}
+	};
+
+	/**
+	 * The work, run beside refinement rather than after it.
+	 *
+	 * Refinement's product IS runnable work, so a phase that has to finish
+	 * first is a phase that holds every runner idle for as long as the planner
+	 * takes. This loops instead: it re-reads the graphs, runs everything that
+	 * is runnable, and — while refinement is still going — waits to be told a
+	 * plan has landed rather than ending the sweep.
+	 *
+	 * Nothing unrefined can reach a runner through this, and that is
+	 * structural rather than careful. The rule lives in `runnable(tasks,
+	 * canRefine)`, which excludes `unstated` whenever there is a planner to
+	 * give it a criterion instead, and the scheduler applies it itself on every
+	 * pass of its own loop. This decides only WHEN the scheduler is asked,
+	 * never WHAT it may hand out.
+	 */
+	const work = async (refining: { done: boolean }): Promise<void> => {
+		// The store's fingerprint the last time a pass moved nothing. A graph
+		// whose tasks the fence refuses stays workable for ever; without this it
+		// would be handed to the scheduler in a tight loop.
+		let idleAt: string | null = null;
+		for (;;) {
+			if (abort.signal.aborted || stoppedBy) return;
+			const open = read();
+			const mark = fingerprint(open);
+			const workable = mark === idleAt ? [] : open.filter((g) => runnable(g.tasks, Boolean(planner)).length);
+
+			if (!workable.length) {
+				idleAt = mark;
+				// Nothing to run yet. If something is still turning requests into
+				// runnable work, wait for it rather than ending the sweep holding
+				// work that is one planner call away from being startable.
+				if (refining.done) return;
+				await waitForWork(2_000);
+				continue;
+			}
+
+			for (const graph of workable) touched.add(graph.id);
+			say("rlm/drive-working", {
+				graphs: workable.map((g) => g.id),
+				runnable: workable.reduce((n, g) => n + runnable(g.tasks, Boolean(planner)).length, 0),
+				limit: limit(),
+			});
+
+			// Every graph at once, one budget between them. Two graphs with no
+			// relationship are as independent as two tasks with no edge, and the
+			// gate is what makes that safe rather than optimistic.
+			await Promise.all(
+				workable.map((graph) =>
+					runGraph(store, graph.id, runner, {
+						concurrency: () => Math.max(1, limit()),
+						gate,
+						fence,
+						signal: abort.signal,
+						probe: options.probe,
+						cwd: options.cwd,
+						maxAttempts: options.maxAttempts,
+						// A dead-end criterion is only worth handing back if there is
+						// somebody to write a better one.
+						replanCriterion: Boolean(planner),
+						reviewer,
+						executor: options.executor,
+						repeatFloor: options.repeatFloor,
+						similarity: options.similarity,
+						onEvent: say,
+					}).catch((error: any) => {
+						// A graph that throws is a graph, not the drive. The others
+						// carry on and this one is still on disk saying what it owes.
+						say("rlm/drive-graph-error", { graph: graph.id, error: String(error?.message ?? error) });
+					}),
+				),
+			);
+
+			idleAt = fingerprint(read()) === mark ? mark : null;
+		}
+	};
+
 	try {
 		for (;;) {
 			if (stoppedBy) {
@@ -192,45 +423,6 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 
 			let open = store.open().filter((g) => !options.only?.length || options.only.includes(g.id));
 			const before = fingerprint(open);
-
-			// Before anything is handed to anybody: a request nobody can judge is
-			// broken into jobs somebody can. Only ever on `unstated`, only ever
-			// written down if the graph accepts the plan, and bounded per sweep so
-			// a planner that keeps producing refusable plans cannot become the
-			// loop.
-			if (planner) {
-				let refined = 0;
-				// Bound the refusals, not the refinements.
-				//
-				// The cap was four a sweep, to stop a planner that keeps producing
-				// refusable plans becoming the loop. But it counted every plan,
-				// including the good ones, so with 195 unstated tasks — every
-				// single one of the ready set, and none of them runnable until it
-				// has a criterion — the drive faced 49 sweeps of nothing but
-				// planning before it could do a minute of real work. Measured:
-				// zero attempts in forty minutes while looking perfectly busy.
-				//
-				// A refusal is the thing that can spin, so that is what is
-				// counted. Refinements that the graph accepts are progress and
-				// cost one model call each, which is cheap beside a delegation.
-				let refused = 0;
-				const refusalCap = options.refineLimit ?? 4;
-				for (const graph of open) {
-					if (refused >= refusalCap || stop.reason()) break;
-					for (const task of needsRefining(graph)) {
-						if (refused >= refusalCap || stop.reason()) break;
-						say("rlm/drive-refining", { graph: graph.id, task: task.id, title: task.title });
-						const into = await refineOne(store, graph, task, planner, say, { cwd: options.cwd }).catch((error: any) => {
-							say("rlm/drive-graph-error", { graph: graph.id, error: String(error?.message ?? error) });
-							return 0;
-						});
-						refined += 1;
-						if (into) say("rlm/drive-refined", { graph: graph.id, task: task.id, into });
-						else refused += 1;
-					}
-				}
-				if (refined) open = store.open().filter((g) => !options.only?.length || options.only.includes(g.id));
-			}
 
 			// Tasks that were given up on before any of this existed are not
 			// runnable, so nothing ever reaches them again — they just sit in
@@ -329,21 +521,17 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 			}
 
 			for (const graph of open) touched.add(graph.id);
-			const workable = open.filter((g) => runnable(g.tasks, Boolean(planner)).length);
 
-			if (!workable.length) {
-				// Nothing runnable is not the same as nothing to do. The repair
-				// above turns stopped tasks into `unstated` ones, and refinement
-				// runs at the top of a sweep — so breaking here would end the run
-				// holding work it had just created for itself, one step from
-				// being workable. Observed: a repaired task sat unrefined and the
-				// drive reported it settled.
-				const refinable = planner && open.some((g) => needsRefining(g).length);
-				if (refinable && sweeps < maxSweeps) {
-					sweeps += 1;
-					say("rlm/drive-refining-only", { sweep: sweeps, graphs: open.length });
-					continue;
-				}
+			// What there is to do, in both currencies. Refinement turns the
+			// first into the second, which is exactly why they no longer take
+			// turns: a sweep that refines two hundred requests before it runs
+			// anything is a sweep in which nothing runs.
+			const refinable = planner ? open.reduce((n, g) => n + needsRefining(g).length, 0) : 0;
+			const ready = open.reduce((n, g) => n + runnable(g.tasks, Boolean(planner)).length, 0);
+
+			if (!refinable && !ready) {
+				// Nothing runnable and nothing anybody could make runnable. This
+				// is as far as it goes.
 				if (!options.follow) break;
 				say("rlm/drive-idle", { owed: open.reduce((n, g) => n + outstanding(g.tasks).length, 0) });
 				await new Promise((r) => setTimeout(r, options.idleMs ?? 15_000));
@@ -358,39 +546,18 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 			sweeps += 1;
 			say("rlm/drive-sweep", {
 				sweep: sweeps,
-				graphs: workable.map((g) => g.id),
-				runnable: workable.reduce((n, g) => n + runnable(g.tasks, Boolean(planner)).length, 0),
+				graphs: open.map((g) => g.id),
+				runnable: ready,
+				refinable,
 				limit: limit(),
 			});
 
-			// Every graph at once, one budget between them. Two graphs with no
-			// relationship are as independent as two tasks with no edge, and the
-			// gate is what makes that safe rather than optimistic.
-			await Promise.all(
-				workable.map((graph) =>
-					runGraph(store, graph.id, runner, {
-						concurrency: () => Math.max(1, limit()),
-						gate,
-						fence,
-						signal: abort.signal,
-						probe: options.probe,
-						cwd: options.cwd,
-						maxAttempts: options.maxAttempts,
-						// A dead-end criterion is only worth handing back if there is
-						// somebody to write a better one.
-						replanCriterion: Boolean(planner),
-						reviewer,
-						executor: options.executor,
-						repeatFloor: options.repeatFloor,
-						similarity: options.similarity,
-						onEvent: say,
-					}).catch((error: any) => {
-						// A graph that throws is a graph, not the drive. The others
-						// carry on and this one is still on disk saying what it owes.
-						say("rlm/drive-graph-error", { graph: graph.id, error: String(error?.message ?? error) });
-					}),
-				),
-			);
+			// The two at once, on one budget. Refinement is not a phase ahead of
+			// execution any more: it is work of a second kind, competing for the
+			// same gate, and what it produces is picked up by the loop beside it
+			// as soon as it is written down.
+			const refining = { active: 0, done: !refinable };
+			await Promise.all([refinable ? refineAll(open, refining) : Promise.resolve(), work(refining)]);
 
 			const after = fingerprint(store.open().filter((g) => !options.only?.length || options.only.includes(g.id)));
 			if (after === before) {

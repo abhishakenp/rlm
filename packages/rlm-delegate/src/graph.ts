@@ -106,7 +106,12 @@ export interface Attempt {
 	 */
 	approach?: string;
 	/** What the criterion said, and what it printed. Data a reviewer can read. */
-	proof?: "passed" | "failed" | "errored";
+	/**
+	 * What the criterion said. `unstated` is a real verdict and not an absence:
+	 * it means nobody ever wrote a check, which is the outcome that must never
+	 * be confused with passing.
+	 */
+	proof?: "passed" | "failed" | "errored" | "unstated";
 	proofDetail?: string;
 	/**
 	 * Who actually ran it.

@@ -378,7 +378,10 @@ console.log("\nit is a surface on the row, so there is one obvious command");
 		delete process.env.RLM_DELEGATE_CHILD;
 		ok(service.intake("a request from a person"), "a real request was dropped");
 	});
-	await ctx.stop?.();
+	// `ctx.stop` does not exist on a Cordis Context — this is an optional call on
+	// a method that was never there, so the teardown it looks like has always
+	// been a no-op. The kernel's own disposer is `ctx.fiber.dispose()`.
+	await (ctx as any).fiber?.dispose?.();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

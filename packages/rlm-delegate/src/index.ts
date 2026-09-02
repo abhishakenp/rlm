@@ -47,6 +47,42 @@ import { me2 } from "./me2.ts";
 import { Stop } from "./stop.ts";
 import { Store, defaultDir } from "./store.ts";
 
+/**
+ * The events this row emits, declared to the kernel.
+ *
+ * Cordis types `emit` against its own `Events` interface, so an undeclared
+ * name is a type error — fifteen of them here, every one a real event that has
+ * been firing all along. The kernel is asking a fair question: if nothing
+ * declares the name, nothing can subscribe to it with any confidence about
+ * what it carries.
+ *
+ * Declaring them is not paperwork. It is what makes an event part of the
+ * contract rather than a string two files happen to agree on, and it is how
+ * every healthy row in Iris does it.
+ */
+declare module "@deepseek-ai/cordis" {
+	interface Events {
+		/** A request was recorded as a task before anybody worked it. @mode emit */
+		"rlm/delegate-intake"(data: { graph: string; source?: string; title: string; criterion: string; why?: string }): void;
+		/** A graph was declared, with the tasks it was broken into. @mode emit */
+		"rlm/delegate-declared"(data: { graph: string; goal?: string; tasks?: number; added?: number }): void;
+		/** How much is still owed, across how many graphs. @mode emit */
+		"rlm/delegate-outstanding"(data: { graphs: number; tasks: number }): void;
+		/** A task nobody could judge was broken into ones somebody can. @mode emit */
+		"rlm/delegate-refined"(data: { graph: string; task: string; into: number }): void;
+		/** A turn ended and no criterion was ever run — not a verdict, the absence of one. @mode emit */
+		"rlm/delegate-unproven"(data: { graph: string; task: string; title?: string; why?: string }): void;
+		/** A task exhausted its attempts. @mode emit */
+		"rlm/delegate-failed"(data: { graph: string; task: string; repeats?: number; reason?: string }): void;
+		/** He said how to tell whether something was done. @mode emit */
+		"rlm/delegate-answered"(data: { graph: string; task: string; criterion?: string; by?: string }): void;
+		/** me-2 looked at finished work before it was called done. @mode emit */
+		"rlm/delegate-reviewed"(data: { graph: string; task: string; verdict: "accepted" | "rejected"; by: string; reason: string }): void;
+		/** The drive stood down, or was released. @mode emit */
+		"rlm/drive-halted"(data: { file?: string; why: string | null }): void;
+	}
+}
+
 export const name = "rlm-delegate";
 
 export interface RlmDelegateConfig {
@@ -786,7 +822,7 @@ export class RlmDelegateService extends Service {
 			maxAttempts: this.config.maxAttempts ?? 3,
 			repeatFloor: this.config.repeatFloor ?? 2,
 			probe: this.probe(),
-			onEvent: (event, data) => this.ctx.emit?.(event, data),
+			onEvent: (event, data) => (this.ctx.emit as unknown as (n: string, d: unknown) => void)?.(event, data),
 			...options,
 		});
 	}
@@ -891,7 +927,7 @@ export class RlmDelegateService extends Service {
 			maxSweeps: this.config.maxSweeps ?? 25,
 			concurrency:
 				typeof this.config.concurrency === "number" ? this.config.concurrency : () => this.capacity().limit,
-			onEvent: (event, data) => this.ctx.emit?.(event, data),
+			onEvent: (event, data) => (this.ctx.emit as unknown as (n: string, d: unknown) => void)?.(event, data),
 			...options,
 			makeReviewer: options.reviewer ? undefined : makeReviewer,
 			makeRunner: options.runner ? undefined : makeRunner,
