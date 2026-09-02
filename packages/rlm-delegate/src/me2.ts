@@ -30,7 +30,14 @@ export interface Me2Options {
 	diff?(task: Task, graph: Graph): Promise<string | undefined>;
 }
 
-const VERDICT = /^\s*[*_`#>-]*\s*(accepted|rejected)\b/im;
+/**
+ * A line that is a verdict and nothing else.
+ *
+ * Whole-line on purpose. Both words appear constantly inside the paragraph
+ * while it explains itself ("this is the exact failure mode..., so it is
+ * rejected"), and a substring match turns any of that into the answer.
+ */
+const VERDICT = /^[ \t]*[*_`#>\-]*[ \t]*(accepted|rejected)[ \t]*[*_`.!:]*[ \t]*$/gim;
 
 /**
  * Reasoning models answer inside `<think>` before they answer.
@@ -83,9 +90,15 @@ export const me2 = (options: Me2Options): Reviewer => ({
 			"that something really reaches it at runtime; does it match what he asked for rather than a",
 			"reasonable version of it; and does anything here read like success without having looked.",
 			"",
-			"First line exactly `accepted` or `rejected`. Then one short paragraph. If rejected, name the",
-			"lesson and say what to do. Do not reject for style, for missing tests, or for anything you",
-			"cannot point at.",
+			"Write the paragraph FIRST, then the verdict — in that order, and the order is not cosmetic.",
+			"Asked for the verdict first, a model names one before it has committed to an argument, and",
+			"then writes the argument for the other one: observed on real work, where it answered",
+			"`accepted` above a paragraph that ended \"this is the exact failure mode from lesson one\".",
+			"",
+			"So: one short paragraph. If you would reject, name the lesson and say what to do. Do not",
+			"reject for style, for missing tests, or for anything you cannot point at. Then, on the very",
+			"last line, on a line of its own and as the whole line, write exactly one word — `accepted`",
+			"or `rejected` — and make it the one your paragraph argued for.",
 		].join("\n");
 
 		let answer: string;
@@ -98,15 +111,37 @@ export const me2 = (options: Me2Options): Reviewer => ({
 		}
 
 		const said = strip(answer);
-		const hit = VERDICT.exec(said);
-		if (!hit) {
+		const hits = [...said.matchAll(VERDICT)];
+		if (!hits.length) {
 			return {
 				verdict: "rejected",
 				reason: `me-2 did not answer with a verdict, so nothing has been reviewed: ${(said || String(answer ?? "")).slice(0, 300)}`,
 			};
 		}
-		const verdict = hit[1].toLowerCase() as "accepted" | "rejected";
-		const reason = said.slice(hit.index + hit[0].length).trim().slice(0, 1200) || "(no reason given)";
+
+		// It contradicted itself, so it has not answered.
+		//
+		// A model that says `accepted` on top and `rejected` at the bottom has
+		// argued both, and picking either is picking for it. This is the same
+		// rule as silence — unreviewable is not reviewed — and it must fail this
+		// way round: an acceptance nobody meant is the outcome me-2 exists to
+		// prevent, and it is the one that leaves no trace of having gone wrong.
+		const words = [...new Set(hits.map((h) => h[1].toLowerCase()))];
+		if (words.length > 1) {
+			return {
+				verdict: "rejected",
+				reason:
+					`me-2 answered both ways, so nothing has been reviewed — it said ${words.join(" and ")}. ` +
+					`What it wrote: ${said.slice(0, 400)}`,
+			};
+		}
+
+		const verdict = words[0] as "accepted" | "rejected";
+		// The argument, which is everything that is not the verdict line.
+		const last = hits[hits.length - 1];
+		const before = said.slice(0, last.index).trim();
+		const after = said.slice(last.index + last[0].length).trim();
+		const reason = (before.length >= after.length ? before : after).slice(0, 1200) || "(no reason given)";
 		return { verdict, reason };
 	},
 });

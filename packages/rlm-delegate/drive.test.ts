@@ -1354,6 +1354,30 @@ console.log("\nme-2 itself: silence, no verdict and an unreachable model are all
 	const cutoff = await answering("<think>Weighing accepted against rejected and I have not").review(task, graph);
 	t("a thought cut off mid-sentence is not a verdict either", () => eq(cutoff.verdict, "rejected"));
 
+	// The shape the prompt now asks for: argue, then name it.
+	const argued = await answering("Nothing in the codebase reads PRIME_AGENT_SESSION_ID.\n\nrejected").review(task, graph);
+	t("the verdict may come last, after the argument, and the argument is kept", () => {
+		eq(argued.verdict, "rejected");
+		ok(argued.reason.includes("PRIME_AGENT_SESSION_ID"), argued.reason);
+	});
+
+	// Observed on real backlog work, not invented: asked for the verdict first,
+	// the model wrote `accepted` and then a paragraph ending "this is the exact
+	// failure mode from lesson one". Picking either word is picking for it.
+	const bothWays = await answering(
+		"accepted\n\nBut nothing reads PRIME_AGENT_SESSION_ID, which is the exact failure mode from lesson one.\n\nrejected",
+	).review(task, graph);
+	t("a reviewer that answers both ways has not answered, and fails closed", () => {
+		eq(bothWays.verdict, "rejected");
+		ok(bothWays.reason.includes("answered both ways"), bothWays.reason);
+	});
+
+	const mentioned = await answering(
+		"This would be rejected if the flag were unread, but something does read it, so it holds.\n\naccepted",
+	).review(task, graph);
+	t("the words inside the paragraph are not the verdict — only a line that is one is", () =>
+		eq(mentioned.verdict, "accepted"));
+
 	const dressed = await answering("**rejected**\n\nThe flag is parsed and nothing reads it.").review(task, graph);
 	t("a verdict a model has bolded still counts", () => {
 		eq(dressed.verdict, "rejected");
