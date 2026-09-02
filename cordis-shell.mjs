@@ -153,15 +153,47 @@ async function main() {
 	ctx.baseUrl = pathToFileURL(here + "/").href;
 	await ctx.plugin((await import("@deepseek-ai/cordis-plugin-loader")).default);
 
-	const entry = ctx.loader.resolve(
-		await ctx.loader.create({
-			name: "@deepseek-ai/cordis-plugin-include",
-			// Bare specifiers inside the composition resolve against the
-			// composition's own directory, so a config passed by absolute path
-			// still finds packages the way `cordis.yml` does.
-			config: { path: pathToFileURL(composition).href, enableLogs: false },
-		}),
-	);
+	// Boot without the rows that will not load, rather than not at all.
+	//
+	// Cordis already protects a *running* process: a failed update rolls back
+	// to the previous entry and only throws if the rollback itself fails. A
+	// cold boot has nothing to roll back to, so one broken file refuses the
+	// entire composition — and twice tonight that meant every `rlm` command
+	// returned a stack trace while the running daemon carried on with its old
+	// modules, so nothing looked wrong from outside.
+	//
+	// Both were an agent mid-edit: a stray `}` in rlm-sdk, and rlm-outloop
+	// being written while mounted. Neither is a reason for the other
+	// twenty-five rows to be unavailable.
+	//
+	// So: try the whole composition, and if it refuses, find the rows that
+	// cannot be imported, write a composition without them, and boot that.
+	// Loudly — a degraded boot that looks like a healthy one is worse than a
+	// failed one.
+	const boot = async (path) =>
+		ctx.loader.resolve(
+			await ctx.loader.create({
+				name: "@deepseek-ai/cordis-plugin-include",
+				// Bare specifiers inside the composition resolve against the
+				// composition's own directory, so a config passed by absolute path
+				// still finds packages the way `cordis.yml` does.
+				config: { path: pathToFileURL(path).href, enableLogs: false },
+			}),
+		);
+
+	let entry;
+	try {
+		entry = await boot(composition);
+	} catch (error) {
+		const broken = await unloadableRows(composition);
+		if (!broken.length) throw error;
+		const reduced = await withoutRows(composition, broken);
+		process.stderr.write(
+			`[rlm] ${broken.length} row(s) will not load and were left out of this boot: ${broken.join(", ")}\n` +
+				`[rlm] ${String(error?.message ?? error).split("\n")[0]}\n`,
+		);
+		entry = await boot(reduced);
+	}
 
 	watchFile(composition, { interval: POLL_MS }, (curr, prev) => {
 		if (curr.mtimeMs === prev.mtimeMs && curr.ino === prev.ino) return;
@@ -207,4 +239,60 @@ async function waitFor(ctx, service, timeoutMs = 15000) {
 		if (Date.now() > deadline) return undefined;
 		await new Promise((r) => setTimeout(r, 25));
 	}
+}
+
+/**
+ * The rows whose entry cannot be imported, named.
+ *
+ * Only local rows are tried: a package from node_modules is the package
+ * manager's problem, and importing every one of them would make a boot slow
+ * enough that somebody turns this off.
+ */
+async function unloadableRows(composition) {
+	const { readFileSync } = await import("node:fs");
+	const { dirname, resolve } = await import("node:path");
+	const root = dirname(composition);
+	const rows = [];
+	let current = null;
+	for (const raw of readFileSync(composition, "utf8").split("\n")) {
+		const line = raw.replace(/#.*$/, "");
+		const id = line.match(/^-\s*id:\s*(\S+)/);
+		if (id) {
+			if (current) rows.push(current);
+			current = { id: id[1], name: null };
+			continue;
+		}
+		const name = line.match(/^\s+name:\s*['"]?([^'"\s]+)['"]?/);
+		if (name && current && !current.name) current.name = name[1];
+	}
+	if (current) rows.push(current);
+
+	const broken = [];
+	for (const row of rows) {
+		if (!row.name?.startsWith(".")) continue;
+		try {
+			const mod = await import(pathToFileURL(resolve(root, row.name)).href);
+			const plugin = mod.default ?? mod;
+			if (typeof plugin !== "function" && typeof plugin?.apply !== "function") broken.push(row.id);
+		} catch {
+			broken.push(row.id);
+		}
+	}
+	return broken;
+}
+
+/** The same composition with the named rows removed, written beside it. */
+async function withoutRows(composition, ids) {
+	const { readFileSync, writeFileSync } = await import("node:fs");
+	const lines = readFileSync(composition, "utf8").split("\n");
+	const out = [];
+	let skipping = false;
+	for (const line of lines) {
+		const id = line.match(/^-\s*id:\s*(\S+)/);
+		if (id) skipping = ids.includes(id[1]);
+		if (!skipping) out.push(line);
+	}
+	const reduced = composition.replace(/\.ya?ml$/, "") + ".degraded.yml";
+	writeFileSync(reduced, out.join("\n"), "utf8");
+	return reduced;
 }

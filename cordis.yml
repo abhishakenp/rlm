@@ -175,6 +175,16 @@
     cwd: .
     warmOnStart: true
 
+- id: outloop
+  name: './packages/rlm-outloop/src/index.ts'
+  config:
+    cacheRubric: true
+
+  name: './packages/rlm-gitpixel/src/index.ts'
+  config:
+    cwd: .
+    warmOnStart: true
+
 # ─── Agent ───────────────────────────────────────────────────────────────────
 
 - id: agent
@@ -206,3 +216,8 @@
 
 - id: modes
   name: './packages/rlm-modes/src/index.ts'
+
+- id: outloop
+  name: './packages/rlm-outloop/src/index.ts'
+  config:
+    cacheRubric: true
