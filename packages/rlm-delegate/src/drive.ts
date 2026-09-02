@@ -177,7 +177,7 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 				break;
 			}
 
-			let open = store.open().filter((g) => !options.only || options.only.includes(g.id));
+			let open = store.open().filter((g) => !options.only?.length || options.only.includes(g.id));
 			const before = fingerprint(open);
 
 			// Before anything is handed to anybody: a request nobody can judge is
@@ -200,7 +200,7 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 						if (into) say("rlm/drive-refined", { graph: graph.id, task: task.id, into });
 					}
 				}
-				if (refined) open = store.open().filter((g) => !options.only || options.only.includes(g.id));
+				if (refined) open = store.open().filter((g) => !options.only?.length || options.only.includes(g.id));
 			}
 
 			for (const graph of open) touched.add(graph.id);
@@ -250,7 +250,7 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 				),
 			);
 
-			const after = fingerprint(store.open().filter((g) => !options.only || options.only.includes(g.id)));
+			const after = fingerprint(store.open().filter((g) => !options.only?.length || options.only.includes(g.id)));
 			if (after === before) {
 				// Nothing moved. Another identical sweep is the loop this file
 				// exists to not be.
@@ -268,7 +268,7 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 		.filter((id) => touched.has(id))
 		.map((id) => store.load(id))
 		.filter((g): g is Graph => !!g)
-		.filter((g) => !options.only || options.only.includes(g.id));
+		.filter((g) => !options.only?.length || options.only.includes(g.id));
 	const found = impasses(all.filter((g) => outstanding(g.tasks).length));
 
 	let questionsPath: string | undefined;
@@ -305,7 +305,12 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 /** The report as a person reads it. */
 export const renderReport = (report: DriveReport): string =>
 	[
-		`the drive ${report.ended === "settled" ? "worked everything it could" : report.ended === "stopped" ? `was stopped — ${report.stoppedBy}` : `hit its bound of sweeps`}`,
+		// "Settled" over nothing at all is not a result, it is a filter that ate
+		// the work. Say so, because the sentence that reads like success is the
+		// one nobody checks.
+		report.ended === "settled" && report.graphs === 0
+			? "the drive looked at no graphs at all — that is a fault, not an empty backlog: check what is restricting it"
+			: `the drive ${report.ended === "settled" ? "worked everything it could" : report.ended === "stopped" ? `was stopped — ${report.stoppedBy}` : `hit its bound of sweeps`}`,
 		`  ${report.proven.length} proven done, ${report.owed.length} still owed, across ${report.graphs} graph(s), in ${report.sweeps} sweep(s)`,
 		...(report.questions.length
 			? [

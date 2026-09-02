@@ -274,7 +274,11 @@ export class RlmDelegateService extends Service {
 				}
 				const report = await this.drive({
 					follow: argv.includes("--follow"),
-					only: argv.filter((a) => a.startsWith("g-")),
+					// No graph ids on the line means every graph, not none. An empty
+					// array is truthy, so passing it through as `only` would have
+					// restricted the drive to zero graphs and then reported that it
+					// had worked everything it could.
+					only: argv.filter((a) => a.startsWith("g-")).length ? argv.filter((a) => a.startsWith("g-")) : undefined,
 				});
 				console.log(renderReport(report));
 				return report.owed.length ? 1 : 0;

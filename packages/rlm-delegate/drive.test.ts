@@ -14,7 +14,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import RlmDelegateService from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/index.ts";
 import { Store } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/store.ts";
-import { drive } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/drive.ts";
+import { drive, renderReport } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/drive.ts";
 import { impasses } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/impasse.ts";
 import { check } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/proof.ts";
 import { Gate, Stop } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/stop.ts";
@@ -540,3 +540,45 @@ console.log("\nbeing cut off is not the same as being refused");
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);
+
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\nan empty list of graph ids means every graph, not none");
+{
+	// The CLI builds `only` by filtering argv for things that look like graph
+	// ids. With no ids on the line that filter returns `[]` — which is truthy,
+	// so a `!options.only` guard lets it through and `[].includes(id)` then
+	// excludes every graph in the store. The drive did no work and reported
+	// that it had worked everything it could, which is the one shape of lie
+	// this whole file exists to make impossible.
+	const store = new Store(path.join(DIR, "empty-only"));
+	const work = path.join(DIR, "empty-only-work");
+	fs.mkdirSync(work, { recursive: true });
+	store.create("do the thing", [
+		{
+			id: "thing",
+			title: "the thing",
+			prompt: "the thing",
+			proof: { kind: "shell", run: `test -s ${path.join(work, "thing.txt")}` },
+		},
+	]);
+
+	const report = await drive(store, {
+		only: [],
+		runner: async (task) => {
+			fs.writeFileSync(path.join(work, `${task.id}.txt`), "done\n", "utf8");
+			return "done";
+		},
+		stop: stopFor("empty-only"),
+		maxSweeps: 3,
+	});
+
+	t("an empty `only` did not restrict the drive to nothing", () => eq(report.graphs, 1, `graphs=${report.graphs}`));
+	t("the work was actually done", () => eq(report.proven.length, 1, report.proven.join(",")));
+
+	// And when it does happen, the sentence must not read like success.
+	t("settling over zero graphs is reported as a fault, not as success", () =>
+		ok(
+			renderReport({ ...report, graphs: 0, ended: "settled" }).includes("no graphs at all"),
+			renderReport({ ...report, graphs: 0, ended: "settled" }).split("\n")[0],
+		));
+}
