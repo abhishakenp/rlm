@@ -94,6 +94,8 @@ export interface SubagentHandle {
 	result?: string;
 	error?: string;
 	sessionDir?: string;
+	/** ISO timestamp of when the subagent reached a terminal state. */
+	completedAt?: string;
 }
 
 export interface SubagentInfo {
@@ -101,6 +103,8 @@ export interface SubagentInfo {
 	name: string;
 	status: "running" | "completed" | "error";
 	sessionName: string;
+	/** ISO timestamp of when the subagent reached a terminal state. */
+	completedAt?: string;
 }
 
 export interface GoalInfo {
@@ -130,6 +134,10 @@ export class RlmSdkService extends Service {
 	private childSessions: Map<string, any> = new Map();
 	private createAgentSessionFn: any = null;
 	private goalState: GoalInfo = { objective: "", status: "idle", tokensUsed: 0 };
+
+	private static readonly RECENT_COMPLETED_LIMIT = 20;
+	/** Recently completed subagents, most-recent-first, capped at RECENT_COMPLETED_LIMIT. */
+	private recentlyCompleted: Array<SubagentInfo & { completedAt: string }> = [];
 
 	// ─── Prompt fragment (hot-reloadable) ─────────────────────────────────
 	private promptHandle: any = null;
@@ -328,14 +336,38 @@ export class RlmSdkService extends Service {
 				.reverse()
 				.find((m: any) => m.role === "assistant");
 			handle.status = "completed";
+			handle.completedAt = new Date().toISOString();
 			handle.result = extractAssistantText(lastAssistant);
 			handle.sessionDir = session.sessionManager?.getSessionDir?.();
 
-			(this.ctx as any).emit("rlm/sdk-complete", { id, depth, result: handle.result });
+			// Track as recently completed (push to front, cap at limit).
+			this.recentlyCompleted.unshift({
+				id: handle.id,
+				name: handle.name,
+				status: handle.status,
+				sessionName: handle.name,
+				completedAt: handle.completedAt,
+			});
+			if (this.recentlyCompleted.length > RlmSdkService.RECENT_COMPLETED_LIMIT) {
+				this.recentlyCompleted.length = RlmSdkService.RECENT_COMPLETED_LIMIT;
+			}
+			(this.ctx as any).emit("rlm/sdk-complete", { id, depth, result: handle.result, completedAt: handle.completedAt });
 		} catch (error) {
 			handle.status = "error";
+			handle.completedAt = new Date().toISOString();
 			handle.error = error instanceof Error ? error.message : String(error);
-			(this.ctx as any).emit("rlm/sdk-error", { id, depth, error: handle.error });
+			// Track as recently completed (push to front, cap at limit).
+			this.recentlyCompleted.unshift({
+				id: handle.id,
+				name: handle.name,
+				status: handle.status,
+				sessionName: handle.name,
+				completedAt: handle.completedAt,
+			});
+			if (this.recentlyCompleted.length > RlmSdkService.RECENT_COMPLETED_LIMIT) {
+				this.recentlyCompleted.length = RlmSdkService.RECENT_COMPLETED_LIMIT;
+			}
+			(this.ctx as any).emit("rlm/sdk-error", { id, depth, error: handle.error, completedAt: handle.completedAt });
 		} finally {
 			this.childSessions.delete(id);
 		}
@@ -359,9 +391,30 @@ export class RlmSdkService extends Service {
 			name: h.name,
 			status: h.status,
 			sessionName: h.name,
+			completedAt: h.completedAt,
 		}));
 	}
 
+	/**
+	 * Subagents that reached a terminal state (completed or error) most recently,
+	 * most-recent-first, up to RECENT_COMPLETED_LIMIT (20). This is the list
+	 * shown in `iris rlm.status recent`.
+	 */
+	recentSubagents(): Array<SubagentInfo & { completedAt: string }> {
+		return [...this.recentlyCompleted];
+	}
+
+
+
+	/** Get in-flight subagents with prompt. */
+	inFlight(): Array<{ id: string; name: string; status: string; prompt: string }> {
+		return [...this.children.values()].map((h) => ({
+			id: h.id,
+			name: h.name,
+			status: h.status,
+			prompt: h.prompt,
+		}));
+	}
 	/** Delete a subagent by name or id. */
 	async deleteSubagent(target: string): Promise<SubagentHandle | null> {
 		const handle =

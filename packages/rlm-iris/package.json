@@ -15,6 +15,7 @@
     "*": "./dist/*.js"
   },
   "dependencies": {
-    "@deepseek-ai/cordis": "^0.0.0"
+    "@deepseek-ai/cordis": "^0.0.0",
+    "@rlm/tui": "^0.0.0"
   }
 }
