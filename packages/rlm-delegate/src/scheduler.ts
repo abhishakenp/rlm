@@ -464,7 +464,23 @@ export const run = async (
 			// replacement is refused if it already passes, and refused again if it
 			// cannot move.
 			options.replanCriterion &&
-			task.proof?.kind === "shell" &&
+			// Any criterion a planner could rewrite — not just shell.
+			//
+			// This said `=== "shell"` for no reason I can defend, and a `file`
+			// criterion is exactly as capable of being wrong: pointing at a path
+			// the task never touches, or at one the work was never going to
+			// create. Measured: every one of the failures cascading right now is
+			// `kind: "file"` — check-omniroute-selection-logic,
+			// inspect-omniroute-timeout-config, analyze-triggerless-skills — each
+			// dying permanently and taking its dependents to unreachable with it.
+			// `stuck` went 46 to 73 in thirteen minutes on the back of it.
+			//
+			// `unstated` is excluded because it is already in the planner's hands,
+			// and `rollup` because it is derived from its children rather than
+			// written by anybody.
+			task.proof?.kind !== undefined &&
+			task.proof.kind !== "unstated" &&
+			task.proof.kind !== "rollup" &&
 			task.attempts.length < 2 * (options.maxAttempts ?? 3)
 		) {
 			store.ended(graphId, task.id, "failed", record, { reason: `${verdict.why}\n${detail}`.trim() });
