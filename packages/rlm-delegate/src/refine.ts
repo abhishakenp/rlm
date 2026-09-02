@@ -236,7 +236,10 @@ export const refineOne = async (
 		: "";
 
 	let refusal = "";
-	for (let attempt = 0; attempt < 2; attempt++) {
+	// Three, not two. The refusals are specific — "these criteria already pass",
+	// "this path only exists for one run" — and a planner given the exact
+	// objection often fixes it on the third go where it could not on the second.
+	for (let attempt = 0; attempt < 3; attempt++) {
 		let tasks: TaskInput[];
 		try {
 			const answer = await plan(
@@ -293,6 +296,40 @@ export const refineOne = async (
 			refusal = String(error?.message ?? error);
 			say("rlm/delegate-refine-refused", { graph: graph.id, task: task.id, why: refusal });
 		}
+	}
+
+	// Every plan refused, and the task is left exactly as it was — so the next
+	// sweep plans it again, and the one after that, forever. Measured: 194
+	// unstated tasks, none runnable, a planner child spawning continuously, one
+	// task converted in an hour.
+	//
+	// Refusal is recorded as an attempt, because that is what it was: a real
+	// model call that produced nothing usable. Once a task has burned enough of
+	// them it stops being re-planned and becomes a question, which for many of
+	// these is simply true — "Iris must self-evolve" has no mechanical criterion
+	// and no amount of planning will invent one. Asking him is the honest end,
+	// and it is not the same as dropping it: the task stays in the graph with
+	// the refusals on it, and `answer()` puts it straight back in the pool.
+	try {
+		store.ended(
+			graph.id,
+			task.id,
+			"running",
+			{ at: new Date().toISOString(), endedAt: new Date().toISOString(), ok: false, detail: `no criterion could be written: ${refusal}`, shape: "unrefinable", executor: "planner" } as any,
+			{ reason: `no criterion could be written: ${refusal}` },
+		);
+		const after = store.load(graph.id)?.tasks.find((t) => t.id === task.id);
+		const burned = (after?.attempts ?? []).filter((a) => a.shape === "unrefinable").length;
+		if (burned >= 3) {
+			store.ended(graph.id, task.id, "rejected", { at: new Date().toISOString(), ok: false, detail: refusal, shape: "unrefinable" } as any, {
+				reason:
+					`nobody could write a criterion for this after ${burned} tries. The last objection was: ${refusal}. ` +
+					`Say how you would know this was done and it goes straight back in the pool.`,
+			});
+			say("rlm/delegate-asked", { graph: graph.id, task: task.id, title: task.title, why: "no criterion could be written for it", detail: refusal.slice(0, 300) });
+		}
+	} catch (error: any) {
+		say("rlm/delegate-refine-refused", { graph: graph.id, task: task.id, why: `could not record the refusal: ${error?.message ?? error}` });
 	}
 	return 0;
 };
