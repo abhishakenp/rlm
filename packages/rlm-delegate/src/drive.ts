@@ -239,6 +239,9 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 						probe: options.probe,
 						cwd: options.cwd,
 						maxAttempts: options.maxAttempts,
+						// A dead-end criterion is only worth handing back if there is
+						// somebody to write a better one.
+						replanCriterion: Boolean(planner),
 						repeatFloor: options.repeatFloor,
 						similarity: options.similarity,
 						onEvent: say,

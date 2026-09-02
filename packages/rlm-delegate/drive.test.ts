@@ -31,6 +31,12 @@ const eq = (a: any, b: any, m = "") => { if (a !== b) throw new Error(`${m} expe
 const ok = (v: any, m = "") => { if (!v) throw new Error(m || "expected truthy"); };
 const settleMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+process.on("exit", () => {
+	console.log(`\n${pass} passed, ${fail} failed`);
+	if (fail) process.exitCode = 1;
+});
+
+
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), "rlm-drive-"));
 /** Nothing in this file may read the real Desktop. A test that can be switched
  *  off by a file somebody left lying around is not a test. */
@@ -656,5 +662,59 @@ console.log("\na criterion that fails the same with and without the work is not 
 		ok(handed <= 3, `handed=${handed}`));
 }
 
-console.log(`\n${pass} passed, ${fail} failed`);
-if (fail) process.exit(1);
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\nexhausted against a check that never moved asks for a different check, once");
+{
+	// The four `agent-browser … search …` tasks predate baselines, so nothing
+	// could prove their criteria inert. They were given up on, and twenty-three
+	// tasks went unreachable behind them. Exhaustion against a check that never
+	// once moved is evidence about the check too, so it buys one re-plan — and
+	// exactly one, or a bad planner becomes the loop.
+	const store = new Store(path.join(DIR, "exhausted"));
+	const work = path.join(DIR, "exhausted-work");
+	fs.mkdirSync(work, { recursive: true });
+
+	store.create("collect the data", [
+		{
+			id: "collect",
+			title: "collect it",
+			prompt: "collect it",
+			// No `inertIf`: this is the pre-baseline shape exactly.
+			proof: { kind: "shell", run: "definitely-not-a-real-command --search", cwd: work },
+		},
+	]);
+	const id = store.ids().find((g) => store.load(g)!.tasks.some((t) => t.id === "collect"))!;
+
+	let planned = 0;
+	const report = await drive(store, {
+		planner: async () => {
+			planned += 1;
+			return JSON.stringify([
+				{
+					id: "collect-checkably",
+					title: "collect it, checkably",
+					prompt: "collect it",
+					proof: { kind: "shell", run: `test -s ${path.join(work, "collect-checkably.txt")}` },
+				},
+			]);
+		},
+		runner: async (task: any) => {
+			fs.writeFileSync(path.join(work, `${task.id}.txt`), "[]\n", "utf8");
+			return `collected for ${task.id}`;
+		},
+		stop: stopFor("exhausted"),
+		maxAttempts: 2,
+		maxSweeps: 8,
+	} as any);
+
+	const after = store.load(id)!;
+	t("the dead-end criterion was not the last word", () =>
+		ok(after.tasks.some((x) => x.id === "collect-checkably"), after.tasks.map((x) => x.id).join(",")));
+	t("and the replacement is proven done", () =>
+		eq(after.tasks.find((x) => x.id === "collect-checkably")?.state, "done",
+			JSON.stringify(after.tasks.map((x) => [x.id, x.state]))));
+	t("nothing was left owed behind it", () => eq(report.owed.length, 0, report.owed.join(",")));
+	t("the planner was not turned into the loop", () => ok(planned <= 2, `planned=${planned}`));
+}

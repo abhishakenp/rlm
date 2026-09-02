@@ -43,6 +43,16 @@ export interface RunOptions {
 	probe?: Probe;
 	/** Retry policy — see lapse.ts. Small on purpose. */
 	maxAttempts?: number;
+	/**
+	 * Whether anything is able to write a replacement criterion.
+	 *
+	 * Handing a task back is only progress if something picks it up. With no
+	 * planner it just trades a precise dead end — "it failed the same way three
+	 * times" — for a vague one, and loses the distinction between a check that
+	 * never moved and a request nobody ever judged. Those need different
+	 * answers from him, so they must not collapse into each other.
+	 */
+	replanCriterion?: boolean;
 	repeatFloor?: number;
 	similarity?: number;
 	/** Called on every transition, for logging and for the event bus. */
@@ -232,7 +242,8 @@ export const run = async (
 				verdict.verdict === "failed" &&
 				task.proof?.kind === "shell" &&
 				task.proof.inertIf &&
-				verdict.detail === task.proof.inertIf
+				verdict.detail === task.proof.inertIf &&
+				options.replanCriterion
 			) {
 				detail = `the criterion cannot tell whether this was done — ${verdict.detail}`;
 				record = { ...record, ok: false, detail, shape: shapeOf(detail) };
@@ -288,6 +299,38 @@ export const run = async (
 		if (verdict.retry) {
 			store.ended(graphId, task.id, "ready", record, { reason: `${verdict.why}: ${record.shape}` });
 			say("rlm/delegate-retry", { graph: graphId, task: task.id, repeats: verdict.repeats, why: verdict.why });
+		} else if (
+			// Exhausted against a shell criterion that has never once moved. The
+			// attempts all failed the same way, which is as much evidence about
+			// the check as about the work — and unlike the inert case there is no
+			// baseline to settle it either way, because these criteria predate
+			// baselines being recorded.
+			//
+			// Giving up here is what put four `agent-browser … search …` tasks in
+			// `failed` and twenty-three behind them in `unreachable`. So the
+			// criterion is re-planned exactly once instead. Bounded by the attempt
+			// count, which keeps accumulating across both criteria: a second
+			// exhaustion stops for real. Nothing can be weakened by this — the
+			// replacement is refused if it already passes, and refused again if it
+			// cannot move.
+			options.replanCriterion &&
+			task.proof?.kind === "shell" &&
+			task.attempts.length < 2 * (options.maxAttempts ?? 3)
+		) {
+			store.ended(graphId, task.id, "failed", record, { reason: `${verdict.why}\n${detail}`.trim() });
+			say("rlm/delegate-failed", { graph: graphId, task: task.id, repeats: verdict.repeats, reason: verdict.why });
+			try {
+				store.answered(graphId, task.id, { kind: "unstated" }, "the drive, because every attempt failed the same way against this check");
+				say("rlm/delegate-asked", {
+					graph: graphId,
+					task: task.id,
+					title: task.title,
+					why: "exhausted against a check that never moved — asking for a different one",
+					detail: record.shape,
+				});
+			} catch (error: any) {
+				say("rlm/delegate-graph-error", { graph: graphId, task: task.id, error: String(error?.message ?? error) });
+			}
 		} else {
 			store.ended(graphId, task.id, "failed", record, { reason: `${verdict.why}\n${detail}`.trim() });
 			say("rlm/delegate-failed", { graph: graphId, task: task.id, repeats: verdict.repeats, reason: verdict.why });
