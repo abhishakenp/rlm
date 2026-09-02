@@ -1078,3 +1078,52 @@ console.log("\nthe work he is waiting on goes first");
 	t("equal priorities keep the order they were written down in", () =>
 		eq(order.slice(1).join(","), "trivia,chores", order.join(",")));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\nan agent is never spent on a task nobody can judge, when it could be refined instead");
+{
+	// The afternoon this file exists to prevent: 324 tasks were recorded with
+	// `unstated` criteria, the drive read every one as ready, and it burned 630
+	// attempts producing 318 `unproven` results in three hours — faster than
+	// refinement, bounded at four a sweep, could give any of them something to
+	// be judged by. Then the re-plan path cleared each back to `unstated`, which
+	// is where it already was, so it ran again.
+	const store = new Store(path.join(DIR, "judgeable"));
+	const work = path.join(DIR, "judgeable-work");
+	fs.mkdirSync(work, { recursive: true });
+	store.create("a backlog nobody wrote criteria for", [
+		{ id: "vague-a", title: "one", prompt: "one", proof: { kind: "unstated", note: "nobody said" } },
+		{ id: "vague-b", title: "two", prompt: "two", proof: { kind: "unstated", note: "nobody said" } },
+	] as any);
+	const id = store.ids().find((g) => store.load(g)!.tasks.some((t) => t.id === "vague-a"))!;
+
+	const handed: string[] = [];
+	await drive(store, {
+		planner: async (_text: string, task: any) =>
+			JSON.stringify([
+				{
+					id: `${task.id}-checkable`,
+					title: `${task.title}, checkably`,
+					prompt: task.prompt,
+					proof: { kind: "shell", run: `test -s ${path.join(work, `${task.id}-checkable.txt`)}` },
+				},
+			]),
+		runner: async (task: any) => {
+			handed.push(task.id);
+			fs.writeFileSync(path.join(work, `${task.id}.txt`), "x\n", "utf8");
+			return "done";
+		},
+		stop: stopFor("judgeable"),
+		maxSweeps: 8,
+	} as any);
+
+	t("no agent was spent on a task with no criterion", () =>
+		ok(!handed.includes("vague-a") && !handed.includes("vague-b"), handed.join(",")));
+	t("they were refined into work that can be judged", () =>
+		ok(handed.includes("vague-a-checkable") && handed.includes("vague-b-checkable"), handed.join(",")));
+
+	const after = store.load(id)!;
+	t("and nothing came back unproven", () =>
+		eq(after.tasks.filter((x) => x.state === "unproven").length, 0,
+			JSON.stringify(after.tasks.map((x) => [x.id, x.state]))));
+}

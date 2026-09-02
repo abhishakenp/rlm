@@ -276,9 +276,21 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 			}
 
 			for (const graph of open) touched.add(graph.id);
-			const workable = open.filter((g) => runnable(g.tasks).length);
+			const workable = open.filter((g) => runnable(g.tasks, Boolean(planner)).length);
 
 			if (!workable.length) {
+				// Nothing runnable is not the same as nothing to do. The repair
+				// above turns stopped tasks into `unstated` ones, and refinement
+				// runs at the top of a sweep — so breaking here would end the run
+				// holding work it had just created for itself, one step from
+				// being workable. Observed: a repaired task sat unrefined and the
+				// drive reported it settled.
+				const refinable = planner && open.some((g) => needsRefining(g).length);
+				if (refinable && sweeps < maxSweeps) {
+					sweeps += 1;
+					say("rlm/drive-refining-only", { sweep: sweeps, graphs: open.length });
+					continue;
+				}
 				if (!options.follow) break;
 				say("rlm/drive-idle", { owed: open.reduce((n, g) => n + outstanding(g.tasks).length, 0) });
 				await new Promise((r) => setTimeout(r, options.idleMs ?? 15_000));
@@ -294,7 +306,7 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 			say("rlm/drive-sweep", {
 				sweep: sweeps,
 				graphs: workable.map((g) => g.id),
-				runnable: workable.reduce((n, g) => n + runnable(g.tasks).length, 0),
+				runnable: workable.reduce((n, g) => n + runnable(g.tasks, Boolean(planner)).length, 0),
 				limit: limit(),
 			});
 

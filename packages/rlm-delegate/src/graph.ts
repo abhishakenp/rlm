@@ -496,8 +496,32 @@ export const settle = (tasks: Task[], now = new Date().toISOString()): Task[] =>
  * Higher `priority` first; ties keep the order they were written down in, so
  * an unprioritised backlog behaves exactly as it did before.
  */
-export const runnable = (tasks: Task[]): Task[] =>
-	tasks.filter((t) => t.state === "ready").sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+export const runnable = (tasks: Task[], canRefine = false): Task[] =>
+	tasks
+		// A task nobody can judge is not runnable. Handing it to an agent spends
+		// a real delegation and can only end `unproven`, because the verdict was
+		// missing before the work started and is still missing after it.
+		//
+		// This cost 318 unproven tasks and 630 attempts in an afternoon: a
+		// backlog was recorded with `unstated` criteria, the drive read them as
+		// ready, and it burned agents on them faster than refinement — bounded
+		// at four a sweep — could give them something to be judged by. The
+		// re-plan path then cleared each one back to `unstated`, which is where
+		// it already was, so it ran again.
+		//
+		// Only when something can actually refine them, which is why this takes
+		// a flag rather than being unconditional. With no planner, running an
+		// unjudgeable task once and recording `unproven` is the right thing and
+		// long-standing: a criterion nobody wrote is its own outcome, and it is
+		// better to have done the work and be unable to prove it than to have
+		// refused work nobody had got around to specifying.
+		//
+		// They are not lost either way. `needsRefining` is exactly the set of
+		// unstated tasks, refinement is what turns them into work, and one that
+		// cannot be refined becomes a question — the honest outcome for "nobody
+		// said how to tell".
+		.filter((t) => t.state === "ready" && !(canRefine && t.proof?.kind === "unstated"))
+		.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
 
 /** How a criterion reads to a person, so a reviewer can dispute it. */
 export const describeProof = (proof: Proof): string => {
