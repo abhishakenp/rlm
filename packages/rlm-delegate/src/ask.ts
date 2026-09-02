@@ -106,7 +106,17 @@ export const askModel = (options: AskOptions = {}) => {
 	const call = options.fetch ?? fetch;
 	return async (prompt: string): Promise<string> => {
 		const { url, model, headers } = route(options);
-		const timeoutMs = options.timeoutMs ?? 240_000;
+		// Four minutes is a delegation's budget, not a review's. me-2 runs inside
+	// the sweep, so every second it spends is a second no work is handed out —
+	// and with the late-settle path re-reviewing each stopped task every sweep,
+	// a four-minute ceiling meant the drive could spend an entire sweep
+	// reviewing and never reach a runnable task. Measured: 725 attempts flat
+	// across eighty minutes while it looked busy.
+	//
+	// A review is one question about work that has already happened. If it
+	// cannot answer in ninety seconds it is not going to, and me-2 fails closed
+	// on no answer, which is the safe direction.
+	const timeoutMs = options.timeoutMs ?? 90_000;
 		const timer = AbortSignal.timeout(timeoutMs);
 		const signal = options.signal ? AbortSignal.any([options.signal, timer]) : timer;
 
