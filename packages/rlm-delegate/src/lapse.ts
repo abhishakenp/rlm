@@ -49,6 +49,19 @@ export const similarity = (a: string, b: string): number => {
  * The first line is the shape. A stack trace below it varies with every run and
  * says nothing about whether the next attempt will go differently.
  */
+/**
+ * Did something outside the work refuse to run it?
+ *
+ * Credits, quota, rate limits, a 402. Deliberately narrow: a wrong guess here
+ * turns a real failure into an eternal retry, which is worse than the bug it
+ * fixes. Every pattern below came from output actually seen in the journal,
+ * not imagined.
+ */
+export const wall = (detail: string): boolean =>
+	/run out of credits|insufficient (?:credit|quota|balance)|quota exceeded|\b402\b|rate.?limit(?:ed|s)?\b|too many requests|overloaded_error|billing/i.test(
+		String(detail ?? ""),
+	);
+
 export const shapeOf = (reason: string): string => {
 	const first = String(reason ?? "")
 		.split("\n")

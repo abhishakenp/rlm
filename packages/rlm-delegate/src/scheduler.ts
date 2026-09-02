@@ -19,7 +19,7 @@
  */
 import { capacity as measure } from "./capacity.ts";
 import { runnable, settle, type Attempt, type Graph, type Task } from "./graph.ts";
-import { diagnose, judge, shapeOf, type Diagnosis } from "./lapse.ts";
+import { diagnose, judge, shapeOf, wall, type Diagnosis } from "./lapse.ts";
 import { check, type Probe } from "./proof.ts";
 import type { Store } from "./store.ts";
 
@@ -303,6 +303,31 @@ export const run = async (
 			floor: options.repeatFloor,
 			similarity: options.similarity,
 		});
+
+		// A wall is not a failure of the work.
+		//
+		// Twenty-four delegations were recorded as the agent failing when the
+		// entire output was "You have run out of credits for <his account>".
+		// `build-me-2-reviewer` is one of them: it burned its attempts, went
+		// `unproven`, and took the tasks behind it down — for a fault nothing on
+		// this machine could have fixed.
+		//
+		// So it spends no attempt and becomes no shape to diagnose. Straight back
+		// in the pool, and said loudly, because this is exactly the kind of stop
+		// that is invisible until morning.
+		if (!ok && wall(detail)) {
+			store.ended(graphId, task.id, "ready", { ...record, ok: false, detail, shape: "blocked on a resource" }, {
+				reason: `not this task's fault — ${detail.split("\n")[0].slice(0, 200)}`,
+			});
+			say("rlm/delegate-blocked", {
+				graph: graphId,
+				task: task.id,
+				title: task.title,
+				why: "a provider refused the work — credits, quota, or rate limit",
+				detail: detail.slice(0, 300),
+			});
+			return;
+		}
 
 		if (verdict.retry) {
 			store.ended(graphId, task.id, "ready", record, { reason: `${verdict.why}: ${record.shape}` });

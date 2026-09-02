@@ -19,7 +19,7 @@ import { sessionFor } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/agent
 import { impasses } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/impasse.ts";
 import { check } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/proof.ts";
 import { Gate, Stop } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/stop.ts";
-import { diagnose } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/lapse.ts";
+import { diagnose, wall } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/lapse.ts";
 import { askIn, derive } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/derive.ts";
 import { alreadyTrue, ephemeral, noteBaselines } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/refine.ts";
 
@@ -986,4 +986,59 @@ console.log("\nan attempt resumes the task's session rather than starting from n
 	// must still find the same session.
 	t("nothing has to be remembered for it to be the same next time", () =>
 		eq(sessionFor(graph, { ...one, attempts: [{}, {}] } as any), sessionFor(graph, one)));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\na provider refusing to run the work is not the work failing");
+{
+	// Real output, from the journal, twenty-four times:
+	//   "You have run out of credits for <his account>. Please visit ..."
+	// `build-me-2-reviewer` burned its attempts on it, went `unproven`, and took
+	// what stood on it down — for a fault nothing on this machine could fix.
+	t("the walls actually seen are recognised", () => {
+		ok(wall("You have run out of credits for someone@example.com. Please visit https://..."));
+		ok(wall("HTTP 402 Payment Required"));
+		ok(wall("rate limited, try again later"));
+		ok(wall("429 Too Many Requests"));
+	});
+	// Narrow on purpose: a wrong guess here turns a real failure into an
+	// eternal retry, which is worse than the bug it fixes.
+	t("and ordinary failures are not mistaken for walls", () => {
+		ok(!wall("it reported done, but the criterion did not hold"));
+		ok(!wall("command not found: agent-browser"));
+		ok(!wall("TypeError: cannot read properties of undefined"));
+		ok(!wall(""));
+	});
+
+	const store = new Store(path.join(DIR, "wall"));
+	const work = path.join(DIR, "wall-work");
+	fs.mkdirSync(work, { recursive: true });
+	store.create("do it", [
+		{ id: "thing", title: "the thing", prompt: "the thing", proof: { kind: "shell", run: `test -s ${path.join(work, "thing.txt")}` } },
+	]);
+	const id = store.ids().find((g) => store.load(g)!.tasks.some((t) => t.id === "thing"))!;
+
+	let calls = 0;
+	await drive(store, {
+		runner: async (task: any) => {
+			calls += 1;
+			// Broke once, then the credits came back.
+			if (calls === 1) throw new Error("You have run out of credits for him@example.com. Please visit https://...");
+			fs.writeFileSync(path.join(work, `${task.id}.txt`), "x\n", "utf8");
+			return "done";
+		},
+		stop: stopFor("wall"),
+		maxAttempts: 2,
+		maxSweeps: 5,
+	});
+
+	const after = store.load(id)!.tasks.find((t) => t.id === "thing")!;
+	t("it is done once the wall goes away", () => eq(after.state, "done", `${after.state}: ${after.reason}`));
+	t("the reason says whose fault it was", () =>
+		ok(after.attempts.some((a) => /not this task's fault/.test(a.detail ?? "") || /credits/.test(a.detail ?? "")), JSON.stringify(after.attempts.map((a) => a.detail?.slice(0, 60)))));
+	// The point: a wall must not eat the retry budget, or a task dies of
+	// something that was never about it.
+	t("the wall did not spend an attempt against the task", () =>
+		ok(after.attempts.filter((a) => a.shape && a.shape !== "blocked on a resource").length <= 1,
+			JSON.stringify(after.attempts.map((a) => a.shape))));
 }
