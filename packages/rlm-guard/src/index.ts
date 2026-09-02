@@ -65,6 +65,17 @@ import { Service } from "@deepseek-ai/cordis";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { inspectCell, type Refusal } from "./detect.ts";
+import {
+	pathDirFileIn,
+	pathDirsFromEnv,
+	readDirBaseline,
+	resolvePathDirs,
+	underPathDir,
+	watchPathDirs,
+	type PathDirBaseline,
+	type PathIncident,
+	type ProtectedPathDir,
+} from "./pathdir.ts";
 import { namedIn, resolveProtected, type ProtectedFile, type ProtectSpec } from "./protect.ts";
 import { readBaseline, watchProtected, type Baseline, type Incident } from "./restore.ts";
 import { clearUnlock, defaultUnlockFile, isDelegateChild, unlockState, writeUnlock, type UnlockState } from "./unlock.ts";
@@ -95,6 +106,20 @@ export interface RlmGuardConfig {
 	unlockFile?: string;
 	/** The longest an unlock may claim, in minutes. */
 	unlockMaxMinutes?: number;
+	/**
+	 * Extra directories to protect by prefix, on top of PATH.
+	 *
+	 * Additive only, like `protect`. The two named in `INHERENT_PATH_DIRS` and
+	 * everything on PATH outside the repo are protected whatever is written here
+	 * — a list a delegated child could shorten is not a list.
+	 */
+	protectPathDirs?: string[];
+	/** Derive the protected directories from `PATH`. Default true. */
+	protectPath?: boolean;
+	/** Snapshot regular files up to this size for the backstop. Default 256 KiB. */
+	pathSnapshotMaxBytes?: number;
+	/** Run the PATH-directory backstop. Default follows `restore`. */
+	restorePathDirs?: boolean;
 }
 
 /** The reason attached to the entry this row exists for. */
@@ -107,6 +132,22 @@ const CAPACITY_WHY =
 const GUARD_WHY =
 	"This is rlm-guard's own source. If the fleet could edit the guard, the guard would be one edit away from " +
 	"not existing, and every other protected file would follow.";
+
+const PATH_WHY =
+	"This is a directory on Abhi's PATH. What lives here decides what the word `iris` — or `node`, or `rg` — means " +
+	"for every process on this machine, including the monitors that are supposed to notice when something is wrong. " +
+	"On 2026-09-03 two delegated children wrote shims here to satisfy criteria of the form `iris X | grep -q Y`; the " +
+	"hot-reload gate and the deadman then alarmed for six hours about a fault that did not exist, because the client " +
+	"they call was no longer the client. The fleet does not install commands.";
+
+/**
+ * Protected whether or not PATH mentions them.
+ *
+ * `~/.local/bin` is Abhi's own shim directory and the one the monitors call.
+ * `/opt/homebrew/bin` is where the second hijack landed. Both are named here so
+ * that a truncated or unusual PATH in some child cannot quietly drop them.
+ */
+const INHERENT_PATH_DIRS = ["~/.local/bin", "/opt/homebrew/bin"];
 
 const COMPOSITION_WHY =
 	"cordis.yml is the composition — the list of rows rlm boots, including this one. Deleting a row from it " +
@@ -142,6 +183,8 @@ const factoryRegistry = (): FactoryEntry[] => {
 
 export interface GuardReport {
 	protecting: string[];
+	/** Directories protected by prefix — every path under them, existing or not. */
+	protectingDirs: string[];
 	unlock: UnlockState;
 	child: boolean;
 	watching: boolean;
@@ -157,6 +200,9 @@ export class RlmGuardService extends Service {
 
 	private root = process.cwd();
 	private files: ProtectedFile[] = [];
+	private pathDirs: ProtectedPathDir[] = [];
+	private pathBaselines: PathDirBaseline[] = [];
+	private stopWatchingPath: (() => void) | null = null;
 	private baselines: Baseline[] = [];
 	private stopWatching: (() => void) | null = null;
 	private refusals = 0;
@@ -173,6 +219,10 @@ export class RlmGuardService extends Service {
 
 	private get maxMinutes(): number {
 		return this.config.unlockMaxMinutes ?? 60;
+	}
+
+	private get snapshotMaxBytes(): number {
+		return this.config.pathSnapshotMaxBytes ?? 256 * 1024;
 	}
 
 	private say(level: "info" | "warn", message: string) {
@@ -202,16 +252,32 @@ export class RlmGuardService extends Service {
 		}));
 		this.files = resolveProtected(this.root, [...configured, ...inherentSpecs(this.unlockFile)]);
 
+		// Directories, by prefix. Derived from PATH rather than written down: the
+		// property that matters is "a name the shell will find", and that is what
+		// PATH means. See pathdir.ts for why this cannot reuse the file matcher.
+		this.pathDirs = resolvePathDirs([
+			...INHERENT_PATH_DIRS.map((dir) => ({ dir, why: PATH_WHY })),
+			...(this.config.protectPath === false ? [] : pathDirsFromEnv(process.env.PATH, this.root)).map((dir) => ({
+				dir,
+				why: PATH_WHY,
+			})),
+			...(this.config.protectPathDirs ?? []).map((dir) => ({ dir, why: PATH_WHY })),
+		]);
+
 		// The door, first and always — a delegated child gets this and nothing
 		// else, and a child is exactly where it has to work.
 		this.contributeFactory();
 
 		const wantWatch = this.config.restore !== false && !isDelegateChild();
 		if (wantWatch) this.startWatching();
+		const wantPathWatch = (this.config.restorePathDirs ?? this.config.restore !== false) && !isDelegateChild();
+		if (wantPathWatch) this.startWatchingPathDirs();
 
 		this.say(
 			"info",
-			`rlm-guard: ${this.files.length} path(s) protected, door on, backstop ${
+			`rlm-guard: ${this.files.length} path(s) and ${this.pathDirs.length} PATH director${
+				this.pathDirs.length === 1 ? "y" : "ies"
+			} protected, door on, backstop ${
 				wantWatch ? "on" : isDelegateChild() ? "off (delegated child)" : "off (disabled in config)"
 			} — ${this.unlockState().why}`,
 		);
@@ -261,7 +327,7 @@ export class RlmGuardService extends Service {
 			try {
 				const refusal =
 					e.toolName === "code"
-						? inspectCell(text, this.root, this.overlayIfAboutThisRow(text))
+						? inspectCell(text, this.root, this.overlayIfAboutThisRow(text), this.pathDirs)
 						: this.refuseWholePath(text);
 				if (!refusal) return undefined;
 				this.refusals++;
@@ -319,7 +385,21 @@ export class RlmGuardService extends Service {
 
 	/** For a tool whose input is a path outright: no parsing to do. */
 	private refuseWholePath(path: string): Refusal | null {
-		const file = namedIn(path, this.files);
+		const dir = underPathDir(path, this.pathDirs) ? pathDirFileIn(path, this.pathDirs) : null;
+		const file =
+			namedIn(path, this.files) ??
+			(dir
+				? {
+						abs: dir.evidence,
+						rel: dir.evidence,
+						spellings: [dir.evidence],
+						dirSpellings: [dir.dir.abs],
+						why: dir.dir.why,
+						inherent: true as const,
+						watched: false,
+						pathDir: true as const,
+					}
+				: null);
 		if (!file) return null;
 		return {
 			block: true,
@@ -362,6 +442,50 @@ export class RlmGuardService extends Service {
 		});
 	}
 
+	/**
+	 * The PATH-directory backstop.
+	 *
+	 * Separate from `startWatching` because it snapshots directories rather than
+	 * files, and because it is honest about a case the file backstop never has:
+	 * an entry that did not exist at boot. See `pathdir.ts` — a new arrival is
+	 * reported loudly and left alone, because `brew install` creates files in
+	 * exactly these directories and a guard that deletes new arrivals eventually
+	 * deletes somebody's real software.
+	 */
+	private startWatchingPathDirs() {
+		(this.ctx as { effect: (fn: () => () => void) => void }).effect(() => {
+			const started = Date.now();
+			this.pathBaselines = this.pathDirs
+				.filter((dir) => dir.watched)
+				.map((dir) => readDirBaseline(dir, this.snapshotMaxBytes));
+			const entries = this.pathBaselines.reduce((n, b) => n + b.entries.size, 0);
+			this.say("info", `rlm-guard: snapshotted ${entries} PATH entr(ies) in ${Date.now() - started}ms`);
+			this.stopWatchingPath = watchPathDirs({
+				baselines: this.pathBaselines,
+				debounceMs: this.config.debounceMs ?? 400,
+				maxBytes: this.snapshotMaxBytes,
+				authorised: () => this.unlockState().open,
+				onIncident: (incident) => this.notePathIncident(incident),
+			});
+			return () => {
+				this.stopWatchingPath?.();
+				this.stopWatchingPath = null;
+			};
+		});
+	}
+
+	private notePathIncident(incident: PathIncident) {
+		this.incidents.push({ at: incident.at, rel: incident.rel, action: incident.action, detail: incident.detail });
+		if (this.incidents.length > 200) this.incidents.shift();
+		const quiet = incident.action === "path-entry-accepted-under-unlock";
+		this.say(
+			quiet ? "info" : "warn",
+			quiet
+				? `rlm-guard: ${incident.rel} — ${incident.detail}`
+				: `rlm-guard: ${incident.rel} — ${incident.detail}`,
+		);
+	}
+
 	/* ───────────────────────────── surface ───────────────────────────── */
 
 	unlockState(): UnlockState {
@@ -385,6 +509,7 @@ export class RlmGuardService extends Service {
 	report(): GuardReport {
 		return {
 			protecting: this.files.map((f) => f.rel),
+			protectingDirs: this.pathDirs.map((d) => d.abs),
 			unlock: this.unlockState(),
 			child: isDelegateChild(),
 			watching: this.stopWatching !== null,
@@ -397,10 +522,12 @@ export class RlmGuardService extends Service {
 	explain(): string {
 		const report = this.report();
 		return [
-			`rlm-guard: ${report.protecting.length} path(s) protected, ${report.refusals} refusal(s) this session`,
+			`rlm-guard: ${report.protecting.length} path(s) and ${report.protectingDirs.length} PATH director(ies) ` +
+				`protected, ${report.refusals} refusal(s) this session`,
 			`  ${report.unlock.open ? "UNLOCKED" : "locked"} — ${report.unlock.why}`,
 			`  backstop ${report.watching ? "watching" : "not watching"}${report.child ? " (delegated child: door only)" : ""}`,
 			...report.protecting.map((p) => `  · ${p}`),
+			...report.protectingDirs.map((p) => `  · ${p}/** (prefix)`),
 			...report.incidents.slice(-5).map((i) => `  ! ${i.rel}: ${i.action} — ${i.detail}`),
 		].join("\n");
 	}
@@ -411,6 +538,8 @@ export class RlmGuardService extends Service {
 		if (i >= 0) registry.splice(i, 1);
 		this.stopWatching?.();
 		this.stopWatching = null;
+		this.stopWatchingPath?.();
+		this.stopWatchingPath = null;
 	}
 }
 

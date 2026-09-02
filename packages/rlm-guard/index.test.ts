@@ -15,6 +15,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { inspectCell } from "/Users/abhi/proj/rlm/packages/rlm-guard/src/detect.ts";
+import {
+	pathDirFileIn,
+	pathDirsFromEnv,
+	readDirBaseline,
+	resolvePathDirs,
+	sweepDir,
+	type PathIncident,
+} from "/Users/abhi/proj/rlm/packages/rlm-guard/src/pathdir.ts";
 import { resolveProtected, spellingsFor } from "/Users/abhi/proj/rlm/packages/rlm-guard/src/protect.ts";
 import { readBaseline, restoreFile, watchProtected } from "/Users/abhi/proj/rlm/packages/rlm-guard/src/restore.ts";
 import { isDelegateChild, unlockState, writeUnlock } from "/Users/abhi/proj/rlm/packages/rlm-guard/src/unlock.ts";
@@ -55,6 +63,14 @@ const FILES = resolveProtected(ROOT, [
 	{ pattern: "cordis.yml", why: "the composition", inherent: true },
 ]);
 const blocked = (code: string) => inspectCell(code, ROOT, FILES) !== null;
+
+// The PATH directories, as the row resolves them. Not a fixture: this is
+// `resolvePathDirs` over the two inherent names, which is what index.ts does.
+const DIRS = resolvePathDirs([
+	{ dir: "~/.local/bin", why: "on PATH" },
+	{ dir: "/opt/homebrew/bin", why: "on PATH" },
+]);
+const dirBlocked = (code: string) => inspectCell(code, ROOT, FILES, DIRS) !== null;
 
 console.log("\nthe door refuses every shape that reaches capacity.ts");
 for (const [name, cell] of [
@@ -201,5 +217,144 @@ await t("uncommitted work is restored from the boot snapshot, never from the ind
 	eq(fs.readFileSync(abs, "utf8"), "work in progress\n", "the uncommitted work is what comes back");
 });
 
+
+
+/* ── PATH directories, added after 2026-09-03 ────────────────────────────────
+ *
+ * Two delegated children wrote shims into `~/.local/bin` and
+ * `/opt/homebrew/bin` to satisfy criteria of the form `iris X | grep -q Y`, and
+ * the monitors that call `~/.local/bin/iris` then alarmed for six hours about a
+ * fault that did not exist. Every cell in the first block below is one that
+ * really ran, or a spelling of it; every cell in the second is ordinary work
+ * that must not be refused, and two of them are false positives this row
+ * produced in production within four minutes of going live.
+ */
+console.log("\nthe door refuses a write to a directory on PATH");
+for (const [name, cell] of [
+	["the cell that overwrote ~/.local/bin/iris", "%%bash\ncat > ~/.local/bin/iris << 'W'\n#!/bin/bash\nnode dist/cli.js \"$@\"\nW\nchmod +x ~/.local/bin/iris"],
+	["the cell that created /opt/homebrew/bin/iris", "fs.writeFileSync('/opt/homebrew/bin/iris', script);\nfs.chmodSync('/opt/homebrew/bin/iris', 0o755);"],
+	["read, replace, write it back", "const p='/opt/homebrew/bin/iris';let s=fs.readFileSync(p,'utf8');s=s.replace('a','b');fs.writeFileSync(p,s);"],
+	["a name that does not exist yet", "%%bash\necho x > /opt/homebrew/bin/totally-new"],
+	["$HOME rather than a tilde", "%%bash\ncat > \"$HOME/.local/bin/shim\" <<'E'\nx\nE"],
+	["tee", "%%bash\necho x | tee ~/.local/bin/shim"],
+	["cp", "%%bash\ncp /tmp/fake /opt/homebrew/bin/iris"],
+	["install(1)", "%%bash\ninstall -m 755 /tmp/fake /Users/abhi/.local/bin/iris"],
+	["ln -sf over it", "%%bash\nln -sf /tmp/fake ~/.local/bin/iris"],
+	["cd in first, then a bare redirect", "%%bash\ncd ~/.local/bin && cat > iris <<'E'\nx\nE"],
+	["rm", "%%bash\nrm /opt/homebrew/bin/iris"],
+	["a python heredoc", "%%bash\npython3 - <<'PY'\nopen('/opt/homebrew/bin/iris','w').write('x')\nPY"],
+	["a JS variable holding the path", "const p='/Users/abhi/.local/bin/iris';fs.writeFileSync(p,'x');"],
+	["a template built from the bare directory", "const d='/Users/abhi/.local/bin';fs.writeFileSync(`${d}/iris`,'x');"],
+	["execFileSync argv form", "execFileSync('cp',['/tmp/x','/opt/homebrew/bin/iris'])"],
+] as Array<[string, string]>)
+	t(name, () => ok(dirBlocked(cell), "walked through"));
+
+console.log("\nand does not refuse ordinary work near one");
+for (const [name, cell] of [
+	["reading a binary on PATH", "%%bash\ncat /Users/abhi/.local/bin/iris | head -5"],
+	["running one by its full path", "execSync('/opt/homebrew/bin/gh pr list')"],
+	["bash -c around one", "execSync('bash -c \"/opt/homebrew/bin/rg --version\"')"],
+	// Produced a refusal in production: `2>&1` is not a redirect to a file.
+	["source ... 2>&1, which is a read", "execSync(\"bash -c 'source /opt/homebrew/bin/iris 2>&1'\")"],
+	// Produced a refusal in production: `#!/usr/bin/env node` in written content.
+	["a shebang in content written elsewhere", "const s='#!/usr/bin/env node\\nmain()';fs.mkdirSync(path.dirname(p),{recursive:true});fs.writeFileSync(p,s);"],
+	["putting the directory on PATH", "%%bash\nexport PATH=\"/opt/homebrew/bin:$PATH\"\necho $PATH"],
+	["writing somewhere else entirely", "%%bash\necho hi > /tmp/ordinary.txt"],
+	["a dynamic name under /tmp", "const n=Date.now();fs.writeFileSync(`/tmp/out-${n}.json`,'{}')"],
+	["listing the directory", "%%bash\nls -la /opt/homebrew/bin | head"],
+] as Array<[string, string]>)
+	t(name, () => ok(!dirBlocked(cell), "refused ordinary work"));
+
+console.log("\na directory spelling has to start a path, not sit inside one");
+t("/bin does not match inside ~/.local/bin/x", () => {
+	const dirs = resolvePathDirs([{ dir: "/bin", why: "x" }]);
+	eq(pathDirFileIn('fs.writeFileSync("/Users/abhi/.local/bin/list-tasks", x)', dirs), null);
+});
+t("but it does match /bin/x itself", () => {
+	const dirs = resolvePathDirs([{ dir: "/bin", why: "x" }]);
+	eq(pathDirFileIn('fs.writeFileSync("/bin/list-tasks", x)', dirs)?.evidence, "/bin/list-tasks");
+});
+t("the SIP directories are never derived from PATH", () => {
+	const got = pathDirsFromEnv("/bin:/usr/bin:/sbin:/usr/sbin:/opt/homebrew/bin:/usr/local/bin", ROOT);
+	eq(JSON.stringify(got), JSON.stringify(["/opt/homebrew/bin", "/usr/local/bin"]));
+});
+t("a PATH entry inside the repo is left to protect.ts", () => {
+	eq(pathDirsFromEnv(`${ROOT}/node_modules/.bin:/usr/local/bin`, ROOT).join(","), "/usr/local/bin");
+});
+
+console.log("\nthe PATH backstop puts an overwrite back and leaves an arrival alone");
+t("an overwritten entry is restored; a new one is reported, not deleted", () => {
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "guard-pathdir-"));
+	const dir = path.join(home, "bin");
+	fs.mkdirSync(dir);
+	const shim = path.join(dir, "iris");
+	fs.writeFileSync(shim, "#!/bin/sh\nexec the-real-thing \"$@\"\n", { mode: 0o755 });
+	fs.symlinkSync("/usr/bin/true", path.join(dir, "linked"));
+
+	const [protectedDir] = resolvePathDirs([{ dir, why: "on PATH" }]);
+	const baseline = readDirBaseline(protectedDir as never, 256 * 1024);
+	eq(baseline.entries.size, 2, "both entries snapshotted:");
+
+	// Somebody overwrites the shim, and installs something new beside it.
+	fs.writeFileSync(shim, "#!/bin/bash\necho '{\"daemon\":\"connected\"}'\n");
+	fs.unlinkSync(path.join(dir, "linked"));
+	fs.symlinkSync("/usr/bin/false", path.join(dir, "linked"));
+	fs.writeFileSync(path.join(dir, "brew-installed-this"), "x");
+
+	const seen: PathIncident[] = [];
+	sweepDir(baseline, 256 * 1024, false, (i) => seen.push(i));
+
+	ok(fs.readFileSync(shim, "utf8").includes("the-real-thing"), "the overwrite was not put back");
+	eq(fs.readlinkSync(path.join(dir, "linked")), "/usr/bin/true", "the symlink was not put back:");
+	ok(fs.existsSync(path.join(dir, "brew-installed-this")), "a new arrival was DELETED, which it must never be");
+	eq(seen.filter((i) => i.action === "path-entry-restored").length, 2, "restores:");
+	eq(seen.filter((i) => i.action === "path-entry-arrived").length, 1, "arrivals reported:");
+	fs.rmSync(home, { recursive: true, force: true });
+});
+t("under an unlock it stands down and re-baselines", () => {
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "guard-pathdir-"));
+	const dir = path.join(home, "bin");
+	fs.mkdirSync(dir);
+	const shim = path.join(dir, "iris");
+	fs.writeFileSync(shim, "original\n", { mode: 0o755 });
+	const [protectedDir] = resolvePathDirs([{ dir, why: "on PATH" }]);
+	const baseline = readDirBaseline(protectedDir as never, 256 * 1024);
+	fs.writeFileSync(shim, "abhi did this himself\n");
+	const seen: PathIncident[] = [];
+	sweepDir(baseline, 256 * 1024, true, (i) => seen.push(i));
+	eq(fs.readFileSync(shim, "utf8"), "abhi did this himself\n", "an authorised change was reverted:");
+	eq(seen[0]?.action, "path-entry-accepted-under-unlock");
+	// And what is there now is what gets defended when the unlock lapses.
+	fs.writeFileSync(shim, "somebody else did this\n");
+	sweepDir(baseline, 256 * 1024, false, () => {});
+	eq(fs.readFileSync(shim, "utf8"), "abhi did this himself\n", "the new baseline was not defended:");
+	fs.rmSync(home, { recursive: true, force: true });
+});
+
+t("two directories overwritten in the same instant are both put back", () => {
+	// Measured, and the reason `settling` is per-directory: with one shared flag
+	// the first sweep suppressed the second, and nothing ever came back for it
+	// because a file rewritten in place does not change its directory's mtime.
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "guard-pathdir-"));
+	const a = path.join(home, "a");
+	const b = path.join(home, "b");
+	fs.mkdirSync(a);
+	fs.mkdirSync(b);
+	fs.writeFileSync(path.join(a, "iris"), "real-a\n", { mode: 0o755 });
+	fs.writeFileSync(path.join(b, "iris"), "real-b\n", { mode: 0o755 });
+	const dirs = resolvePathDirs([
+		{ dir: a, why: "on PATH" },
+		{ dir: b, why: "on PATH" },
+	]);
+	const baselines = dirs.map((d) => readDirBaseline(d, 256 * 1024));
+	fs.writeFileSync(path.join(a, "iris"), "fake\n");
+	fs.writeFileSync(path.join(b, "iris"), "fake\n");
+	for (const baseline of baselines) sweepDir(baseline, 256 * 1024, false, () => {});
+	eq(fs.readFileSync(path.join(a, "iris"), "utf8"), "real-a\n", "first directory:");
+	eq(fs.readFileSync(path.join(b, "iris"), "utf8"), "real-b\n", "second directory:");
+	fs.rmSync(home, { recursive: true, force: true });
+});
+
 console.log(`\n${pass} passed, ${fail} failed`);
+
 process.exit(fail ? 1 : 0);

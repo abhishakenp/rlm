@@ -43,6 +43,13 @@ export interface ProtectedFile {
 	/** Protected regardless of config — the guard's own footing. */
 	inherent: boolean;
 	/**
+	 * This entry stands for a path inside a protected *PATH directory* rather
+	 * than a file recorded at boot — see `pathdir.ts`. It changes only the words
+	 * of the refusal, which have to be about hijacking a command name rather than
+	 * about editing a source file.
+	 */
+	pathDir?: true;
+	/**
 	 * Does the backstop watch this file?
 	 *
 	 * Almost always yes. The exception is the unlock sentinel: its whole purpose

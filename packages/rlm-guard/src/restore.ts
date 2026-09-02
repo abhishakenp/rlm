@@ -42,6 +42,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, rmSync, unwatchFile, watch, watchFile, writeFileSync, type FSWatcher } from "node:fs";
 import { dirname } from "node:path";
+import type { PathIncidentAction } from "./pathdir.ts";
 import type { ProtectedFile } from "./protect.ts";
 
 export interface Baseline {
@@ -58,7 +59,7 @@ export interface Incident {
 	at: number;
 	rel: string;
 	/** What was done about it. */
-	action: "restored-from-git" | "restored-from-snapshot" | "accepted-under-unlock" | "cannot-restore";
+	action: "restored-from-git" | "restored-from-snapshot" | "accepted-under-unlock" | "cannot-restore" | PathIncidentAction;
 	detail: string;
 }
 

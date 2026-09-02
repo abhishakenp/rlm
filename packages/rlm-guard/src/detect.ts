@@ -42,8 +42,43 @@
  * names a protected file somewhere — which is what catches indirection through
  * a variable without refusing every dynamic write in the repository.
  */
+import { resolve } from "node:path";
+import {
+	cdTarget,
+	expandHome,
+	pathDirFileIn,
+	pathDirMentionedIn,
+	underPathDir,
+	WRITE_WORDS,
+	type ProtectedPathDir,
+} from "./pathdir.ts";
 import type { ProtectedFile } from "./protect.ts";
 import { dirTargeted, namedIn } from "./protect.ts";
+
+/**
+ * A path inside a protected PATH directory, dressed as a `ProtectedFile` so the
+ * refusal machinery below does not have to learn a second shape.
+ *
+ * `rel` is the absolute path because that is the only honest name for a file
+ * outside the repo, and it is what the person reading the log needs to see.
+ */
+const asFile = (dir: ProtectedPathDir, named: string): ProtectedFile => ({
+	abs: named,
+	rel: named,
+	spellings: [named],
+	dirSpellings: [dir.abs],
+	why: dir.why,
+	inherent: true,
+	watched: false,
+	pathDir: true,
+});
+
+/** The absolute path a write token names, for the refusal text and the log. */
+const resolveToken = (token: string, dir: ProtectedPathDir, cwdDir: ProtectedPathDir | null): string => {
+	const raw = expandHome(token.replace(/^['"]|['"]$/g, "").replace(/\/+$/, ""));
+	if (raw.startsWith("/")) return resolve(raw);
+	return resolve((cwdDir ?? dir).abs, raw);
+};
 
 export interface Refusal {
 	block: true;
@@ -220,11 +255,23 @@ const interpolated = (text: string): boolean => /[$`]/.test(text);
  * Redirections are found first because they can hang off any command, then the
  * head of the segment decides whether its operands are targets too.
  */
-const shellTargets = (segment: string, root: string, files: ProtectedFile[]): Target[] => {
+const shellTargets = (
+	segment: string,
+	root: string,
+	files: ProtectedFile[],
+	dirs: ProtectedPathDir[] = [],
+	cwdDir: ProtectedPathDir | null = null,
+): Target[] => {
 	const out: Target[] = [];
+	// A single operand — a redirect target, an argument of `cp`. Precise on
+	// purpose: the PATH-directory check is by prefix, and running it over free
+	// text would refuse every cell that merely invokes a homebrew binary by its
+	// full path.
 	const classify = (text: string): Target => {
 		const hit = namedIn(text, files) ?? dirTargeted(text, root, files);
 		if (hit) return { kind: "protected", file: hit };
+		const inDir = underPathDir(text, dirs, cwdDir);
+		if (inDir) return { kind: "protected", file: asFile(inDir, resolveToken(text, inDir, cwdDir)) };
 		return interpolated(text) ? { kind: "unknown" } : { kind: "elsewhere" };
 	};
 
@@ -263,7 +310,15 @@ const shellTargets = (segment: string, root: string, files: ProtectedFile[]): Ta
 	// whole segment is the target text. This over-blocks a heredoc that merely
 	// mentions a protected file while writing elsewhere; that is the documented
 	// price of not being able to evaluate the program.
-	if (carriesAProgram) out.push(classify(segment));
+	if (carriesAProgram) {
+		out.push(classify(segment));
+		// The program's own text, for a path in a protected PATH directory. Gated
+		// on the segment looking like it writes at all, because `bash -c
+		// "/opt/homebrew/bin/gh pr list"` is a read and refusing it would make the
+		// guard something people route around.
+		const named = WRITE_WORDS.test(segment) ? pathDirFileIn(segment, dirs) : null;
+		if (named) out.push({ kind: "protected", file: asFile(named.dir, named.evidence) });
+	}
 	if (operandsAreTargets) for (const t of rest) if (!t.startsWith("-")) out.push(classify(t));
 	return out;
 };
@@ -343,11 +398,19 @@ const literalsIn = (text: string): string[] =>
 		(m) => (m[1] ?? m[2] ?? m[3] ?? "") as string,
 	);
 
-const jsTarget = (argText: string, root: string, files: ProtectedFile[]): Target => {
+const jsTarget = (argText: string, root: string, files: ProtectedFile[], dirs: ProtectedPathDir[] = []): Target => {
 	const text = argText.trim();
 	const hit = namedIn(text, files) ?? dirTargeted(literalsIn(text)[0] ?? "", root, files);
 	if (hit) return { kind: "protected", file: hit };
 	const literals = literalsIn(text);
+	// `writeFileSync("/opt/homebrew/bin/iris", …)` — and the same path assembled
+	// from a template whose literal half already reaches into the directory.
+	for (const literal of literals) {
+		const inDir = underPathDir(literal, dirs);
+		if (inDir) return { kind: "protected", file: asFile(inDir, resolveToken(literal, inDir, null)) };
+	}
+	const joined = pathDirFileIn(text, dirs);
+	if (joined) return { kind: "protected", file: asFile(joined.dir, joined.evidence) };
 	// Anything that is not entirely made of literals — a bare identifier, a
 	// template with a substitution, a concatenation with a variable — cannot be
 	// resolved here, and that is exactly the indirection case.
@@ -358,7 +421,40 @@ const jsTarget = (argText: string, root: string, files: ProtectedFile[]): Target
 
 /* ────────────────────────── the verdict ────────────────────────── */
 
-const refusal = (file: ProtectedFile, how: "direct" | "indirect", evidence: string): Refusal => ({
+const refusal = (file: ProtectedFile, how: "direct" | "indirect", evidence: string): Refusal =>
+	file.pathDir ? pathDirRefusal(file, how, evidence) : fileRefusal(file, how, evidence);
+
+/**
+ * The refusal for a PATH directory, which is a different conversation.
+ *
+ * Nothing here is about ownership of a source file. It is about the fact that a
+ * criterion of the form `iris X | grep -q 'Y'` can be satisfied by putting `Y`
+ * under the name `iris`, and that doing so is a forgery of the work rather than
+ * the work — including when the agent cannot see the difference from inside the
+ * task. The message says what to do instead, because an agent stuck on a
+ * criterion it cannot satisfy honestly needs somewhere to go.
+ */
+const pathDirRefusal = (file: ProtectedFile, how: "direct" | "indirect", evidence: string): Refusal => ({
+	block: true,
+	reason:
+		`Refused by rlm-guard: this cell writes ${file.rel}, which is on Abhi's PATH.\n\n${file.why}\n\n` +
+		(how === "indirect"
+			? `The path here is reached through a variable or an interpolation rather than named outright, and this cell ` +
+				`both names a file on PATH and writes somewhere that cannot be resolved, so it is refused. If the write was ` +
+				`aimed somewhere else, split it into a cell that does not mention the PATH directory.\n\n`
+			: ``) +
+		`If you are here because a check runs a command by name and the command does not do what the check wants: ` +
+		`installing a program under that name makes the check pass and makes the work false. The next thing that reads ` +
+		`the output — a monitor, a person, the next task — cannot tell the difference, which is exactly why it is worse ` +
+		`than leaving the check red. Fix the real program, or say plainly in your answer that the criterion is ` +
+		`unsatisfiable as written and what it should have checked instead. That is a useful result and it is not a ` +
+		`failure. Do not look for another way to write this path: there is a second layer watching these directories.`,
+	file,
+	how,
+	evidence: evidence.slice(0, 200),
+});
+
+const fileRefusal = (file: ProtectedFile, how: "direct" | "indirect", evidence: string): Refusal => ({
 	block: true,
 	reason:
 		`Refused by rlm-guard: this cell writes ${file.rel}, which is protected.\n\n` +
@@ -385,10 +481,22 @@ const refusal = (file: ProtectedFile, how: "direct" | "indirect", evidence: stri
  * The caller decides what an internal failure means (see index.ts — it fails
  * closed, but only for cells that name a protected file at all).
  */
-export const inspectCell = (code: string, root: string, files: ProtectedFile[]): Refusal | null => {
-	if (!files.length || typeof code !== "string" || !code) return null;
+export const inspectCell = (
+	code: string,
+	root: string,
+	files: ProtectedFile[],
+	dirs: ProtectedPathDir[] = [],
+): Refusal | null => {
+	if ((!files.length && !dirs.length) || typeof code !== "string" || !code) return null;
 
-	const mentioned = namedIn(code, files);
+	// For the indirect rule below. A PATH-directory path counts as a mention only
+	// when it names a *file* inside one — `PATH=/opt/homebrew/bin:$PATH` names the
+	// directory and writes nothing.
+	// The bare directory counts here too, and only here: a cell holding
+	// `/Users/abhi/.local/bin` in a variable and writing to an interpolation it
+	// builds from it never spells the whole path anywhere.
+	const inDir = pathDirFileIn(code, dirs) ?? pathDirMentionedIn(code, dirs);
+	const mentioned = namedIn(code, files) ?? (inDir ? asFile(inDir.dir, inDir.evidence) : null);
 
 	const unknowns: string[] = [];
 	const consider = (target: Target, evidence: string): Refusal | null => {
@@ -398,8 +506,14 @@ export const inspectCell = (code: string, root: string, files: ProtectedFile[]):
 	};
 
 	for (const region of shellRegions(code)) {
-		for (const segment of segments(region)) {
-			for (const target of shellTargets(segment, root, files)) {
+		const parts = segments(region);
+		// `cd ~/.local/bin && cat > iris` writes the same file as `cat >
+		// ~/.local/bin/iris`, and the redirect target on its own is the word
+		// `iris`. The `cd` is a sibling segment, so it has to be read first.
+		let cwdDir: ProtectedPathDir | null = null;
+		for (const segment of parts) cwdDir = cdTarget(segment, dirs) ?? cwdDir;
+		for (const segment of parts) {
+			for (const target of shellTargets(segment, root, files, dirs, cwdDir)) {
 				const hit = consider(target, segment);
 				if (hit) return hit;
 			}
@@ -407,7 +521,7 @@ export const inspectCell = (code: string, root: string, files: ProtectedFile[]):
 	}
 
 	for (const args of jsSites(code)) {
-		const hit = consider(jsTarget(firstArg(args), root, files), args);
+		const hit = consider(jsTarget(firstArg(args), root, files, dirs), args);
 		if (hit) return hit;
 	}
 
