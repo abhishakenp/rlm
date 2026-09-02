@@ -143,7 +143,17 @@ export interface CapacityOptions {
  * point of this package is that work does not quietly stop.
  */
 export const capacity = (options: CapacityOptions = {}): CapacityVerdict => {
-	const ceiling = Math.max(1, options.ceiling ?? Math.min(4, Math.max(1, Math.floor((cpus()?.length ?? 2) / 2))));
+	// Half the cores is how you size CPU-bound work. These are not: a delegated
+	// agent spends almost all of its life waiting on a provider, using no local
+	// CPU at all, so sizing by cores throttled the backlog to two children
+	// against two hundred ready tasks on a machine with 55% of its memory free.
+	//
+	// The ceiling is one per core, and the floor below still governs — memory or
+	// file descriptors dropping under 20% headroom collapses the limit to one
+	// regardless, which is his rule and the thing that actually keeps the laptop
+	// usable. Raising a ceiling that the headroom mapping has to earn its way up
+	// to is safe in a way that raising the floor would not be.
+	const ceiling = Math.max(1, options.ceiling ?? Math.max(1, cpus()?.length ?? 2));
 	const floor = options.floor ?? 0.2;
 	const measured = readings();
 
