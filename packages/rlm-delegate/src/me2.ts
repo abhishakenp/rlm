@@ -59,7 +59,22 @@ export const me2 = (options: Me2Options): Reviewer => ({
 		const lessons = options.lessons ?? load();
 		const evidence = task.attempts
 			.slice(-2)
-			.map((a, i) => `attempt ${i + 1}: ${a.ok ? "reported done" : "failed"} — ${String(a.detail ?? "").slice(0, 700)}`)
+			.map(
+				(a, i) =>
+					`attempt ${i + 1}: ${a.ok ? "reported done" : "failed"} — ${String(a.detail ?? "").slice(0, 700)}` +
+					// What the check actually observed, which was being withheld.
+					//
+					// Without it me-2 is asked whether a criterion was worth passing
+					// while being told only that it passed, and on real work it filled
+					// the gap in: it rejected a `file … contains "name: fashion-trends"`
+					// task on the grounds that the file did not contain that string.
+					// The file did contain it — that is why the check passed — and me-2
+					// cannot see the machine, so it had invented the one fact its
+					// rejection rested on. A reviewer that fabricates evidence against
+					// work is the same defect as one that accepts on silence, pointed
+					// the other way.
+					(a.proof ? `\n  the criterion ${a.proof}${a.proofDetail ? `, and what it observed was: ${String(a.proofDetail).slice(0, 700)}` : ""}` : ""),
+			)
 			.join("\n");
 		const changed = (await options.diff?.(task, graph).catch(() => undefined)) ?? "";
 
@@ -74,9 +89,15 @@ export const me2 = (options: Me2Options): Reviewer => ({
 			"",
 			task.prompt || task.title,
 			"",
-			"## What the criterion was",
+			"## What the criterion was, and what it saw",
 			"",
 			JSON.stringify(task.proof),
+			"",
+			"That check was RUN, by this process, against the real machine. What it observed is under",
+			"each attempt below and it is fact — you cannot see the machine and it can, so do not",
+			"contradict it and never assert anything about a file, a command or a registry that is not",
+			"either written there or in what he asked for. If your objection needs a fact you do not",
+			"have, that is not an objection: say what would settle it instead, and accept.",
 			"",
 			"## What happened",
 			"",
@@ -84,6 +105,17 @@ export const me2 = (options: Me2Options): Reviewer => ({
 			...(changed ? ["", "## What changed", "", changed.slice(0, 12_000)] : []),
 			"",
 			"## Answer",
+			"",
+			"The bar is a defect you can point at in what is written above.",
+			"",
+			"One distinction matters more than any other here, because the two cost completely different",
+			"things to fix. If the WORK is wrong, another attempt at it is the answer. If the work looks",
+			"right and it is the CRITERION that cannot tell — it greps a source file for a word when he",
+			"asked for something to be journalled, it checks a file exists when he asked what is in it —",
+			"then re-running the agent changes nothing, and you must say so in those words: begin your",
+			"paragraph with `the criterion, not the work:` and say what would actually settle it. Both",
+			"are still rejections. Only one of them is the agent's to fix, and a rejection that does not",
+			"say which spends real attempts re-doing something that was already right.",
 			"",
 			"Look for a NEW instance of one of those lessons — not a repeat of the example. Ask in",
 			"particular: is any of this redundant with something that already exists; is it wired such",
