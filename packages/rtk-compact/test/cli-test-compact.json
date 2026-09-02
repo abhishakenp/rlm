@@ -1,0 +1,10 @@
+{
+  "user": [
+    "CLI test message"
+  ],
+  "content": [
+    "CLI test message"
+  ],
+  "compactedAt": "2026-09-02T04:09:09.770Z",
+  "version": "rtk-compact-v1"
+}

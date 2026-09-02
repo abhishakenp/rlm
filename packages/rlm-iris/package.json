@@ -1,0 +1,20 @@
+{
+  "name": "rlm-iris",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "exports": {
+    ".": "./dist/index.js",
+    "*": "./dist/*.js"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "^0.0.0"
+  }
+}
