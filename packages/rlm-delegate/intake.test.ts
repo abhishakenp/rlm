@@ -187,6 +187,30 @@ console.log("\na criterion is read out of the request before anyone is asked for
 		const proof = criterionFor("expose a tool that reads index.ts");
 		ok(proof.kind !== "command", `it read ${JSON.stringify(proof)}`);
 	});
+	t("a command named as the way to undo things is not a criterion", () => {
+		const proof = criterionFor("if it breaks, run `git reset --hard` and it works again");
+		eq(proof.kind, "unstated");
+	});
+	t("an example with a placeholder in it is a template, not a command", () => {
+		const proof = criterionFor('make `iris recall.match text="…"` pass');
+		eq(proof.kind, "unstated");
+	});
+	t("nothing is read out of a long instruction sheet", () => {
+		// The shape that taught this: a hundred-line preamble full of example
+		// commands, none of which is a criterion. Three rounds of guards each
+		// promoted the next false positive, because the rules were not the
+		// problem — reading emphasis markers out of a document written to
+		// instruct was.
+		const preamble = [
+			"You are being handed something you could not already do.",
+			"Leave a capability behind. Scaffold it with `iris plugin.new name=<thing>`.",
+			"If it goes wrong, run `iris plugin.revert` and check it works again.",
+			"- [ ] you mounted it",
+			'- [ ] `iris recall.match text="…"` matched it, and you said so',
+			"Write the corrected file and overwrite what is there.",
+		].join("\n").padEnd(700, " .");
+		eq(criterionFor(preamble).kind, "unstated");
+	});
 	t("and where nothing is confident, it says so rather than guessing", () => {
 		const proof = criterionFor("tell me what you think about the weather");
 		eq(proof.kind, "unstated");

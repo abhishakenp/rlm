@@ -31,11 +31,35 @@ export interface Derived {
 	why: string;
 }
 
-/** Backticked or quoted spans, longest first — the asker's own emphasis. */
+/**
+ * Backticked or quoted spans, longest first — the asker's own emphasis.
+ *
+ * Backticks are read separately from quotes, because a backticked command very
+ * often contains quotes of its own (`iris recall.match text="..."`) and a single
+ * character class stops at the first inner quote, handing back a truncated
+ * fragment that looks like a command and is not one.
+ */
 const quoted = (text: string): string[] => {
-	const found = [...text.matchAll(/[`'"]([^`'"\n]{2,120})[`'"]/g)].map((m) => m[1].trim());
+	const found = [
+		...[...text.matchAll(/`([^`\n]{2,160})`/g)].map((m) => m[1]),
+		...[...text.matchAll(/"([^"\n]{2,160})"/g)].map((m) => m[1]),
+		...[...text.matchAll(/'([^'\n]{2,160})'/g)].map((m) => m[1]),
+	].map((v) => v.trim());
 	return [...new Set(found)].sort((a, b) => b.length - a.length);
 };
+
+/**
+ * A template, not a command.
+ *
+ * Found the hard way against five real delegations: Iris's standard preamble
+ * carries a checklist containing `iris recall.match text="…"`, which is an
+ * instruction to the agent about how to finish, not a command anyone could run.
+ * Deriving from it produced a confidently wrong criterion on every single
+ * request — five turns that would have been marked failed for the wrong reason.
+ * A placeholder is the clearest signal that a span is illustrative, and an
+ * illustrative span is worth strictly less than admitting nobody said.
+ */
+const PLACEHOLDER = /(…|\.\.\.|<[^>]*>|\{[^}]*\}|\[[^\]]*\]|[=:]\s*$|\bTODO\b)/;
 
 const RUNNER = /^(npm|npx|bun|bunx|node|pnpm|yarn|make|cargo|pytest|python3?|go|git|rlm|iris|sh|bash|\.\/)\b/;
 const VERIFIABLE = /\b(pass(es|ing)?|exits? 0|succeeds?|green|works?|returns?|prove[sn]?)\b/i;
@@ -49,7 +73,7 @@ const COMMANDY = /^[a-z][a-z0-9_-]*(?:[.:][a-z][a-z0-9_-]*)+$/i;
 /** `index.ts` has the same shape as `dirsize.of` and is not a command. */
 const EXTENSION = /\.(ts|tsx|js|mjs|cjs|jsx|json|md|py|sh|txt|ya?ml|html|css|toml|lock|log)$/i;
 const commandLike = (token: string): boolean =>
-	COMMANDY.test(token) && !EXTENSION.test(token) && !token.includes("/");
+	COMMANDY.test(token) && !EXTENSION.test(token) && !token.includes("/") && !PLACEHOLDER.test(token);
 
 /** Something that looks like a path, and turns out to be one. */
 const pathsIn = (text: string, cwd: string): string[] =>
@@ -72,20 +96,50 @@ export const derive = (
 ): Derived | null => {
 	const text = String(request ?? "");
 	if (!text.trim()) return null;
+
+	/**
+	 * Only read a criterion out of something short enough to be an ask.
+	 *
+	 * Three rounds of whack-a-mole against real traffic taught this one. Iris's
+	 * standard preamble runs to a hundred lines and is full of example commands
+	 * — `iris plugin.new`, `iris plugin.revert`, `iris recall.match text="…"` —
+	 * each of them an instruction about how to work, none of them a criterion.
+	 * Every guard that removed one just promoted the next, because the problem
+	 * was never the individual rule: pattern-matching emphasis markers inside a
+	 * document written to instruct is reading someone else's mail.
+	 *
+	 * A person asking for something writes a line or two. A request this long is
+	 * a template, and the honest answer to a template is that nobody said how to
+	 * tell — which becomes a question, which is what he asked for. It is also
+	 * the request most in need of being broken into several tasks anyway, and
+	 * `refine()` is where that happens with a model that can actually read it.
+	 */
+	const ASK = 600;
+	if (text.length > ASK) return null;
 	const cwd = options.cwd ?? process.cwd();
 	const now = options.now ?? new Date().toISOString();
 	const spans = quoted(text);
 
-	// 1. A command the asker themselves said should pass. Closest thing to
-	//    being told the criterion outright.
-	if (VERIFIABLE.test(text)) {
-		const command = spans.find((s) => RUNNER.test(s) && s.includes(" "));
-		if (command) {
-			return {
-				proof: { kind: "shell", run: command },
-				why: `the request says \`${command}\` should work, so that is the criterion`,
-			};
-		}
+	// 1. A command the asker themselves said should pass. Closest thing to being
+	//    told the criterion outright — but only when the two are next to each
+	//    other. Testing the cue against the whole request was wrong and real
+	//    traffic proved it: Iris's preamble runs to a hundred lines, somewhere in
+	//    it something always says "works", and every delegation came back with a
+	//    criterion lifted out of an unrelated checklist. A command mentioned in
+	//    "if it goes wrong, run `iris plugin.revert`" is the opposite of a
+	//    criterion. So the cue has to sit within a sentence of the command.
+	const command = spans.find((span) => {
+		if (!RUNNER.test(span) || !span.includes(" ") || PLACEHOLDER.test(span)) return false;
+		const at = text.indexOf(span);
+		if (at === -1) return false;
+		const near = text.slice(Math.max(0, at - 70), at + span.length + 70);
+		return VERIFIABLE.test(near) && !/\b(if|unless|otherwise|revert|undo|roll ?back|on failure)\b/i.test(near);
+	});
+	if (command) {
+		return {
+			proof: { kind: "shell", run: command },
+			why: `the request says \`${command}\` should work, so that is the criterion`,
+		};
 	}
 
 	// 2. A plugin, row or capability to be mounted. `rlm-plugins` mounts a
@@ -98,7 +152,7 @@ export const derive = (
 		// follows even when the name is Iris-flavoured. A request to mount
 		// something into a *different* composition would fail this check loudly,
 		// which is the right way round: loud beats a turn that reads like success.
-		const name = spans.find((s) => NAMEY.test(s)) ?? text.match(/\b((?:rlm|iris)-[a-z0-9-]+)\b/)?.[1];
+		const name = spans.find((s) => NAMEY.test(s) && !PLACEHOLDER.test(s)) ?? text.match(/\b((?:rlm|iris)-[a-z0-9-]+)\b/)?.[1];
 		if (name) {
 			const row = name.replace(/^rlm-/, "");
 			return {

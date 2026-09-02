@@ -56,6 +56,17 @@ Deriving can never refuse a request: a bad guess produces a task that fails
 loudly, which is recoverable, while a throw at the boundary would stop work
 being handed over at all.
 
+**It only reads requests short enough to be an ask (600 characters).** This was
+learned against real traffic, over three rounds. Iris's standard preamble runs
+to a hundred lines and is full of example commands — `iris plugin.new`,
+`iris plugin.revert`, `iris recall.match text="…"` — none of which is a
+criterion, and every guard that suppressed one promoted the next. The rules were
+not the problem: pattern-matching emphasis markers inside a document written to
+*instruct* is reading someone else's mail. A person asking for something writes a
+line or two; anything longer is a template, and the honest answer to a template
+is that nobody said. It is also the request most in need of `refine()`, which
+uses a model that can actually read it.
+
 `refine(graphId, taskId, tasks)` is the improvement on top: a model reads the
 recorded request and turns it into real tasks with real criteria and real edges.
 The parent becomes a `rollup` — done when everything it was broken into is done,
