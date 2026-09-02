@@ -250,6 +250,50 @@ export class RlmDelegateService extends Service {
 	private attachMode() {
 		const modes = this.ctx.get?.("rlmModes") as any;
 		if (!modes?.register || this.mode) return;
+		// `rlm tasks` — every task there is, on one screen.
+		//
+		// He asked for this twice: "a command that lists all the tasks so I can
+		// confirm nothing was lost", and again the next day. `drive status` says
+		// the same things at length, per graph, with reasons — which is the wrong
+		// shape for the question "is anything missing?". This is one line per
+		// task, sorted so the stopped work cannot hide under the finished work.
+		modes.register({
+			id: "tasks",
+			priority: 61,
+			claims: (argv: string[]) => argv[0] === "tasks",
+			run: async (argv: string[]) => {
+				const rank: Record<string, number> = { running: 0, ready: 1, blocked: 2, failed: 3, unproven: 4, rejected: 5, unreachable: 6, done: 7 };
+				const mark: Record<string, string> = { done: "done", running: "RUNNING", ready: "ready", blocked: "blocked", failed: "FAILED", unproven: "UNPROVEN", rejected: "parked", unreachable: "stuck" };
+				const rows: Array<{ state: string; id: string; title: string; graph: string; why?: string }> = [];
+				for (const id of this.store.ids()) {
+					const graph = this.store.load(id);
+					if (!graph) continue;
+					for (const task of graph.tasks) {
+						rows.push({ state: task.state, id: task.id, title: task.title, graph: id, why: task.reason?.split("\n")[0] });
+					}
+				}
+				const only = argv.slice(1).filter((a) => !a.startsWith("-"));
+				const shown = only.length ? rows.filter((r) => only.some((o) => r.state === o || r.id.includes(o))) : rows;
+				shown.sort((a, b) => (rank[a.state] ?? 9) - (rank[b.state] ?? 9) || a.id.localeCompare(b.id));
+
+				const verbose = argv.includes("--why");
+				for (const row of shown) {
+					console.log(`  ${(mark[row.state] ?? row.state).padEnd(9)} ${row.id.slice(0, 30).padEnd(31)} ${row.title.slice(0, 62)}`);
+					if (verbose && row.why) console.log(`  ${" ".repeat(9)} ${" ".repeat(31)} ${row.why.slice(0, 100)}`);
+				}
+				const count: Record<string, number> = {};
+				for (const row of rows) count[row.state] = (count[row.state] ?? 0) + 1;
+				const order = Object.keys(count).sort((a, b) => (rank[a] ?? 9) - (rank[b] ?? 9));
+				console.log(
+					`\n  ${rows.length} task(s) across ${new Set(rows.map((r) => r.graph)).size} graph(s) — ` +
+						order.map((k) => `${mark[k] ?? k} ${count[k]}`).join(", "),
+				);
+				// Nothing is ever dropped, so this total is the answer to "did we
+				// lose anything": it only ever goes up.
+				return 0;
+			},
+		});
+
 		const handle = modes.register({
 			id: "drive",
 			priority: 60,
