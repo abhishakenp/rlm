@@ -156,6 +156,14 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 
 	let sweeps = 0;
 	let ended: DriveReport["ended"] = "settled";
+	/**
+	 * Graphs this run actually looked at.
+	 *
+	 * The account has to be about this run. Counting every `done` task in the
+	 * store would have the drive taking credit for work finished last week,
+	 * which is the same species of lie as counting a turn ending as a result.
+	 */
+	const touched = new Set<string>();
 
 	try {
 		for (;;) {
@@ -195,6 +203,7 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 				if (refined) open = store.open().filter((g) => !options.only || options.only.includes(g.id));
 			}
 
+			for (const graph of open) touched.add(graph.id);
 			const workable = open.filter((g) => runnable(g.tasks).length);
 
 			if (!workable.length) {
@@ -256,6 +265,7 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 
 	const all = store
 		.ids()
+		.filter((id) => touched.has(id))
 		.map((id) => store.load(id))
 		.filter((g): g is Graph => !!g)
 		.filter((g) => !options.only || options.only.includes(g.id));

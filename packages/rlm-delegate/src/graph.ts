@@ -488,8 +488,16 @@ export const render = (graph: Graph): string => {
 	});
 	const left = outstanding(graph.tasks).length;
 	const unchecked = unverified(graph.tasks).length;
+	// The goal is kept verbatim on disk and shown in one line here. What
+	// arrives is an eleven-kilobyte preamble; printing all of it per graph turns
+	// a one-screen account into forty screens, which is a different way of not
+	// being able to see what is owed.
+	const firstLine = (graph.goal.split("\n").find((l) => l.trim()) ?? graph.goal).trim();
+	const goal = graph.goal.length > firstLine.length
+		? `${firstLine.slice(0, 110)}${firstLine.length > 110 ? "…" : ""} (${graph.goal.length} chars in all)`
+		: firstLine.slice(0, 110);
 	return [
-		`${graph.id} — ${graph.goal}`,
+		`${graph.id} — ${goal}`,
 		...lines,
 		`  ${graph.tasks.length - left}/${graph.tasks.length} done, ${left} still owed` +
 			(unchecked ? `, ${unchecked} of those never checkable` : ""),
