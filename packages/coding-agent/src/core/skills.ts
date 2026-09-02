@@ -513,3 +513,72 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 		diagnostics: [...allDiagnostics, ...collisionDiagnostics],
 	};
 }
+
+/**
+ * A skill file that does not load is not a warning — it is a skill that is not
+ * there. The loader already knows how to tell the difference; this is the gate
+ * that acts on what it found, so a malformed skill is refused at the door
+ * instead of being discovered later as yellow text nobody read.
+ *
+ * There is deliberately no second validator here: `checkSkillsDir` runs the
+ * real `loadSkillsFromDir` and reports every file that failed to become a
+ * skill. A file that loaded despite a complaint (a name that disagrees with
+ * its directory, say) is still usable, so it is not a problem — only silence
+ * is.
+ */
+export interface SkillProblem {
+	/** The offending file. */
+	path: string;
+	/** Why it did not load, in the loader's own words. */
+	message: string;
+}
+
+/** Every file under `dir` that the loader read and refused. */
+export function checkSkillsDir(dir: string): SkillProblem[] {
+	const { skills, diagnostics } = loadSkillsFromDir({ dir, source: "gate" });
+
+	const loaded = new Set(skills.map((skill) => canonicalizePath(skill.filePath)));
+	const problems: SkillProblem[] = [];
+	const seen = new Set<string>();
+
+	for (const diagnostic of diagnostics) {
+		if (!diagnostic.path) continue;
+		// It complained, but the skill is still usable — that is not a refusal.
+		if (loaded.has(canonicalizePath(diagnostic.path))) continue;
+
+		const key = `${diagnostic.path} ${diagnostic.message}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+
+		problems.push({ path: diagnostic.path, message: diagnostic.message });
+	}
+
+	return problems;
+}
+
+/**
+ * Refuse the whole tree if any skill in it does not load.
+ *
+ * Throws with every problem at once — finding them one restart at a time is
+ * how two broken skills sat on disk for a day.
+ */
+export function assertSkillsValid(dirs: string[]): void {
+	const problems = dirs.flatMap((dir) => checkSkillsDir(dir));
+	if (problems.length === 0) return;
+
+	// One broken file can fail several ways at once; report it once, with all of them.
+	const byFile = new Map<string, string[]>();
+	for (const problem of problems) {
+		const found = byFile.get(problem.path);
+		if (found) found.push(problem.message.split("\n")[0]);
+		else byFile.set(problem.path, [problem.message.split("\n")[0]]);
+	}
+
+	const lines: string[] = [];
+	for (const [path, messages] of byFile) {
+		lines.push(`  ${path}`);
+		for (const message of messages) lines.push(`    ${message}`);
+	}
+
+	throw new Error(`${byFile.size} skill file${byFile.size === 1 ? "" : "s"} did not load:\n${lines.join("\n")}`);
+}

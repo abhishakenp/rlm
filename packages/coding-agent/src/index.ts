@@ -224,6 +224,8 @@ export {
 export { type ParsedSkillBlock, parseSkillBlock } from "./core/skill-blocks.js";
 // Skills
 export {
+	assertSkillsValid,
+	checkSkillsDir,
 	formatSkillsForPrompt,
 	type LoadSkillsFromDirOptions,
 	type LoadSkillsResult,
@@ -233,6 +235,7 @@ export {
 	type Skill,
 	type SkillFrontmatter,
 	type SkillKind,
+	type SkillProblem,
 } from "./core/skills.js";
 export { createSyntheticSourceInfo } from "./core/source-info.js";
 // Bash execution infrastructure (used by the interactive `!`/`!!` shell prefix
