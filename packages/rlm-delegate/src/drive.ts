@@ -30,6 +30,7 @@ import { join } from "node:path";
 import { capacity } from "./capacity.ts";
 import { outstanding, runnable, type Graph, type Task } from "./graph.ts";
 import { impasses, renderImpasses, type Impasse } from "./impasse.ts";
+import { isHostDown } from "./host.ts";
 import { needsRefining, refineOne, type Planner } from "./refine.ts";
 import { run as runGraph, type RunOptions, type Runner } from "./scheduler.ts";
 import { Gate, Stop } from "./stop.ts";
@@ -162,6 +163,37 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 		return options.fence?.(task, graph);
 	};
 
+	/**
+	 * Stand the run down when it is the host that is broken, not the work.
+	 *
+	 * Every child is a whole `rlm --print`, so it boots the composition before
+	 * it reads the prompt. While an agent is mid-edit on any row, every child
+	 * launched dies the same way — and the drive's answer to that was to launch
+	 * the next one. One night: twenty-five sweeps × a refusal cap of four × three
+	 * planner calls each = three hundred doomed spawns per run, at up to ten
+	 * minutes apiece, none of which reached a model.
+	 *
+	 * Two is the threshold rather than one because a single child can die of its
+	 * own accord; two in a row, on a signature only the host emits, is the
+	 * composition. Nothing is written against any task — `isHostFailure` already
+	 * kept those out of the journal — and the supervisor restarts the sweep
+	 * forty-five seconds later, by which time the edit has almost always landed.
+	 */
+	const HOST_FAILURES_BEFORE_STANDING_DOWN = 2;
+	let hostFailures = 0;
+	const noteHostDown = (error: unknown): void => {
+		hostFailures += 1;
+		say("rlm/drive-host-down", {
+			seen: hostFailures,
+			of: HOST_FAILURES_BEFORE_STANDING_DOWN,
+			detail: String((error as { message?: unknown })?.message ?? error).split("\n")[0].slice(0, 300),
+		});
+		if (hostFailures < HOST_FAILURES_BEFORE_STANDING_DOWN || abort.signal.aborted) return;
+		stoppedBy = "the composition would not boot — standing down rather than spawning into it";
+		say("rlm/drive-stopped", { why: stoppedBy });
+		abort.abort();
+	};
+
 	const planner = options.planner ?? options.makePlanner?.(abort.signal);
 	const reviewer = options.reviewer ?? options.makeReviewer?.(abort.signal);
 	const runner = options.runner ?? options.makeRunner?.(abort.signal);
@@ -288,7 +320,12 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 					try {
 						into = await refineOne(store, item.graph, item.task, planner, say, { cwd: options.cwd });
 					} catch (error: any) {
-						say("rlm/drive-graph-error", { graph: item.graph.id, error: String(error?.message ?? error) });
+						// The planner child could not boot. Nothing was written
+						// against the task, and the next one in the queue would
+						// die identically, so count it and stop rather than work
+						// through the whole backlog proving the same point.
+						if (isHostDown(error)) noteHostDown(error);
+						else say("rlm/drive-graph-error", { graph: item.graph.id, error: String(error?.message ?? error) });
 					} finally {
 						state.active -= 1;
 						release();
@@ -400,7 +437,11 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 					}).catch((error: any) => {
 						// A graph that throws is a graph, not the drive. The others
 						// carry on and this one is still on disk saying what it owes.
-						say("rlm/drive-graph-error", { graph: graph.id, error: String(error?.message ?? error) });
+						// Unless the host is what threw, in which case it is the
+						// drive, and every other graph is about to find that out
+						// the expensive way.
+						if (isHostDown(error)) noteHostDown(error);
+						else say("rlm/drive-graph-error", { graph: graph.id, error: String(error?.message ?? error) });
 					}),
 				),
 			);
@@ -444,6 +485,7 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 					if (task.state !== "failed") continue;
 					const settled = await check(task.proof, { cwd: options.cwd, probe: options.probe }).catch(() => null);
 					if (settled?.verdict !== "passed") continue;
+					const settledAt = new Date().toISOString();
 					// This is a way to reach `done`, so it goes past me-2 like the
 					// other one does. It was not, and that is not a small gap: a
 					// criterion passing is exactly the evidence me-2 exists to
@@ -470,7 +512,18 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 							continue;
 						}
 					}
-					store.ended(graph.id, task.id, "done", { ok: true, detail: settled.detail, proofDetail: settled.detail } as any, {
+					// `as any` was hiding two missing required fields — `at` and
+					// `endedAt` — and the absent `executor` that made this one of
+					// three sites producing a nameless attempt in the journal.
+					store.ended(graph.id, task.id, "done", {
+						at: settledAt,
+						endedAt: settledAt,
+						ok: true,
+						detail: settled.detail,
+						proof: "passed",
+						proofDetail: settled.detail,
+						executor: options.executor ?? "unnamed",
+					}, {
 						result: `its criterion passes now: ${settled.detail}`,
 					});
 					say("rlm/drive-settled-late", { graph: graph.id, task: task.id, detail: settled.detail });
@@ -509,7 +562,27 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 						// inspect-omniroute-timeout-config, analyze-triggerless-skills
 						// — and `stuck` went 73 to 84 behind them.
 						if (task.proof?.kind === undefined || task.proof.kind === "rollup") continue;
-						if (task.proof?.kind === "unstated" && task.state === "unproven" && !task.attempts.length) continue;
+						// Already unstated is already the planner's. The line here
+						// used to be `unstated && unproven && !attempts.length`,
+						// which can never be true: `unproven` is only ever written
+						// by `store.ended`, and that appends the attempt in the same
+						// journal entry, so an `unproven` task always has at least
+						// one. The guard read as "leave the untouched ones alone"
+						// and in fact left nothing alone.
+						//
+						// What it cost: `store.answered` was called every sweep on
+						// every unstated stopped task, writing a proof identical to
+						// the one already there. Replay turns each of those into
+						// `blocked`, `settle` turns that into `ready`, and
+						// `needsRefining` hands it to the planner again — 466 of one
+						// night's 533 `answered` entries were this one line, and
+						// each fed a planner child that had nothing new to read.
+						//
+						// The scheduler's version of this rule (`proof.kind !==
+						// "unstated"`) was right all along. Same rule, same place in
+						// the reader as in the writer. It is the third time this
+						// exact shape has cost a night.
+						if (task.proof.kind === "unstated") continue;
 						if (task.attempts.length >= 2 * (options.maxAttempts ?? 3)) continue;
 						try {
 							store.answered(
@@ -568,6 +641,14 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 			const refining = { active: 0, done: !refinable };
 			await Promise.all([refinable ? refineAll(open, refining) : Promise.resolve(), work(refining)]);
 
+			// Asked before the fingerprint, not after it. A run that stood down
+			// mid-sweep also moved nothing, so the settled branch below would
+			// claim it "worked everything it could" — which is the report saying
+			// the opposite of what happened.
+			if (stoppedBy) {
+				ended = "stopped";
+				break;
+			}
 			const after = fingerprint(store.open().filter((g) => !options.only?.length || options.only.includes(g.id)));
 			if (after === before) {
 				// Nothing moved. Another identical sweep is the loop this file

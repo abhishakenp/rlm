@@ -69,6 +69,25 @@ const here = dirname(fileURLToPath(import.meta.url));
 /** How often the dead man's switch re-reads the composition, in milliseconds. */
 const POLL_MS = 1000;
 
+/**
+ * The exit code for "the host, not the work".
+ *
+ * `EX_CONFIG` from sysexits. Kept in step with `HOST_EXIT` in
+ * `packages/rlm-delegate/src/host.ts`, which is the reader — this file cannot
+ * import from a package, because it is what mounts the packages.
+ */
+const HOST_EXIT = 78;
+
+/**
+ * True once this process has booted without rows the composition asked for.
+ *
+ * Everything after a degraded boot is running on less than was declared, so a
+ * failure below is at least as likely to be the missing row as the work. It is
+ * a module-level flag rather than a return value because the thing that has to
+ * read it is the top-level `catch`, which is nowhere near `main`.
+ */
+let degraded = false;
+
 const die = (message) => {
 	// The one place a bare write is right: this runs before any logger exists,
 	// and the alternative to saying it here is not saying it.
@@ -124,7 +143,13 @@ if (!process.execArgv.includes("--expose-internals")) {
 } else {
 	await main().catch((error) => {
 		console.error(`[rlm] fatal: ${error?.stack ?? error}`);
-		process.exit(1);
+		// 1 means "this run failed". It does not distinguish "the work went
+		// wrong" from "there was nowhere to do the work", and everything that
+		// spawns rlm has to tell those apart: the delegate charges a task an
+		// attempt for the first and must not for the second. So a boot that
+		// came up short of the row this invocation needed exits EX_CONFIG
+		// instead, and `packages/rlm-delegate/src/host.ts` reads it.
+		process.exit(degraded ? HOST_EXIT : 1);
 	});
 }
 
@@ -182,12 +207,15 @@ async function main() {
 		);
 
 	let entry;
+	/** The rows this boot went without. Named later, when a mode cannot run. */
+	let broken = [];
 	try {
 		entry = await boot(composition);
 	} catch (error) {
-		const broken = await unloadableRows(composition);
+		broken = await unloadableRows(composition);
 		if (!broken.length) throw error;
 		const reduced = await withoutRows(composition, broken);
+		degraded = true;
 		process.stderr.write(
 			`[rlm] ${broken.length} row(s) will not load and were left out of this boot: ${broken.join(", ")}\n` +
 				`[rlm] ${String(error?.message ?? error).split("\n")[0]}\n`,
@@ -216,7 +244,21 @@ async function main() {
 		);
 	}
 
-	const code = await modes.dispatch();
+	// A degraded boot removes rows by id and nothing recomputes who needed them.
+	// `print` injects `rlmAgent`, so dropping the one row `agent` leaves `print`
+	// sitting in the reduced composition, never reaching ACTIVE, and the mode
+	// reports "the print row is not mounted" — a true sentence about a row that
+	// is right there in the file, blaming the wrong thing. Say what actually
+	// happened, and keep the original underneath it.
+	const code = await modes.dispatch().catch((error) => {
+		if (!degraded) throw error;
+		throw new Error(
+			`the composition cannot run this: it booted without ${broken.join(", ")}, and what was asked for ` +
+				`needs a row that depends on that. This is the host, not the request — fix the row and run it ` +
+				`again.\n  underneath: ${String(error?.message ?? error)}`,
+			{ cause: error },
+		);
+	});
 	await ctx.fiber.dispose().catch(() => {});
 	// Interactive mode leaves the TTY as it found it and Node exits on its own;
 	// anything else may be holding a handle upstream opened, so say the word.

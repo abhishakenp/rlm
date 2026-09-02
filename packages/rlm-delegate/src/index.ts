@@ -677,14 +677,22 @@ export class RlmDelegateService extends Service {
 
 		const at = new Date().toISOString();
 		const detail = String(outcome.detail ?? "").slice(0, 4000);
+		// The last two attempts in the codebase that went into the journal with no
+		// name on them. Every other site builds its record from the one literal in
+		// `scheduler.ts`, which defaults to "unnamed"; these two were written by
+		// hand and simply left the field off, so a turn that came in through the
+		// door rather than through the drive was indistinguishable in the journal
+		// from a stamping bug. "the turn itself" says what it actually was: not a
+		// delegation, a person or a program talking to rlm directly.
+		const executor = "the turn itself";
 		if (outcome.ok) {
-			this.store.ended(graphId, taskId, "unproven", { at, endedAt: at, ok: true, detail, proof: "unstated" }, {
+			this.store.ended(graphId, taskId, "unproven", { at, endedAt: at, ok: true, detail, proof: "unstated", executor }, {
 				result: detail,
 				reason: "it came back, and nobody had said how to tell whether it worked",
 			});
 			this.ctx.emit?.("rlm/delegate-unproven", { graph: graphId, task: taskId, title: task.title });
 		} else {
-			this.store.ended(graphId, taskId, "failed", { at, endedAt: at, ok: false, detail, shape: detail.split("\n")[0] }, {
+			this.store.ended(graphId, taskId, "failed", { at, endedAt: at, ok: false, detail, shape: detail.split("\n")[0], executor }, {
 				reason: detail || "the run did not come back cleanly",
 			});
 			this.ctx.emit?.("rlm/delegate-failed", { graph: graphId, task: taskId, reason: detail });

@@ -30,6 +30,7 @@ import { tmpdir } from "node:os";
 import { dirname } from "node:path";
 import { askIn } from "./derive.ts";
 import { describeProof, type Graph, type Proof, type Task, type TaskInput } from "./graph.ts";
+import { HostDown, isHostFailure, isStop } from "./host.ts";
 import { check } from "./proof.ts";
 import type { Store } from "./store.ts";
 
@@ -293,6 +294,17 @@ export const refineOne = async (
 			tasks = parsePlan(answer);
 		} catch (error: any) {
 			refusal = String(error?.message ?? error);
+			// The planner is a child `rlm --print`, so it boots the whole
+			// composition before it reads the prompt. If that is what failed,
+			// the next two goes will fail identically — and at ten minutes a
+			// timeout, trying them costs half an hour to learn nothing. Say so
+			// upwards instead, and write nothing down: the task was never asked.
+			if (isHostFailure(error)) throw new HostDown(error);
+			// Somebody stopped the drive. Not a refusal, not a plan anybody
+			// declined — the question was never asked. Leave immediately, and
+			// write nothing: the two further goes would be aborted the same way,
+			// and the third would be journalled as the planner's failure.
+			if (isStop(error)) return 0;
 			say("rlm/delegate-refine-refused", { graph: graph.id, task: task.id, why: refusal });
 			continue;
 		}
@@ -353,22 +365,50 @@ export const refineOne = async (
 	// and no amount of planning will invent one. Asking him is the honest end,
 	// and it is not the same as dropping it: the task stays in the graph with
 	// the refusals on it, and `answer()` puts it straight back in the pool.
+	// One refusal, one attempt. It used to be two: the burn was journalled, the
+	// task reloaded to count it, and the rejection journalled again as a second
+	// `ended` — with no `executor` on it, because that literal was written by
+	// hand rather than built from the one in `scheduler.ts`. Both halves land in
+	// `task.attempts`, so every refusal past the third cost two entries for one
+	// event, and 1,490 of one night's 3,481 attempts were the nameless half of a
+	// pair. `executor: MISSING` was never a code path that forgot to stamp; it
+	// was this line, and the double-count was the more expensive of the two bugs.
+	//
+	// The count is taken from the task in hand plus this refusal, which is the
+	// same number the reload used to produce, without the reload or the extra
+	// write.
 	try {
+		const at = new Date().toISOString();
+		const burned = (task.attempts ?? []).filter((a) => a.shape === "unrefinable").length + 1;
+		const done = burned >= 3;
 		store.ended(
 			graph.id,
 			task.id,
-			"running",
-			{ at: new Date().toISOString(), endedAt: new Date().toISOString(), ok: false, detail: `no criterion could be written: ${refusal}`, shape: "unrefinable", executor: "planner" } as any,
-			{ reason: `no criterion could be written: ${refusal}` },
+			// Not `running`. It was written here to mean "leave this alone", and
+			// `NOT_WORTH_PLANNING` still lists it — but no reader can ever see
+			// it: `load()` rewrites every `running` back to `ready` as crash
+			// recovery before the predicate runs, so that member of the set is
+			// unreachable and the state was doing nothing. What actually stops
+			// the re-planning is `burned`, three lines up. `blocked` is at least
+			// true in the meantime, and settles back to `ready` like the old one
+			// did, so nothing that depended on the timing changes.
+			done ? "rejected" : "blocked",
+			{
+				at,
+				endedAt: at,
+				ok: false,
+				detail: `no criterion could be written: ${refusal}`,
+				shape: "unrefinable",
+				executor: "planner",
+			} as any,
+			{
+				reason: done
+					? `nobody could write a criterion for this after ${burned} tries. The last objection was: ${refusal}. ` +
+						`Say how you would know this was done and it goes straight back in the pool.`
+					: `no criterion could be written: ${refusal}`,
+			},
 		);
-		const after = store.load(graph.id)?.tasks.find((t) => t.id === task.id);
-		const burned = (after?.attempts ?? []).filter((a) => a.shape === "unrefinable").length;
-		if (burned >= 3) {
-			store.ended(graph.id, task.id, "rejected", { at: new Date().toISOString(), ok: false, detail: refusal, shape: "unrefinable" } as any, {
-				reason:
-					`nobody could write a criterion for this after ${burned} tries. The last objection was: ${refusal}. ` +
-					`Say how you would know this was done and it goes straight back in the pool.`,
-			});
+		if (done) {
 			say("rlm/delegate-asked", { graph: graph.id, task: task.id, title: task.title, why: "no criterion could be written for it", detail: refusal.slice(0, 300) });
 		}
 	} catch (error: any) {

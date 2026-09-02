@@ -19,6 +19,7 @@
  */
 import { capacity as measure } from "./capacity.ts";
 import { runnable, settle, type Attempt, type Graph, type Task } from "./graph.ts";
+import { HostDown, isHostDown, isHostFailure, isStop } from "./host.ts";
 import { diagnose, judge, shapeOf, wall, type Diagnosis } from "./lapse.ts";
 import { check, type Probe } from "./proof.ts";
 import type { Store } from "./store.ts";
@@ -150,6 +151,14 @@ export const run = async (
 	};
 	let announced = -1;
 	const inFlight = new Map<string, Promise<void>>();
+	/**
+	 * The first host failure this run saw, kept rather than thrown on the spot.
+	 *
+	 * It ends the run — every other child is about to boot the same broken
+	 * composition — but only once the ones already running have come back and
+	 * been written down.
+	 */
+	let hostDown: HostDown | undefined;
 	/** Refused by the fence this run. Still owed; simply not touched by us. */
 	const fenced = new Map<string, string>();
 
@@ -176,6 +185,10 @@ export const run = async (
 			detail: "everything it was broken into is done",
 			proof: "passed",
 			proofDetail: "everything it was broken into is done",
+			// Nobody ran this, but somebody closed it, and the journal should say
+			// which drive did. An attempt with no `executor` reads as a gap in the
+			// stamping rather than as what it is.
+			executor: options.executor ?? "unnamed",
 		}, { result: "everything it was broken into is done" });
 		say("rlm/delegate-done", { graph: graphId, task: task.id, proof: "rollup" });
 	};
@@ -205,11 +218,21 @@ export const run = async (
 		// state — has always been what actually stops it being picked up twice.
 		const release = options.gate ? await options.gate.take() : () => {};
 		const at = new Date().toISOString();
+		// Checked before anything is written down: an attempt abandoned while it
+		// waited never started, and should not leave a `began` behind claiming
+		// it did — nor an attempt, which is the part that used to happen anyway.
+		//
+		// It threw into the catch below, which is the same catch that records a
+		// failure, so a stop arriving while eight tasks sat behind the gate
+		// charged all eight of them a try for work nothing ever spawned. A
+		// launch that failed to launch is not a try. The task is left exactly
+		// where it was; the stop is not its fault and not its business.
+		if (options.signal?.aborted) {
+			release();
+			say("rlm/delegate-not-started", { graph: graphId, task: task.id, why: "stopped before this attempt started" });
+			return;
+		}
 		try {
-			// Checked before anything is written down: an attempt abandoned while
-			// it waited never started, and should not leave a `began` behind
-			// claiming it did.
-			if (options.signal?.aborted) throw new Error("stopped before this attempt started");
 			store.began(graphId, task.id, at);
 			say("rlm/delegate-began", {
 				graph: graphId,
@@ -227,8 +250,54 @@ export const run = async (
 			release();
 		}
 
+		// Killed by a stop, not by the work. Same rule as the pre-flight check
+		// above, applied to a child that was already running when the stop
+		// arrived: it is the drive's decision, and the task pays nothing for it.
+		if (!ok && isStop(detail)) {
+			say("rlm/delegate-not-started", { graph: graphId, task: task.id, why: detail.split("\n")[0].slice(0, 200) });
+			return;
+		}
+
+		// The host would not start, so nobody was ever asked.
+		//
+		// A child is a whole `rlm --print`, which boots the composition before
+		// it reads a word of the prompt. An agent editing a row while that
+		// happens takes the child down with an exit code, and the task is
+		// charged for it — 2,574 of one night's 3,481 attempts, four tasks at
+		// 350 each, not one of which reached a model.
+		//
+		// Nothing is written and the task is left where it was. Thrown rather
+		// than returned, because the drive above has to hear it: the next child
+		// will hit the identical broken row, and the useful response is to stand
+		// the run down for forty-five seconds, not to spawn three hundred more.
+		if (!ok && isHostFailure(detail)) {
+			say("rlm/delegate-host-down", {
+				graph: graphId,
+				task: task.id,
+				title: task.title,
+				why: "the composition would not boot, so this attempt never started",
+				detail: detail.split("\n")[0].slice(0, 300),
+			});
+			throw new HostDown(detail);
+		}
+
 		// Coming back is not finishing.
 		let record: Attempt = { at, endedAt: new Date().toISOString(), ok, detail, approach: diagnosis?.cause, executor: options.executor ?? "unnamed" };
+
+		// A wall the child reported instead of hitting.
+		//
+		// `wall()` was only ever consulted on the failure path, so a child that
+		// exited 0 having printed nothing but "You have run out of credits for
+		// <his account>" was a success with an empty result — fourteen of them
+		// in one night, recorded `ok: true`, several going on to `unproven` and
+		// taking their dependents with them. Exit zero is not evidence that
+		// anything was done. Same test, same narrow patterns, applied to what
+		// came back as well as to what was thrown.
+		if (ok && wall(detail)) {
+			ok = false;
+			record = { ...record, ok: false };
+		}
+
 		if (ok) {
 			const verdict = await check(task.proof, { cwd: options.cwd, probe: options.probe, needsAllDone: true });
 			record = { ...record, proof: verdict.verdict as Attempt["proof"], proofDetail: verdict.detail };
@@ -553,7 +622,17 @@ export const run = async (
 				say("rlm/delegate-fenced", { graph: graphId, task: task.id, refusal });
 				continue;
 			}
-			const promise = attempt(task, graph).finally(() => inFlight.delete(task.id));
+			// A `HostDown` is caught rather than left to reject, so the other
+			// children in flight are still awaited and their results still
+			// written down. It is re-thrown once below, after everything has
+			// settled — rejecting here would abandon live promises and turn one
+			// broken row into a handful of unhandled rejections.
+			const promise = attempt(task, graph)
+				.catch((error: unknown) => {
+					if (!isHostDown(error)) throw error;
+					hostDown ??= error;
+				})
+				.finally(() => inFlight.delete(task.id));
 			inFlight.set(task.id, promise);
 		}
 
@@ -561,7 +640,14 @@ export const run = async (
 		// Anything still in `ready` is queued, not dropped — it is on disk, and
 		// the next pass picks it up the moment something finishes.
 		await Promise.race(inFlight.values());
+		if (hostDown) {
+			// Hand nothing else out. Wait for what is already running, so its
+			// results are journalled, and then stop.
+			await Promise.allSettled(inFlight.values());
+			break;
+		}
 	}
+	if (hostDown) throw hostDown;
 
 	const final = load();
 	const graph = { ...final, tasks: settle(final.tasks) };
