@@ -297,9 +297,31 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 				.sort((a, b) => (b.task.priority ?? 0) - (a.task.priority ?? 0));
 			let next = 0;
 
-			const worker = async (): Promise<void> => {
+			// Refinement must never take the last slot while there is work to run.
+		//
+		// Planning and running share one budget, which is honest — but the queue
+		// is not symmetric. There are two hundred tasks to plan and seven to run,
+		// so whenever a slot frees, a planner takes it. Measured: capacity 1,
+		// twenty children all planners, seven runnable tasks, and `rlm-drive`
+		// frozen at 564 attempts for over two hours while `planner` climbed past
+		// 1,400. Execution had not starved by accident; it could not win.
+		//
+		// So planning yields the last slot. Everything a plan produces is work
+		// that still has to be run, and a plan nobody can act on is inventory.
+		const yieldToWork = (): boolean => {
+			if (typeof options.concurrency === "number" ? options.concurrency > 1 : limit() > 1) return false;
+			return open.some((graph) => runnable(graph.tasks, Boolean(planner)).length > 0);
+		};
+
+		const worker = async (): Promise<void> => {
 				for (;;) {
 					if (refused >= refusalCap || stop.reason() || abort.signal.aborted) return;
+					// Checked before the item is taken, or a yield silently drops the
+					// task it had already pulled off the queue.
+					if (yieldToWork()) {
+						await new Promise((r) => setTimeout(r, 1_000));
+						continue;
+					}
 					const item = queue[next++];
 					if (!item) return;
 					const release = await gate.take();

@@ -26,13 +26,25 @@
  *     limit at one for ever: reaching two needed 25.7% headroom and four needed
  *     54%, on a machine that had 4.3 GB actually available and children that
  *     measured 0.3 GB apiece. Fourteen fit. One ran.
- *   - **Load average.** The slowest to react of the three and the least
- *     interesting for spawning, but it is what "the laptop will lag" actually
- *     means to someone using it. It is deliberately *only* a floor signal: a
- *     delegated child spends most of its life blocked on a provider socket
- *     using no local CPU at all, so cores do not bound how many can wait at
- *     once. Cores bounded the fleet anyway for a while, and that was the same
- *     category error as `free ÷ total`.
+ *   - **CPU, measured as busy cores — not the load average.** This is what "the
+ *     laptop will lag" actually means to someone using it, and it is the signal
+ *     that was wrong longest. Two corrections, both measured:
+ *
+ *       The old note here said "a delegated child spends most of its life
+ *       blocked on a provider socket using no local CPU at all". It does not:
+ *       three live children read 16.2%, 22.6% and 32.2% of a core, because rlm
+ *       re-execs under tsx and every child transpiles the composition on the
+ *       way up. So CPU does bound the fleet, and it now carries a budget like
+ *       memory instead of only a floor.
+ *
+ *       And the number it read was the wrong number. `loadavg` on macOS counts
+ *       work blocked in the kernel, so on a laptop doing any I/O it sits above
+ *       the core count permanently: measured here at 9.42 on 8 cores — zero
+ *       headroom, floor rule fires, fleet collapses to one — at the same
+ *       instant `top` reported 50.5% idle. That is exactly the `free ÷ total`
+ *       category error this file was written to fix, left standing in the one
+ *       signal nobody re-read. Busy cores are summed from `ps` instead, on the
+ *       same pass that already measures per-child memory.
  *
  * A budget needs two numbers and both are measured rather than assumed: how
  * much room there is, and what one child costs. The second is read off `ps`
@@ -130,18 +142,28 @@ const availableMemory = (): number => {
  * What one delegated child actually costs in memory, in bytes.
  *
  * Measured on this machine rather than estimated, because the estimate was
- * wrong in both directions at different times. A child is two node processes —
- * the launcher and the `tsx` re-exec that does the work — and `ps -o rss`
- * against live `--print` children read 288, 289, 291, 292, 300, 302 MB with six
- * running at once, 318, 334 and 334 MB for one running alone.
+ * wrong in both directions at different times — and the number that stood here
+ * longest was wrong by a factor of three in the expensive direction.
  *
- * 350 MB is that peak rounded up, and it is a *floor* on the estimate rather
- * than the estimate itself. A child that has been alive two seconds has not
- * paid for its heap yet — it reads about 170 MB — and sizing the fleet off a
- * just-started child would let the fleet grow at exactly the moment it is about
- * to get expensive. So the live reading may push this number up and never down.
+ * A child is two node processes: the launcher, which does nothing but re-exec
+ * and wait, and the `tsx` re-exec that does the work. The 350 MB that used to
+ * be here was read off processes rather than sessions, so it counted the same
+ * work twice. Grouped by `--session-id`, four live children measured 116, 123,
+ * 127 and 132 MB, and a child driven from boot to answer under a probe peaked
+ * at 208 MB while it transpiled the composition and settled back to about 143.
+ *
+ * 210 MB is that observed peak rounded up. It stays a *floor* on the estimate
+ * rather than the estimate itself, for the reason that was always right: a
+ * child alive two seconds has not paid for its heap yet, and sizing the fleet
+ * off a just-started child would let it grow at exactly the moment it is about
+ * to get expensive. So a live reading may push this number up and never down.
+ *
+ * What it must not do is stay three times above every child ever measured. At
+ * 350 MB the budget read "room for 5" on a machine holding children of 123 MB;
+ * the constant was not a floor under the measurement, it was a replacement for
+ * it, because no real child could ever reach it.
  */
-const MEASURED_CHILD_BYTES = 350 * 1024 * 1024;
+const MEASURED_CHILD_BYTES = 210 * 1024 * 1024;
 
 /**
  * Of the memory that is actually available, the share the fleet may take.
@@ -155,6 +177,25 @@ const MEASURED_CHILD_BYTES = 350 * 1024 * 1024;
  */
 const MEMORY_SHARE = 0.7;
 
+/**
+ * What one delegated child actually costs in CPU, in cores.
+ *
+ * The comment above used to say a child "spends most of its life blocked on a
+ * provider socket using no local CPU at all". Measured against live children it
+ * is not true: three running at once read 16.2%, 22.6% and 32.2% of a core, and
+ * the reason is that rlm re-execs under tsx, so every child transpiles the
+ * whole composition on the way up. A third of a core is cheap, but it is not
+ * nothing, and a signal that assumes nothing cannot bound anything.
+ *
+ * 0.35 is the peak of those readings rounded up, and like its memory
+ * counterpart it is a *floor* on the estimate: a live reading may push it up
+ * and never down.
+ */
+const MEASURED_CHILD_CORES = 0.35;
+
+/** Of the cores actually idle, the share the fleet may take. */
+const CPU_SHARE = 0.7;
+
 /** Descriptors the parent holds per child: two pipes and the handle, plus one. */
 const FDS_PER_CHILD = 4;
 
@@ -166,30 +207,50 @@ const FDS_PER_CHILD = 4;
  * child is really costing. Costs about six milliseconds and is asked between
  * tasks, so it is cached briefly rather than avoided — same bargain as `vm_stat`.
  */
-let costCache: { at: number; bytes: number; seen: number } | null = null;
-const childCost = (): { bytes: number; seen: number } => {
+let costCache: { at: number; bytes: number; cores: number; busyCores: number; seen: number } | null = null;
+const childCost = (): { bytes: number; cores: number; busyCores: number; seen: number } => {
 	if (costCache && Date.now() - costCache.at < 5000) return costCache;
 	let bytes = MEASURED_CHILD_BYTES;
+	let cores = MEASURED_CHILD_CORES;
+	let busyCores = 0;
 	let seen = 0;
 	try {
-		const out = execFileSync("ps", ["-eo", "rss=,command="], { encoding: "utf8", timeout: 2000, maxBuffer: 16e6 });
-		const perSession = new Map<string, number>();
+		// One `ps` for all three numbers. It already had to run for memory, and
+		// %cpu costs nothing extra on the same pass — which matters, because the
+		// alternative signal for "how busy is this machine" is `top -l 2`, and
+		// that is a second of wall clock every time the scheduler asks.
+		const out = execFileSync("ps", ["-eo", "rss=,%cpu=,command="], {
+			encoding: "utf8",
+			timeout: 2000,
+			maxBuffer: 16e6,
+		});
+		const perSessionBytes = new Map<string, number>();
+		const perSessionCores = new Map<string, number>();
 		for (const line of out.split("\n")) {
+			const head = line.trim().match(/^(\d+)\s+([\d.]+)\s/);
+			if (!head) continue;
+			const rss = Number(head[1]);
+			const pct = Number(head[2]);
+			// Everything on the machine counts toward how busy it is, not just
+			// the fleet — a laptop pegged by a browser has no room for children
+			// either, and that is the whole point of asking.
+			if (Number.isFinite(pct)) busyCores += pct / 100;
 			if (!line.includes("--print") || !line.includes("--session-id")) continue;
-			const rss = Number(line.trim().match(/^(\d+)\s/)?.[1] ?? 0);
 			const session = line.match(/--session-id\s+(\S+)/)?.[1];
-			if (!rss || !session) continue;
-			perSession.set(session, (perSession.get(session) ?? 0) + rss * 1024);
+			if (!session) continue;
+			if (rss) perSessionBytes.set(session, (perSessionBytes.get(session) ?? 0) + rss * 1024);
+			if (Number.isFinite(pct)) perSessionCores.set(session, (perSessionCores.get(session) ?? 0) + pct / 100);
 		}
-		seen = perSession.size;
+		seen = perSessionBytes.size;
 		// The fattest live child, not the average: the fleet has to fit the
 		// worst one, and averaging lets a crowd of just-started children vouch
 		// for a limit none of them can afford once they warm up.
-		for (const total of perSession.values()) if (total > bytes) bytes = total;
+		for (const total of perSessionBytes.values()) if (total > bytes) bytes = total;
+		for (const total of perSessionCores.values()) if (total > cores) cores = total;
 	} catch {
-		/* no ps, or it was slow — the measured default stands */
+		/* no ps, or it was slow — the measured defaults stand */
 	}
-	costCache = { at: Date.now(), bytes, seen };
+	costCache = { at: Date.now(), bytes, cores, busyCores, seen };
 	return costCache;
 };
 
@@ -259,10 +320,24 @@ export const readings = (): Reading[] => {
 
 	const cores = Math.max(1, cpus()?.length ?? 1);
 	const load = loadavg()[0] ?? 0;
+	// Busy cores, measured — not the load average, which was the last thing in
+	// this file still making the category error the rest of it was written to
+	// fix. Measured together on this machine: load average 9.42 on 8 cores,
+	// which is `1 - 9.42/8` = no headroom at all and collapses the fleet to one
+	// by the floor rule — while `top` read 50.5% idle at the same instant. macOS
+	// load counts work blocked in the kernel, so on a laptop doing any I/O it
+	// sits permanently above the core count and the floor rule never stops
+	// firing. The fleet was pinned at one for that reason and no other.
+	const busy = Math.max(0, Math.min(cores, cost.busyCores));
+	const cpuFits = Math.max(0, Math.floor(((cores - busy) * CPU_SHARE) / Math.max(0.01, cost.cores)));
 	out.push({
 		name: "cpu",
-		headroom: Math.max(0, Math.min(1, 1 - load / cores)),
-		detail: `load ${load.toFixed(2)} across ${cores} core(s)`,
+		headroom: Math.max(0, Math.min(1, 1 - busy / cores)),
+		fits: cpuFits,
+		detail:
+			`${busy.toFixed(2)} of ${cores} core(s) busy` +
+			` — room for ${cpuFits} at ${cost.cores.toFixed(2)} core(s) each` +
+			` (load average ${load.toFixed(2)}, which counts blocked work and is not what this reads)`,
 	});
 
 	return out;
