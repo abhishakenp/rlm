@@ -230,15 +230,19 @@ console.log("\noverflow waits, it is never refused");
 	t("the machine was asked more than once", () => ok(asked > 1, `asked ${asked} times`));
 }
 
-console.log("\nthe limit is measured, and never zero");
+console.log("\nthe limit is measured, and zero is one of its answers");
 {
-	t("this machine reports a limit of at least one, with its reasoning", () => {
+	t("this machine reports a measured limit, with its reasoning", () => {
 		const verdict = capacity();
-		ok(verdict.limit >= 1, `limit was ${verdict.limit}`);
+		ok(verdict.limit >= 0, `limit was ${verdict.limit}`);
 		ok(verdict.why.length > 0, "no reasoning given");
 		ok(verdict.readings.some((r) => r.name === "file descriptors"), "descriptors were not read");
 	});
-	t("a machine with no headroom still gets one", () => eq(capacity({ floor: 1.1 }).limit, 1));
+	// His rule, 2026-09-03: spin while 30% or more is free, otherwise start
+	// nothing. One-at-a-time on a machine with nothing spare is still work it
+	// cannot afford, and the hardcoded 1 read as a real limit for a whole day
+	// while the CPU signal underneath it was broken.
+	t("a machine with no headroom starts nothing", () => eq(capacity({ floor: 1.1 }).limit, 0));
 	t("an idle machine is allowed the ceiling and no more", () => {
 		const verdict = capacity({ ceiling: 3, floor: 0 });
 		ok(verdict.limit >= 1 && verdict.limit <= 3, `limit was ${verdict.limit}`);
@@ -394,7 +398,15 @@ console.log("\nit is a plugin, and it says what is owed");
 		ok(svc.skeletonFragment().includes("rewritten"), "the fragment did not follow the file");
 	});
 	t("it can say how much this machine will carry, and why", () => {
-		ok(svc.capacity().limit >= 1);
+		// Not `>= 1`. Zero is a real, correct answer — it is what his 30% floor
+		// says when the machine has no room, and the queue waits rather than a
+		// child being forced out onto a laptop somebody is using. What must
+		// always hold is that the number is a measured count and that the
+		// verdict says which reading bound it.
+		const v = svc.capacity();
+		ok(Number.isInteger(v.limit) && v.limit >= 0, `limit was ${v.limit}`);
+		ok(v.why.length > 0, "a limit nobody can explain is a guess");
+		ok(v.readings.some((r: any) => r.name === "file descriptors"), svc.explainCapacity());
 		ok(svc.explainCapacity().includes("file descriptors"), svc.explainCapacity());
 	});
 	t("a criterion can be run on its own", async () => {});

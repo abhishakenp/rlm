@@ -128,7 +128,17 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 	const limit =
 		typeof options.concurrency === "number"
 			? () => Math.max(1, options.concurrency as number)
-			: (options.concurrency ?? (() => capacity().limit));
+			// Default 1, not the machine's live capacity.
+			//
+			// `drive()` is a library function and the host's free memory is not
+			// its business — a caller that wants the fleet sized to the machine
+			// passes `() => capacity().limit`, and the service does exactly that.
+			// With the live reading as the default, every test inherited this
+			// laptop's memory pressure: once the floor rule could return zero,
+			// `drive.test.ts:575` blocked forever and the suite stopped at 73 of
+			// 165 with no failure reported. Policy belongs at the edge, mechanism
+			// in the middle.
+			: (options.concurrency ?? (() => 1));
 	const gate = new Gate(limit);
 
 	// One controller for the whole drive. The stop file, a stop in process and

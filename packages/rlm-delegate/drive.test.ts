@@ -1514,7 +1514,10 @@ console.log("\nwired: the CLI drive builds me-2 and it really reaches the router
 
 	const stateDir = path.join(DIR, "wired-state");
 	const root = new Context();
-	const fork = root.plugin(RlmDelegateService, { dir: stateDir, cwd: DIR, stopFile: path.join(DIR, "wired.stop") });
+	// Concurrency is pinned because this asserts wiring, not capacity: left to the
+	// live verdict it would inherit whatever this machine's memory looks like, and
+	// under the 30% floor the drive correctly starts nothing and the test hangs.
+	const fork = root.plugin(RlmDelegateService, { dir: stateDir, cwd: DIR, stopFile: path.join(DIR, "wired.stop"), concurrency: 1 });
 	await settleMs(120);
 	const svc = (root as any).rlmDelegate as any;
 	svc.declare("a wired job", [{ id: "w", title: "w", prompt: "he asked for a wired job", proof: { kind: "shell", run: "exit 0" } }]);

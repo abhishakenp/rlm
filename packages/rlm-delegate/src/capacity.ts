@@ -51,10 +51,14 @@
  * against whatever children are alive right now, so it tracks the agent getting
  * fatter without anybody remembering to edit a constant here.
  *
- * His floor rule sits above all of it and is not a budget: under 20% headroom
- * on any single signal, the limit collapses to one regardless of how many would
- * "fit". That is the rule that keeps the laptop usable while it works, and no
- * amount of arithmetic below is allowed to talk it out of firing.
+ * His floor rule sits above all of it and is not a budget: spin while 30% or
+ * more of every signal is free, and under that start *nothing* — not one —
+ * regardless of how many would "fit"; the queue keeps its order and serves
+ * first in, first executed. Zero rather than one is the honest floor, because
+ * one-at-a-time on a machine with nothing spare is still work it cannot afford,
+ * and a hardcoded one is not a measured answer but a shrug — it read as a real
+ * limit for a whole day while the CPU signal underneath it was broken. No
+ * amount of arithmetic below is allowed to talk the floor out of firing.
  *
  * The scheduler asks for one number and re-asks between tasks, because the
  * machine changes under it while somebody is working on it. That is also the
@@ -245,8 +249,26 @@ const childCost = (): { bytes: number; cores: number; busyCores: number; seen: n
 		// The fattest live child, not the average: the fleet has to fit the
 		// worst one, and averaging lets a crowd of just-started children vouch
 		// for a limit none of them can afford once they warm up.
-		for (const total of perSessionBytes.values()) if (total > bytes) bytes = total;
-		for (const total of perSessionCores.values()) if (total > cores) cores = total;
+		// Live readings decide, in both directions — not just upward.
+		//
+		// This used to seed from the constant and only ever raise it, so a
+		// constant of 350 MB survived every child that measured 129, and the
+		// only way down was a person editing the source. That is exactly the
+		// wasteful pattern he named: a number being maintained by hand when the
+		// machine can read it. It was hand-edited 350 → 275 → 210 in one day.
+		//
+		// The peak of the live sample, not the mean: the fleet has to fit the
+		// worst child, and averaging lets a crowd of just-started ones vouch for
+		// a limit none of them can afford once warm. The constant survives only
+		// as a bootstrap for when nothing is running yet, and a single sample is
+		// not enough to overrule it — a child two seconds old has not paid for
+		// its heap.
+		const liveBytes = [...perSessionBytes.values()];
+		const liveCores = [...perSessionCores.values()];
+		if (liveBytes.length >= 2) bytes = Math.max(...liveBytes);
+		else for (const total of liveBytes) if (total > bytes) bytes = total;
+		if (liveCores.length >= 2) cores = Math.max(...liveCores);
+		else for (const total of liveCores) if (total > cores) cores = total;
 	} catch {
 		/* no ps, or it was slow — the measured defaults stand */
 	}
@@ -365,7 +387,8 @@ export const capacity = (options: CapacityOptions = {}): CapacityVerdict => {
 	// not), but because it is a number of the right order that nobody has to
 	// maintain, and the budget still has to agree with it.
 	const ceiling = Math.max(1, options.ceiling ?? providerCeiling() ?? Math.max(1, cpus()?.length ?? 2));
-	const floor = options.floor ?? 0.2;
+	// 30%, his number. Under it nothing new starts at all.
+	const floor = options.floor ?? 0.3;
 	const measured = readings();
 
 	const tightest = measured.reduce(
@@ -373,8 +396,22 @@ export const capacity = (options: CapacityOptions = {}): CapacityVerdict => {
 		measured[0] ?? { name: "nothing", headroom: 1, detail: "no signal could be read" },
 	);
 
+	// His rule, 2026-09-03: spin while 30% or more of every resource that matters
+	// is free; below that start nothing and let the queue serve first-in-first-
+	// out. No hardcoded "one at a time" — that is not a measured answer, it is a
+	// shrug, and it read as a real limit for a whole day while the CPU signal
+	// was broken.
+	//
+	// Zero rather than one is the honest floor. One-at-a-time on a machine with
+	// nothing spare is still work it cannot afford, and it is what made a
+	// starved fleet look like a working one. Nothing new starts; whatever is in
+	// flight finishes; the queue keeps its order.
 	if (!measured.length) {
-		return { limit: 1, readings: measured, why: "no signal could be read, so one at a time" };
+		return {
+			limit: 0,
+			readings: measured,
+			why: "nothing could be measured, so nothing new starts — a limit nobody measured is a guess",
+		};
 	}
 
 	// His rule, first and unconditional. Below the floor on any single signal
@@ -382,9 +419,9 @@ export const capacity = (options: CapacityOptions = {}): CapacityVerdict => {
 	// the question — nothing further down is allowed to overturn this.
 	if (tightest.headroom < floor) {
 		return {
-			limit: 1,
+			limit: 0,
 			readings: measured,
-			why: `${tightest.name} is down to ${Math.round(tightest.headroom * 100)}% (${tightest.detail}) — one at a time`,
+			why: `${tightest.name} is at ${Math.round(tightest.headroom * 100)}% free, under the ${Math.round(floor * 100)}% floor (${tightest.detail}) — nothing new starts, the queue waits its turn`,
 		};
 	}
 

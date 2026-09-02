@@ -104,18 +104,50 @@ export class Gate {
 	}
 
 	async take(): Promise<() => void> {
-		if (this.held < Math.max(1, this.size())) {
+		// `Math.max(1, …)` used to be here and in `give`, which meant a limit of
+		// zero could never mean zero — the gate always let one through. That is
+		// the same hardcoded "one at a time" the capacity rule was written to
+		// remove, sitting one layer below it, quietly overruling the measurement.
+		//
+		// Zero now means zero: nothing new starts, whatever is in flight
+		// finishes, and the queue keeps its arrival order. The waiter is woken by
+		// `give`, and because the limit is read fresh on every wake, capacity
+		// rising is enough to release the queue without anyone polling.
+		if (this.held < Math.max(0, this.size())) {
 			this.held += 1;
 			return () => this.give();
 		}
-		await new Promise<void>((resolve) => this.waiting.push(resolve));
+		// A waiter is normally woken by `give`, when something finishes. At a
+		// limit of zero nothing is in flight, so nothing ever finishes, so
+		// nothing ever wakes anybody — the queue would sit there forever the
+		// moment the machine dipped under the floor. Observed as a hard hang the
+		// first time the limit could really reach zero.
+		//
+		// So while the gate is shut, it also re-checks on its own. Only while
+		// there are waiters and nothing running: a poll that costs nothing when
+		// the system is busy, and is the only thing that can restart it when the
+		// system is idle-but-full.
+		await new Promise<void>((resolve) => {
+			let settled = false;
+			const wake = () => {
+				if (settled) return;
+				settled = true;
+				clearInterval(timer);
+				resolve();
+			};
+			const timer = setInterval(() => {
+				if (this.held === 0 && Math.max(0, this.size()) > 0) wake();
+			}, 1_000);
+			timer.unref?.();
+			this.waiting.push(wake);
+		});
 		this.held += 1;
 		return () => this.give();
 	}
 
 	private give(): void {
 		this.held = Math.max(0, this.held - 1);
-		if (this.waiting.length && this.held < Math.max(1, this.size())) {
+		if (this.waiting.length && this.held < Math.max(0, this.size())) {
 			// Woken one at a time, and each wakes holding nothing — `take` is what
 			// increments, so a woken waiter cannot overshoot the limit it re-reads.
 			this.waiting.shift()!();
