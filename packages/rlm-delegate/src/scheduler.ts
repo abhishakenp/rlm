@@ -54,6 +54,15 @@ export interface RunOptions {
 	 */
 	replanCriterion?: boolean;
 	/**
+	 * me-2. Runs on work the criterion has already accepted.
+	 *
+	 * A criterion answers "did the thing happen". It cannot answer "is this
+	 * redundant with what already exists", "is it wired such that anything
+	 * reaches it", or "is it what he actually asked for" — and every defect
+	 * that cost a night this week passed its criterion and failed one of those.
+	 */
+	reviewer?: { review(task: Task, graph: Graph): Promise<{ verdict: "accepted" | "rejected"; reason: string }> };
+	/**
 	 * Who is running the work, recorded on every attempt.
 	 *
 	 * Defaults to "unnamed", never to a guess. A journal that says "rlm" when
@@ -292,7 +301,94 @@ export const run = async (
 		}
 
 		if (ok) {
+			// The criterion passed. That is necessary and has repeatedly not been
+			// sufficient, so me-2 looks before it is called done.
+			let reviewed = "";
+			if (options.reviewer) {
+				const seen = await options.reviewer
+					.review(task, load())
+					.catch((error: any) => ({ verdict: "rejected" as const, reason: `me-2 threw: ${error?.message ?? error}` }));
+				if (seen.verdict === "rejected") {
+					// A rejection is a failed attempt, and it is spent like one.
+					//
+					// It goes back in the pool carrying what the reviewer said, so the
+					// next attempt is told exactly what — but through `judge()`, the
+					// same bound every other failure passes through, and not for
+					// tidiness. A reviewer that rejects everything — a model that will
+					// not answer, one that cannot be reached, one that has simply
+					// decided — returns the task straight to `ready`, and the loop
+					// below picks it up again in the same breath: an agent spawned
+					// forever against work that is already finished, all night, with
+					// the drive reporting itself busy the whole time. Nothing else
+					// bounded this, because the criterion keeps passing and the
+					// exhaustion checks further down are never reached from here.
+					//
+					// Routed through `judge()` the attempt is spent: an identical
+					// rejection twice hits `repeatFloor`, a varied one still hits
+					// `maxAttempts`, and the task stops instead of the drive.
+					const why = `me-2 rejected it: ${seen.reason}`;
+					record = { ...record, ok: false, detail: why, shape: shapeOf(why) };
+					const bound = judge(task.attempts, why, {
+						maxAttempts: options.maxAttempts,
+						floor: options.repeatFloor,
+						similarity: options.similarity,
+					});
+					say("rlm/delegate-rejected", {
+						graph: graphId,
+						task: task.id,
+						why: seen.reason.slice(0, 400),
+						retrying: bound.retry,
+					});
+					if (bound.retry) {
+						store.ended(graphId, task.id, "ready", record, { reason: why });
+						return;
+					}
+					// Out of attempts, and it lands in `rejected` rather than
+					// `failed` — the state this package has had all along for work a
+					// reviewer would not pass, and not a synonym for it.
+					//
+					// `failed` would be actively wrong here, and not as a matter of
+					// vocabulary: the drive re-checks every `failed` task's criterion
+					// at the top of each sweep and marks it done the moment it
+					// passes. This criterion never stopped passing — that is why me-2
+					// was asked at all — so a rejection parked in `failed` is undone
+					// by the very next sweep, and the reviewer becomes a thing that
+					// prints an objection and changes nothing. Observed, not
+					// theorised: the first run of this went `failed`, then `done`,
+					// one sweep later, with no agent touching it.
+					store.ended(graphId, task.id, "failed", record, { reason: `${bound.why}\n${why}`.trim() });
+					store.reviewed(graphId, task.id, {
+						by: "me-2",
+						at: new Date().toISOString(),
+						verdict: "rejected",
+						reason: `${seen.reason}\n\n(${bound.why})`.trim(),
+					});
+					say("rlm/delegate-failed", { graph: graphId, task: task.id, repeats: bound.repeats, reason: bound.why });
+					say("rlm/delegate-asked", {
+						graph: graphId,
+						task: task.id,
+						title: task.title,
+						why: `me-2 kept rejecting it — ${bound.why}`,
+						detail: seen.reason.slice(0, 400),
+					});
+					return;
+				}
+				reviewed = seen.reason || "(accepted with no reason given)";
+				say("rlm/delegate-reviewed", { graph: graphId, task: task.id, by: "me-2", reason: seen.reason.slice(0, 400) });
+			}
 			store.ended(graphId, task.id, "done", record, { result: detail });
+			// An acceptance is written down too, and not only the refusals.
+			//
+			// Without this the only durable evidence me-2 ever ran is the absence
+			// of a rejection, which is not evidence of anything — and tomorrow the
+			// question "was this reviewed, and what did it say?" has the same
+			// answer for work me-2 passed and for work it never saw. `forReview()`
+			// and `rlm tasks` read `task.review`, so this is also what makes the
+			// verdict something he can go and look at rather than something a log
+			// line claimed at the time.
+			if (options.reviewer && reviewed) {
+				store.reviewed(graphId, task.id, { by: "me-2", at: new Date().toISOString(), verdict: "accepted", reason: reviewed });
+			}
 			say("rlm/delegate-done", { graph: graphId, task: task.id, proof: record.proofDetail });
 			return;
 		}

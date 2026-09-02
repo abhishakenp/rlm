@@ -31,7 +31,7 @@ import { capacity } from "./capacity.ts";
 import { outstanding, runnable, type Graph, type Task } from "./graph.ts";
 import { impasses, renderImpasses, type Impasse } from "./impasse.ts";
 import { needsRefining, refineOne, type Planner } from "./refine.ts";
-import { run as runGraph, type Runner } from "./scheduler.ts";
+import { run as runGraph, type RunOptions, type Runner } from "./scheduler.ts";
 import { Gate, Stop } from "./stop.ts";
 import { check, type Probe } from "./proof.ts";
 import type { Store } from "./store.ts";
@@ -52,6 +52,16 @@ export interface DriveOptions {
 	probe?: Probe;
 	cwd?: string;
 	maxAttempts?: number;
+	/** me-2, if there is one. Nothing is called done without it when there is. */
+	reviewer?: RunOptions["reviewer"];
+	/**
+	 * Build me-2 once the drive's stop signal exists.
+	 *
+	 * Same reason as `makeRunner`: a review in the air when the stop file
+	 * appears has to die with everything else. A reviewer that keeps holding a
+	 * model call after a stop is a drive that has not stopped.
+	 */
+	makeReviewer?: (signal: AbortSignal) => RunOptions["reviewer"];
 	/** Who is running this drive, stamped on every attempt it records. */
 	executor?: string;
 	repeatFloor?: number;
@@ -153,6 +163,7 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 	};
 
 	const planner = options.planner ?? options.makePlanner?.(abort.signal);
+	const reviewer = options.reviewer ?? options.makeReviewer?.(abort.signal);
 	const runner = options.runner ?? options.makeRunner?.(abort.signal);
 	if (!runner) throw new Error("the drive needs a runner: pass `runner`, or `makeRunner` to get the stop signal");
 
@@ -225,6 +236,32 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 					if (task.state !== "failed") continue;
 					const settled = await check(task.proof, { cwd: options.cwd, probe: options.probe }).catch(() => null);
 					if (settled?.verdict !== "passed") continue;
+					// This is a way to reach `done`, so it goes past me-2 like the
+					// other one does. It was not, and that is not a small gap: a
+					// criterion passing is exactly the evidence me-2 exists to
+					// distrust, and this branch is the place where a criterion
+					// passing is the *only* evidence there is — nobody ran the work
+					// this sweep, so there is not even an agent's report under it.
+					// Rare enough to cost nothing: it fires only when a check that
+					// was failing has started to pass.
+					if (reviewer) {
+						const seen = await reviewer
+							.review(task, graph)
+							.catch((error: any) => ({ verdict: "rejected" as const, reason: `me-2 threw: ${error?.message ?? error}` }));
+						if (seen.verdict === "rejected") {
+							// Left exactly where it was. Nothing was attempted, so
+							// nothing is spent, and it does not become a second way for
+							// a stopped task to churn.
+							store.reviewed(graph.id, task.id, {
+								by: "me-2",
+								at: new Date().toISOString(),
+								verdict: "rejected",
+								reason: `its criterion passes now, and that is all: ${seen.reason}`,
+							});
+							say("rlm/drive-settled-late-refused", { graph: graph.id, task: task.id, why: seen.reason.slice(0, 400) });
+							continue;
+						}
+					}
 					store.ended(graph.id, task.id, "done", { ok: true, detail: settled.detail, proofDetail: settled.detail } as any, {
 						result: `its criterion passes now: ${settled.detail}`,
 					});
@@ -326,6 +363,7 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 						// A dead-end criterion is only worth handing back if there is
 						// somebody to write a better one.
 						replanCriterion: Boolean(planner),
+						reviewer,
 						executor: options.executor,
 						repeatFloor: options.repeatFloor,
 						similarity: options.similarity,

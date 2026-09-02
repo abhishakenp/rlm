@@ -22,6 +22,9 @@ import { Gate, Stop } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/stop.
 import { diagnose, wall } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/lapse.ts";
 import { askIn, derive } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/derive.ts";
 import { alreadyTrue, ephemeral, noteBaselines } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/refine.ts";
+import { me2 } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/me2.ts";
+import { askModel, route as modelRoute } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/ask.ts";
+import * as http from "node:http";
 
 let pass = 0, fail = 0;
 const t = (name: string, fn: () => void) => {
@@ -1126,4 +1129,398 @@ console.log("\nan agent is never spent on a task nobody can judge, when it could
 	t("and nothing came back unproven", () =>
 		eq(after.tasks.filter((x) => x.state === "unproven").length, 0,
 			JSON.stringify(after.tasks.map((x) => [x.id, x.state]))));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// me-2. Everything below exists because the criterion passing has repeatedly
+// not been the same thing as the work being right, and because a reviewer is
+// the one component whose failure mode is silence.
+
+console.log("\nme-2 rejects: the work goes back in the pool carrying what he said");
+{
+	const store = new Store(path.join(DIR, "rejected-once"));
+	store.create("write the thing", [
+		{ id: "thing", title: "the thing", prompt: "write the thing", proof: { kind: "shell", run: "exit 0" } },
+	]);
+	const id = store.ids()[0];
+
+	const prompts: string[] = [];
+	let looked = 0;
+	await drive(store, {
+		runner: async (task: any) => {
+			prompts.push(task.prompt);
+			return "wrote it";
+		},
+		reviewer: {
+			review: async () => {
+				looked++;
+				return looked === 1
+					? { verdict: "rejected" as const, reason: "search-person already does this — it is redundant" }
+					: { verdict: "accepted" as const, reason: "nothing else claims this job now" };
+			},
+		},
+		stop: stopFor("rejected-once"),
+		maxSweeps: 6,
+	} as any);
+
+	const after = store.load(id)!.tasks[0];
+	t("a rejection did not stop the task — it was handed out again", () => eq(prompts.length, 2));
+	t("and the second attempt was told exactly what me-2 said", () =>
+		ok(prompts[1].includes("redundant") && prompts[1].includes("me-2 rejected it"), prompts[1].slice(0, 400)));
+	t("the rejection is on the task's record, not only in a log line", () =>
+		ok(after.attempts.some((a: any) => !a.ok && String(a.detail).includes("me-2 rejected it")),
+			JSON.stringify(after.attempts.map((a: any) => [a.ok, String(a.detail).slice(0, 60)]))));
+	t("and once me-2 accepted it, it is done", () => eq(after.state, "done"));
+}
+
+console.log("\nme-2 rejecting everything stops the task, never the drive");
+{
+	// The trap. A rejection puts the task back `ready`, the loop picks it up in
+	// the same breath, the criterion passes again, and me-2 rejects again —
+	// forever, with the drive reporting itself busy the whole night. Nothing
+	// else bounds this: the exhaustion checks further down are only reached
+	// when the criterion fails, and here it never does.
+	const store = new Store(path.join(DIR, "rejects-everything"));
+	store.create("nothing will satisfy it", [
+		{ id: "never", title: "never good enough", prompt: "do it", proof: { kind: "shell", run: "exit 0" } },
+	]);
+	const id = store.ids()[0];
+
+	let handed = 0;
+	const report = await drive(store, {
+		runner: async () => {
+			handed++;
+			if (handed > 25) throw new Error("the drive is looping: me-2 is unbounded");
+			return "done";
+		},
+		reviewer: { review: async () => ({ verdict: "rejected" as const, reason: "not wired — nothing reaches it" }) },
+		stop: stopFor("rejects-everything"),
+		maxSweeps: 20,
+	} as any);
+
+	const after = store.load(id)!.tasks[0];
+	t("it came back at all", () => ok(report.sweeps >= 1));
+	// `repeatFloor` is 2, and the same rejection twice is the same shape twice.
+	t("the same rejection twice spends the task rather than looping", () => eq(handed, 2));
+	t("and the task is parked as rejected, with me-2's words as the reason", () => {
+		// `rejected`, not `failed`: the drive re-checks a failed task's criterion
+		// every sweep and marks it done the moment it passes, and this criterion
+		// never stopped passing — parked in `failed` the rejection would be undone
+		// one sweep later by nobody.
+		eq(after.state, "rejected");
+		ok(String(after.reason).includes("not wired"), after.reason);
+		eq(after.review?.by, "me-2");
+	});
+	t("it is owed, not silently dropped", () => ok(report.owed.includes(`${id}/never`), report.owed.join(",")));
+	t("and nothing later called it proven", () => ok(!report.proven.includes(`${id}/never`), report.proven.join(",")));
+}
+
+console.log("\na reviewer with a new objection every time is bounded by the attempt count");
+{
+	const store = new Store(path.join(DIR, "rejects-variously"));
+	store.create("a moving target", [
+		{ id: "moving", title: "moving", prompt: "do it", proof: { kind: "shell", run: "exit 0" } },
+	]);
+	const id = store.ids()[0];
+
+	let handed = 0;
+	await drive(store, {
+		runner: async () => {
+			handed++;
+			if (handed > 25) throw new Error("the drive is looping: varied rejections are unbounded");
+			return "done";
+		},
+		reviewer: {
+			review: async () => ({
+				verdict: "rejected" as const,
+				// Deliberately unlike each other, so `repeatFloor` cannot be what stops it.
+				reason: ["the credentials went to the wrong home directory", "approveProposal has zero callers", "this reads like success without having looked"][handed - 1] ?? "and another thing",
+			}),
+		},
+		stop: stopFor("rejects-variously"),
+		maxSweeps: 20,
+	} as any);
+
+	t("maxAttempts stops it even when no two objections are alike", () => eq(handed, 3));
+	t("and it stopped rather than being called done", () => eq(store.load(id)!.tasks[0].state, "rejected"));
+}
+
+console.log("\na reviewer that throws is not an acceptance");
+{
+	const store = new Store(path.join(DIR, "reviewer-throws"));
+	store.create("unreviewable", [
+		{ id: "u", title: "u", prompt: "do it", proof: { kind: "shell", run: "exit 0" } },
+	]);
+	const id = store.ids()[0];
+
+	await drive(store, {
+		runner: async () => "done",
+		reviewer: {
+			review: async () => {
+				throw new Error("ECONNREFUSED 127.0.0.1:20128");
+			},
+		},
+		stop: stopFor("reviewer-throws"),
+		maxSweeps: 20,
+	} as any);
+
+	const after = store.load(id)!.tasks[0];
+	t("work nobody could review is never marked done", () => ok(after.state !== "done", after.state));
+	t("and the reason says the reviewer threw, not that the work failed", () =>
+		ok(String(after.reason).includes("me-2 threw") && String(after.reason).includes("ECONNREFUSED"), after.reason));
+	t("and it stays that way — a passing criterion does not quietly undo it", () =>
+		eq(after.state, "rejected"));
+}
+
+console.log("\nan accepted review lets the work through, and no reviewer changes nothing");
+{
+	const store = new Store(path.join(DIR, "accepted"));
+	store.create("fine work", [
+		{ id: "ok1", title: "ok1", prompt: "do it", proof: { kind: "shell", run: "exit 0" } },
+	]);
+	const id = store.ids()[0];
+	let handed = 0;
+	await drive(store, {
+		runner: async () => {
+			handed++;
+			return "done";
+		},
+		reviewer: { review: async () => ({ verdict: "accepted" as const, reason: "it is what he asked for" }) },
+		stop: stopFor("accepted"),
+		maxSweeps: 4,
+	} as any);
+	t("accepted work is done, first time, with one attempt spent", () => {
+		eq(store.load(id)!.tasks[0].state, "done");
+		eq(handed, 1);
+	});
+	t("and the acceptance is on disk, so tomorrow it is a verdict and not a claim", () => {
+		// Re-read from a fresh Store: this has to survive the process, or the
+		// only evidence me-2 ran is that nothing objected.
+		const reread = new Store(path.join(DIR, "accepted")).load(id)!.tasks[0];
+		eq(reread.review?.verdict, "accepted");
+		eq(reread.review?.by, "me-2");
+		ok(String(reread.review?.reason).includes("what he asked for"), reread.review?.reason);
+	});
+
+	const bare = new Store(path.join(DIR, "no-reviewer"));
+	bare.create("fine work", [{ id: "ok2", title: "ok2", prompt: "do it", proof: { kind: "shell", run: "exit 0" } }]);
+	await drive(bare, { runner: async () => "done", stop: stopFor("no-reviewer"), maxSweeps: 4 } as any);
+	t("and with no reviewer at all the criterion is still the gate it always was", () =>
+		eq(bare.load(bare.ids()[0])!.tasks[0].state, "done"));
+}
+
+console.log("\nme-2 itself: silence, no verdict and an unreachable model are all rejections");
+{
+	const task = { id: "x", title: "x", prompt: "he asked for this", proof: { kind: "shell", run: "true" }, attempts: [] } as any;
+	const graph = { id: "g", goal: "g", tasks: [task] } as any;
+	const asked: string[] = [];
+	const answering = (answer: string | (() => never)) =>
+		me2({
+			ask: async (prompt: string) => {
+				asked.push(prompt);
+				if (typeof answer === "function") return answer();
+				return answer;
+			},
+		});
+
+	const said = await answering("").review(task, graph);
+	t("silence is rejected", () => {
+		eq(said.verdict, "rejected");
+		ok(said.reason.includes("did not answer with a verdict"), said.reason);
+	});
+
+	const prose = await answering("This all looks perfectly reasonable to me.").review(task, graph);
+	t("an answer with no verdict in it is rejected", () => eq(prose.verdict, "rejected"));
+
+	const dead = await answering(() => {
+		throw new Error("fetch failed");
+	}).review(task, graph);
+	t("a model that cannot be reached is rejected, never accepted", () => {
+		eq(dead.verdict, "rejected");
+		ok(dead.reason.includes("could not be reached"), dead.reason);
+	});
+
+	// The failure that actually happened: the words appear all through the
+	// reasoning while it weighs them, so the block is removed, not searched.
+	const thought = await answering(
+		"<think>Is this accepted? It could be rejected. Hmm, rejected, rejected.</think>\naccepted\nIt matches what he asked for.",
+	).review(task, graph);
+	t("a verdict inside <think> is not the verdict; the one after it is", () => {
+		eq(thought.verdict, "accepted");
+		ok(thought.reason.includes("matches what he asked for"), thought.reason);
+	});
+
+	const cutoff = await answering("<think>Weighing accepted against rejected and I have not").review(task, graph);
+	t("a thought cut off mid-sentence is not a verdict either", () => eq(cutoff.verdict, "rejected"));
+
+	const dressed = await answering("**rejected**\n\nThe flag is parsed and nothing reads it.").review(task, graph);
+	t("a verdict a model has bolded still counts", () => {
+		eq(dressed.verdict, "rejected");
+		ok(dressed.reason.includes("nothing reads it"), dressed.reason);
+	});
+
+	t("and it was asked against his words and his lessons, not against the title", () => {
+		ok(asked[0].includes("he asked for this"), "the prompt is missing what he asked for");
+		ok(asked[0].includes("unproven is a task not completed claimed as complete"), "the prompt is missing his lessons");
+	});
+}
+
+console.log("\nthe model route is read from rlm's own registry, and never fails open");
+{
+	const homeDir = path.join(DIR, "fake-home");
+	fs.mkdirSync(path.join(homeDir, "agent"), { recursive: true });
+	fs.writeFileSync(
+		path.join(homeDir, "agent", "models.json"),
+		JSON.stringify({
+			providers: { omniroute: { baseUrl: "http://127.0.0.1:9/v1", apiKey: "omniroute-local", authHeader: true, models: [{ id: "auto/best-free" }] } },
+		}),
+		"utf8",
+	);
+
+	const there = modelRoute({ home: homeDir });
+	t("the endpoint, the model and the key all come out of models.json", () => {
+		eq(there.url, "http://127.0.0.1:9/v1/chat/completions");
+		eq(there.model, "auto/best-free");
+		eq(there.headers.authorization, "Bearer omniroute-local");
+	});
+	t("no credential is ever taken from the environment", () => {
+		// The banned key, mechanically. It is named in a comment in that file
+		// saying it must never be read, so the check is for a read and not for
+		// the string.
+		const source = fs.readFileSync("/Users/abhi/proj/rlm/packages/rlm-delegate/src/ask.ts", "utf8");
+		const reads = [...source.matchAll(/process\.env\.([A-Z_]+)/g)].map((m) => m[1]);
+		ok(!reads.some((name) => /KEY|TOKEN|SECRET|ANTHROPIC/.test(name)), reads.join(","));
+	});
+
+	const missing = modelRoute({ home: path.join(DIR, "no-such-home") });
+	t("a registry that is not there falls back to the same call, not to no call", () => {
+		eq(missing.url, "http://localhost:20128/v1/chat/completions");
+		eq(missing.model, "auto/best-free");
+	});
+
+	let sent: any = null;
+	const answered = askModel({
+		home: homeDir,
+		fetch: (async (url: any, init: any) => {
+			sent = { url, init, body: JSON.parse(init.body) };
+			return new Response(JSON.stringify({ choices: [{ message: { content: "accepted\nfine" }, finish_reason: "stop" }] }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		}) as any,
+	});
+	const back = await answered("look at this");
+	t("one question, one answer", () => eq(back, "accepted\nfine"));
+	t("no tools field, so a tool loop is structurally impossible", () => eq(sent.body.tools, undefined));
+	t("and the budget is big enough for a reasoning model to reach a verdict", () =>
+		ok(sent.body.max_tokens >= 3000, String(sent.body.max_tokens)));
+
+	let threw = "";
+	await askModel({
+		home: homeDir,
+		fetch: (async () => new Response("no route to a free model", { status: 503 })) as any,
+	})("x").catch((e: any) => (threw = e.message));
+	t("a router that answers 503 throws rather than returning nothing", () =>
+		ok(threw.includes("503") && threw.includes("no route"), threw));
+
+	let starved = "";
+	await askModel({
+		home: homeDir,
+		maxTokens: 4000,
+		fetch: (async () =>
+			new Response(JSON.stringify({ choices: [{ message: { content: "" }, finish_reason: "length" }] }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			})) as any,
+	})("x").catch((e: any) => (starved = e.message));
+	t("a model that spent its whole budget thinking says so, and is not an acceptance", () =>
+		ok(starved.includes("max_tokens") && starved.includes("too small"), starved));
+}
+
+console.log("\nwired: the CLI drive builds me-2 and it really reaches the router");
+{
+	// Written is not wired. Everything above stands in for the model, so none of
+	// it can tell whether `rlm drive` actually constructs a reviewer — which is
+	// the exact defect shape this reviewer exists to catch. So: a real HTTP
+	// server standing in for omniroute, the real service, the real drive, and
+	// an assertion that a request arrived.
+	const seen: any[] = [];
+	const server = http.createServer((req, res) => {
+		let body = "";
+		req.on("data", (c) => (body += c));
+		req.on("end", () => {
+			seen.push({ url: req.url, auth: req.headers.authorization, body: JSON.parse(body || "{}") });
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end(
+				JSON.stringify({
+					choices: [
+						{
+							message: {
+								content:
+									"<think>Could be rejected. Is anything unwired? No, they showed it reaching the router.</think>\n" +
+									"accepted\nIt is what he asked for and something really reaches it.",
+							},
+							finish_reason: "stop",
+						},
+					],
+				}),
+			);
+		});
+	});
+	await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+	const port = (server.address() as any).port;
+
+	const homeDir = path.join(DIR, "wired-home");
+	fs.mkdirSync(path.join(homeDir, "agent"), { recursive: true });
+	fs.writeFileSync(
+		path.join(homeDir, "agent", "models.json"),
+		JSON.stringify({
+			providers: {
+				omniroute: { baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "omniroute-local", authHeader: true, models: [{ id: "auto/best-free" }] },
+			},
+		}),
+		"utf8",
+	);
+	const wasHome = process.env.RLM_HOME;
+	process.env.RLM_HOME = homeDir;
+
+	const stateDir = path.join(DIR, "wired-state");
+	const root = new Context();
+	const fork = root.plugin(RlmDelegateService, { dir: stateDir, cwd: DIR, stopFile: path.join(DIR, "wired.stop") });
+	await settleMs(120);
+	const svc = (root as any).rlmDelegate as any;
+	svc.declare("a wired job", [{ id: "w", title: "w", prompt: "he asked for a wired job", proof: { kind: "shell", run: "exit 0" } }]);
+
+	let handed = 0;
+	await svc.drive({
+		runner: async () => {
+			handed++;
+			return "did it";
+		},
+		stop: stopFor("wired"),
+		maxSweeps: 4,
+	});
+
+	t("the drive built a reviewer without being handed one", () => ok(seen.length >= 1, "the router was never called"));
+	t("it went to the chat-completions route named in the registry", () => eq(seen[0]?.url, "/v1/chat/completions"));
+	t("with the registry's key on the authorization header", () => eq(seen[0]?.auth, "Bearer omniroute-local"));
+	t("as the registry's model, with room to think", () => {
+		eq(seen[0]?.body?.model, "auto/best-free");
+		ok(seen[0]?.body?.max_tokens >= 3000, String(seen[0]?.body?.max_tokens));
+	});
+	t("and it was asked about what he asked for, with his lessons under it", () => {
+		const asked = String(seen[0]?.body?.messages?.[0]?.content ?? "");
+		ok(asked.includes("he asked for a wired job"), "his request is not in the review prompt");
+		ok(asked.includes("He said:"), "his words are not in the review prompt");
+	});
+	t("the work is done, once, and the review is what let it through", () => {
+		eq(handed, 1);
+		eq(new Store(stateDir).load(svc.open()[0]?.id ?? new Store(stateDir).ids()[0])?.tasks[0].state, "done");
+	});
+
+	fork.dispose();
+	await new Promise<void>((r) => server.close(() => r()));
+	if (wasHome === undefined) delete process.env.RLM_HOME;
+	else process.env.RLM_HOME = wasHome;
 }

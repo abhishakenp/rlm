@@ -42,6 +42,8 @@ import { run as runGraph, type Runner, type RunOptions } from "./scheduler.ts";
 import { drive as driveGraphs, renderReport, type DriveOptions, type DriveReport } from "./drive.ts";
 import { impasses, renderImpasses, type Impasse } from "./impasse.ts";
 import { rlmAgent } from "./agent.ts";
+import { askModel, route as modelRoute } from "./ask.ts";
+import { me2 } from "./me2.ts";
 import { Stop } from "./stop.ts";
 import { Store, defaultDir } from "./store.ts";
 
@@ -62,6 +64,9 @@ export interface RlmDelegateConfig {
 	entry?: string;
 	attemptTimeoutMs?: number;
 	maxSweeps?: number;
+	review?: boolean;
+	reviewModel?: string;
+	reviewMaxTokens?: number;
 }
 
 export const configFields = [
@@ -146,6 +151,25 @@ export const configFields = [
 		type: "boolean",
 		default: true,
 		description: "Put the loop's own current code in the system prompt. Turn it off if the prompt is tight; what is still owed is contributed either way.",
+	},
+	{
+		key: "review",
+		type: "boolean",
+		default: true,
+		description:
+			"Show finished work to me-2 before it is called done. It reviews against what he actually asked for and against the lessons in `rlm lesson`, and a rejection puts the task back in the pool carrying the reason. Turning it off means the criterion is the only thing between an attempt and `done`, which is the arrangement that produced nine \"Done\" reports in one night.",
+	},
+	{
+		key: "reviewModel",
+		type: "string",
+		description: "Which model me-2 is. Defaults to the first model of the configured provider in ~/.rlm/agent/models.json — the same registry rlm's own agent reads.",
+	},
+	{
+		key: "reviewMaxTokens",
+		type: "number",
+		default: 4000,
+		description:
+			"How much room me-2 gets. Reasoning models spend most of it inside <think> before saying anything, and a budget too small to reach a verdict is indistinguishable from a reviewer that will not answer. Below about three thousand it never gets there.",
 	},
 ];
 
@@ -384,6 +408,10 @@ export class RlmDelegateService extends Service {
 					if (asking.length) console.log(renderImpasses(asking));
 					return 0;
 				}
+				// Said out loud before the sweep, because "me-2 is wired in" is
+				// exactly the kind of claim that is invisible when it is false.
+				if (this.config.review === false) console.log("  me-2 is off — the criterion is the only gate");
+				else console.log(`  me-2 reviewing through ${modelRoute({ model: this.config.reviewModel }).model}`);
 				const report = await this.drive({
 					follow: argv.includes("--follow"),
 					// Named so the journal can answer "did Iris do this herself".
@@ -823,6 +851,28 @@ export class RlmDelegateService extends Service {
 				return (prompt: string, task: any, graph: any) => ask({ ...task, prompt }, graph);
 			});
 
+		// me-2, built here for the same reason the planner is: a default that
+		// exists. Without one the criterion is the only thing between an attempt
+		// and `done`, and every defect that cost a night this week passed its
+		// criterion — the flag nothing read, the guard that could not be true,
+		// the filter that ate every graph and reported success.
+		//
+		// It reaches the model through `askModel`, which is one chat completion
+		// with no `tools` field, so the reviewer structurally cannot go and fix
+		// what it finds. A reviewer with hands is a second author.
+		const makeReviewer =
+			options.makeReviewer ??
+			(this.config.review === false
+				? undefined
+				: (signal: AbortSignal) =>
+						me2({
+							ask: askModel({
+								model: this.config.reviewModel,
+								maxTokens: this.config.reviewMaxTokens ?? 4000,
+								signal,
+							}),
+						}));
+
 		const report = await driveGraphs(this.store, {
 			probe: this.probe(),
 			cwd: this.config.cwd,
@@ -833,6 +883,7 @@ export class RlmDelegateService extends Service {
 				typeof this.config.concurrency === "number" ? this.config.concurrency : () => this.capacity().limit,
 			onEvent: (event, data) => this.ctx.emit?.(event, data),
 			...options,
+			makeReviewer: options.reviewer ? undefined : makeReviewer,
 			makeRunner: options.runner ? undefined : makeRunner,
 			makePlanner: options.planner ? undefined : makePlanner,
 			stop,
@@ -907,3 +958,6 @@ export { refineOne, needsRefining, parsePlan, PLAN_INSTRUCTIONS, type Planner } 
 export { askIn } from "./derive.ts";
 export { diagnose, type Diagnosis, type Carrier, type CauseKind } from "./lapse.ts";
 export { nextAttempt } from "./scheduler.ts";
+export { me2, type Me2Options } from "./me2.ts";
+export { askModel, route as modelRoute, type AskOptions, type Route } from "./ask.ts";
+export { load as loadLessons, add as addLesson, brief as lessonBrief, SEED as LESSONS, type Lesson } from "./lessons.ts";
