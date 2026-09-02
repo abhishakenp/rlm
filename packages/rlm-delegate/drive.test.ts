@@ -15,6 +15,7 @@ import * as path from "node:path";
 import RlmDelegateService from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/index.ts";
 import { Store } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/store.ts";
 import { drive, renderReport } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/drive.ts";
+import { sessionFor } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/agent.ts";
 import { impasses } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/impasse.ts";
 import { check } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/proof.ts";
 import { Gate, Stop } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/stop.ts";
@@ -909,4 +910,80 @@ console.log("\nevery attempt says who ran it");
 	});
 	const anon = store2.load(id2)!.tasks[0].attempts.at(-1)!;
 	t("and admits when nobody said, rather than guessing", () => eq(anon.executor, "unnamed", JSON.stringify(anon)));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\nnothing rests in a stopped state — a task may wait for him, never for nobody");
+{
+	// His rule on 2026-09-02: "no question and no task must ever be thrown away,
+	// 100% of them must be perfectly done". Fourteen `unproven` tasks were
+	// sitting untouched because only `failed` was ever reconsidered — and
+	// `unproven` is not a verdict, it is the absence of one.
+	const store = new Store(path.join(DIR, "nothing-rests"));
+	const work = path.join(DIR, "nothing-rests-work");
+	fs.mkdirSync(work, { recursive: true });
+
+	store.create("do the thing", [
+		{ id: "vague", title: "something nobody could judge", prompt: "do it", proof: { kind: "unstated", note: "nobody said how to tell" } },
+	]);
+	const id = store.ids().find((g) => store.load(g)!.tasks.some((t) => t.id === "vague"))!;
+
+	let planned = 0;
+	const report = await drive(store, {
+		planner: async (text: string) => {
+			planned += 1;
+			// The planner must be told what went wrong, or it writes the same
+			// plan that already did not work.
+			if (planned > 1) {
+				ok(/stuck|tried \d+ time/.test(text), "the second plan was asked for with no history of the first");
+			}
+			return JSON.stringify([
+				{
+					id: "checkable",
+					title: "the same thing, checkably",
+					prompt: "do it",
+					proof: { kind: "shell", run: `test -s ${path.join(work, "checkable.txt")}` },
+				},
+			]);
+		},
+		runner: async (task: any) => {
+			fs.writeFileSync(path.join(work, `${task.id}.txt`), "x\n", "utf8");
+			return "did it";
+		},
+		stop: stopFor("nothing-rests"),
+		maxSweeps: 8,
+	} as any);
+
+	const after = store.load(id)!;
+	t("a task nobody could judge did not simply stop", () =>
+		ok(after.tasks.some((x) => x.id === "checkable"), after.tasks.map((x) => `${x.id}:${x.state}`).join(",")));
+	t("it ends proven, not unproven", () =>
+		eq(after.tasks.find((x) => x.id === "checkable")?.state, "done",
+			JSON.stringify(after.tasks.map((x) => [x.id, x.state]))));
+	t("and nothing is left owed", () => eq(report.owed.length, 0, report.owed.join(",")));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\nan attempt resumes the task's session rather than starting from nothing");
+{
+	// His correction: "not just re-enter, but resume from their last state."
+	// A retry used to be a fresh `--print`, so whatever attempt one read or
+	// half-built was gone and attempt two paid for all of it again before it
+	// could even reach the point where attempt one failed.
+	const graph: any = { id: "g-abc", goal: "x", tasks: [] };
+	const one: any = { id: "collect", title: "collect", prompt: "collect", attempts: [] };
+	const two: any = { id: "verify", title: "verify", prompt: "verify", attempts: [] };
+
+	t("the same task always names the same session", () =>
+		eq(sessionFor(graph, one), sessionFor(graph, one)));
+	t("two tasks never collide", () =>
+		ok(sessionFor(graph, one) !== sessionFor(graph, two), sessionFor(graph, one)));
+	t("the same task id in another graph is a different session", () =>
+		ok(sessionFor({ ...graph, id: "g-xyz" } as any, one) !== sessionFor(graph, one)));
+	t("it is safe to hand to a shell", () =>
+		ok(/^[A-Za-z0-9._-]+$/.test(sessionFor({ ...graph, id: "g /weird$id" } as any, one)), sessionFor({ ...graph, id: "g /weird$id" } as any, one)));
+	// Derived, not stored: a crash, a restart, or a journal replayed elsewhere
+	// must still find the same session.
+	t("nothing has to be remembered for it to be the same next time", () =>
+		eq(sessionFor(graph, { ...one, attempts: [{}, {}] } as any), sessionFor(graph, one)));
 }

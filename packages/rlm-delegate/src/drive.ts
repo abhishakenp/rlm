@@ -241,11 +241,32 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 			if (planner) {
 				for (const graph of open) {
 					for (const task of graph.tasks) {
-						if (task.state !== "failed" || task.proof?.kind !== "shell") continue;
+						// His rule, 2026-09-02: nothing rests in a stopped state. A
+						// task may wait for HIM; it may never wait for nobody.
+						//
+						// `unproven` belongs here as much as `failed` does — a turn
+						// ended and no criterion was ever run, which is not a
+						// verdict, it is the absence of one. Fourteen of them were
+						// sitting untouched because only `failed` was reconsidered.
+						// `unreachable` is derived, so freeing what it stands on
+						// frees it without anything being done to it directly.
+						const stopped = task.state === "failed" || task.state === "unproven";
+						if (!stopped) continue;
+						// A shell criterion can be replaced; an unstated one is
+						// already back in the planner's hands.
+						if (task.proof?.kind !== "shell" && task.proof?.kind !== "unstated") continue;
+						if (task.proof?.kind === "unstated" && task.state === "unproven" && !task.attempts.length) continue;
 						if (task.attempts.length >= 2 * (options.maxAttempts ?? 3)) continue;
 						try {
-							store.answered(graph.id, task.id, { kind: "unstated" }, "the drive, because this check never once moved");
-							say("rlm/drive-replanning", { graph: graph.id, task: task.id, was: task.proof.run });
+							store.answered(
+								graph.id,
+								task.id,
+								{ kind: "unstated" },
+								task.state === "unproven"
+									? "the drive, because a turn ended and no criterion was ever run"
+									: "the drive, because this check never once moved",
+							);
+							say("rlm/drive-replanning", { graph: graph.id, task: task.id, was: task.proof.kind === "shell" ? task.proof.run : task.state });
 						} catch (error: any) {
 							say("rlm/drive-graph-error", { graph: graph.id, error: String(error?.message ?? error) });
 						}

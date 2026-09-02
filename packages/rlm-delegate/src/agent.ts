@@ -57,10 +57,26 @@ export interface AgentOptions {
 	onOutput?: (task: Task, chunk: string) => void;
 }
 
+/**
+ * One session per task, stable across every attempt on it.
+ *
+ * A retry used to be a fresh `--print`, which meant starting from nothing:
+ * whatever the first attempt read, worked out, or half-built was gone, and
+ * attempt two paid for all of it again before it could even reach the point
+ * where attempt one failed. His words: "not just re-enter, but resume from
+ * their last state."
+ *
+ * Derived rather than stored so it survives anything — a crash, a restart, a
+ * journal replayed on another machine. The same task always names the same
+ * session, and a different task never collides with it.
+ */
+export const sessionFor = (graph: Graph, task: Task): string =>
+	`rlm-delegate-${graph.id}-${task.id}`.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 120);
+
 export const rlmAgent = (options: AgentOptions): Runner => {
-	return async (task: Task, _graph: Graph): Promise<string> => {
+	return async (task: Task, graph: Graph): Promise<string> => {
 		const command = options.node ?? process.execPath;
-		const args = [options.entry, "--print", task.prompt];
+		const args = [options.entry, "--print", "--session-id", sessionFor(graph, task), task.prompt];
 		const [bin, ...rest] = options.confine ? options.confine(command, args) : [command, ...args];
 
 		return await new Promise<string>((resolve, reject) => {

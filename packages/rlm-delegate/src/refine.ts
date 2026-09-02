@@ -217,12 +217,30 @@ export const refineOne = async (
 	// instructions.
 	const ask = askIn(task.prompt) ?? askIn(graph.goal) ?? task.prompt;
 
+	// A task that got stuck once must not be re-planned as if it were new.
+	//
+	// His rule: the AI *reads* the stuck task, works out why it is stuck, and
+	// unsticks it — not a blind retry. What it is stuck on is already written
+	// down, in the reason and in every attempt that failed, so it costs nothing
+	// to carry and everything to omit: without it the planner produces the same
+	// plan that already did not work.
+	const history = task.attempts?.length
+		? `\n\nThis has been tried ${task.attempts.length} time(s) and is stuck${task.reason ? `, currently: ${task.reason.split("\n")[0]}` : ""}.\n` +
+			task.attempts
+				.slice(-3)
+				.map((a, i) => `  attempt ${task.attempts.length - Math.min(3, task.attempts.length) + i + 1}: ${a.ok ? "reported done" : "failed"} — ${String(a.detail ?? "").slice(0, 300)}`)
+				.join("\n") +
+			"\n\nWork out WHY it is stuck before you plan. If every attempt failed the same way, the thing to " +
+			"change is not the effort — it is the approach, or the check, or something it needed that was never " +
+			"there. Say nothing about that here; just let it shape the plan."
+		: "";
+
 	let refusal = "";
 	for (let attempt = 0; attempt < 2; attempt++) {
 		let tasks: TaskInput[];
 		try {
 			const answer = await plan(
-				`${PLAN_INSTRUCTIONS}\n\nRequest:\n${ask}${refusal ? `\n\nYour last plan was refused: ${refusal}\nFix exactly that and return the whole corrected array.` : ""}`,
+				`${PLAN_INSTRUCTIONS}\n\nRequest:\n${ask}${history}${refusal ? `\n\nYour last plan was refused: ${refusal}\nFix exactly that and return the whole corrected array.` : ""}`,
 				task,
 				graph,
 			);
