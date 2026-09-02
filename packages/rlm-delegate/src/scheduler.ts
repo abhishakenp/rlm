@@ -181,23 +181,44 @@ export const run = async (
 	};
 
 	const attempt = async (task: Task, graph: Graph): Promise<void> => {
-		const at = new Date().toISOString();
 		const { prompt, diagnosis } = nextAttempt(task, { similarity: options.similarity });
-		store.began(graphId, task.id, at);
-		say("rlm/delegate-began", {
-			graph: graphId,
-			task: task.id,
-			title: task.title,
-			at,
-			attempt: task.attempts.length + 1,
-			approach: diagnosis?.cause,
-		});
 
 		let ok = false;
 		let detail = "";
+
+		// The gate first, and only then the clock.
+		//
+		// `began` used to be written here, above the gate, so a task was
+		// journalled as running from the moment the scheduler decided to hand it
+		// over — which on a machine limited to one at a time meant it was
+		// journalled as running for the entire time it spent queued behind
+		// everything else. Every duration anybody could compute from this journal
+		// was therefore mostly queue: 572 spans totalling 67.1 hours at a mean of
+		// 422 seconds, against child sessions that actually totalled 10.9 hours at
+		// a mean of 44. Eighty-four percent of every recorded duration was waiting.
+		//
+		// Nothing had to read it wrongly for this to be a bug; `Attempt.at` is
+		// documented as "when the agent was handed the task" and it simply was not
+		// that. Below the gate it is. The cost is that a queued task now sits in
+		// `ready` rather than `running` until a slot frees, which is also the
+		// truth, and which the in-process `inFlight` map — not the journalled
+		// state — has always been what actually stops it being picked up twice.
 		const release = options.gate ? await options.gate.take() : () => {};
+		const at = new Date().toISOString();
 		try {
+			// Checked before anything is written down: an attempt abandoned while
+			// it waited never started, and should not leave a `began` behind
+			// claiming it did.
 			if (options.signal?.aborted) throw new Error("stopped before this attempt started");
+			store.began(graphId, task.id, at);
+			say("rlm/delegate-began", {
+				graph: graphId,
+				task: task.id,
+				title: task.title,
+				at,
+				attempt: task.attempts.length + 1,
+				approach: diagnosis?.cause,
+			});
 			detail = await runner({ ...task, prompt }, graph);
 			ok = true;
 		} catch (error: any) {

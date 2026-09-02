@@ -91,7 +91,8 @@ export const configFields = [
 	{
 		key: "parallelCeiling",
 		type: "number",
-		description: "The most the measured limit is ever allowed to reach, however idle the machine looks. Defaults to half the cores, capped at four.",
+		description:
+			"The most the measured limit is ever allowed to reach, however much room the machine has. Leave it unset and the ceiling is asked of the provider layer instead — omniroute reports what it will carry at once on /health — falling back to one per core when it cannot be reached.",
 	},
 	{
 		key: "headroomFloor",
