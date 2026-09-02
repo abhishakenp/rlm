@@ -147,6 +147,12 @@ export interface Reviewer {
 }
 
 export interface Task {
+	/**
+	 * How much he wants this before the others. Higher goes first, default 0.
+	 * Not a deadline and not a promise — only an ordering among work that is
+	 * already runnable.
+	 */
+	priority?: number;
 	id: string;
 	/**
 	 * One line, in the asker's words. This is the record that has to survive:
@@ -175,6 +181,12 @@ export interface Task {
 }
 
 export interface TaskInput {
+	/**
+	 * How much he wants this before the others. Higher goes first, default 0.
+	 * Not a deadline and not a promise — only an ordering among work that is
+	 * already runnable.
+	 */
+	priority?: number;
 	id: string;
 	title: string;
 	prompt?: string;
@@ -388,6 +400,8 @@ export const declare = (
 			prompt: input.prompt ?? input.title,
 			needs: input.needs ?? [],
 			proof: input.proof,
+			// Carried through, or the field exists in the type and nowhere on disk.
+			priority: input.priority ?? 0,
 			state: "blocked" as TaskState,
 			attempts: [] as Attempt[],
 			createdAt: now,
@@ -470,7 +484,20 @@ export const settle = (tasks: Task[], now = new Date().toISOString()): Task[] =>
 };
 
 /** Everything that could start right now. Independent tasks come back together. */
-export const runnable = (tasks: Task[]): Task[] => tasks.filter((t) => t.state === "ready");
+/**
+ * Everything that can be started, most wanted first.
+ *
+ * "Nothing is forgotten" and "the right thing first" are different promises,
+ * and only the first was kept. Two hundred tasks were ready and the six he is
+ * actually waiting on — me-1 and me-2 — sat among them in arbitrary order,
+ * behind fashion trends, with two workers. A backlog that cannot be steered is
+ * one he has to watch.
+ *
+ * Higher `priority` first; ties keep the order they were written down in, so
+ * an unprioritised backlog behaves exactly as it did before.
+ */
+export const runnable = (tasks: Task[]): Task[] =>
+	tasks.filter((t) => t.state === "ready").sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
 
 /** How a criterion reads to a person, so a reviewer can dispute it. */
 export const describeProof = (proof: Proof): string => {

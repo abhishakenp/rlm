@@ -39,7 +39,8 @@ type Entry =
 	| { k: "reviewed"; at: string; id: string; review: Review }
 	| { k: "recovered"; at: string; id: string; why: string }
 	| { k: "refined"; at: string; id: string; tasks: TaskInput[] }
-	| { k: "answered"; at: string; id: string; proof: Task["proof"]; by: string };
+	| { k: "answered"; at: string; id: string; proof: Task["proof"]; by: string }
+	| { k: "prioritised"; at: string; id: string; priority: number; by: string };
 
 /** `~/.rlm/agent/delegate`, honouring $RLM_HOME the way the rest of rlm does. */
 export const defaultDir = (): string =>
@@ -151,6 +152,16 @@ export class Store {
 						task.reason = entry.reason;
 						task.updatedAt = entry.at;
 					}
+					break;
+				}
+				case "prioritised": {
+					const task = graph.tasks.find((t) => t.id === entry.id);
+					if (!task) break;
+					// Ordering only. It cannot start a task, unstick one, or change
+					// what is true about it — a priority that could do any of those
+					// would be a way to get work marked done by wanting it more.
+					task.priority = entry.priority;
+					task.updatedAt = entry.at;
 					break;
 				}
 				case "answered": {
@@ -291,6 +302,14 @@ export class Store {
 		if (!existing?.tasks.some((t) => t.id === id)) throw new Error(`no such task: ${graphId}/${id}`);
 		validateProof(proof, id);
 		this.append(graphId, { k: "answered", at: new Date().toISOString(), id, proof, by });
+		return this.load(graphId)!;
+	}
+
+	/** Move a task up or down the queue. Ordering only; nothing else changes. */
+	prioritised(graphId: string, id: string, priority: number, by = "a person"): Graph {
+		const existing = this.load(graphId);
+		if (!existing?.tasks.some((t) => t.id === id)) throw new Error(`no such task: ${graphId}/${id}`);
+		this.append(graphId, { k: "prioritised", at: new Date().toISOString(), id, priority, by });
 		return this.load(graphId)!;
 	}
 

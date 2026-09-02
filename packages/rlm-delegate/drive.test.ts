@@ -1042,3 +1042,39 @@ console.log("\na provider refusing to run the work is not the work failing");
 		ok(after.attempts.filter((a) => a.shape && a.shape !== "blocked on a resource").length <= 1,
 			JSON.stringify(after.attempts.map((a) => a.shape))));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\nthe work he is waiting on goes first");
+{
+	// "Nothing is forgotten" and "the right thing first" are different promises,
+	// and only the first was kept. Two hundred tasks were ready and the six he is
+	// actually waiting on sat among them in arbitrary order, behind fashion
+	// trends, with two workers.
+	const store = new Store(path.join(DIR, "priority"));
+	const work = path.join(DIR, "priority-work");
+	fs.mkdirSync(work, { recursive: true });
+	store.create("a backlog", [
+		{ id: "trivia", title: "something he never asked about", prompt: "trivia", proof: { kind: "shell", run: `test -s ${path.join(work, "trivia.txt")}` } },
+		{ id: "me-1", title: "the thing he is waiting on", prompt: "me-1", priority: 10, proof: { kind: "shell", run: `test -s ${path.join(work, "me-1.txt")}` } },
+		{ id: "chores", title: "another thing he never asked about", prompt: "chores", proof: { kind: "shell", run: `test -s ${path.join(work, "chores.txt")}` } },
+	] as any);
+
+	const order: string[] = [];
+	await drive(store, {
+		concurrency: 1,
+		runner: async (task: any) => {
+			order.push(task.id);
+			fs.writeFileSync(path.join(work, `${task.id}.txt`), "x\n", "utf8");
+			return "done";
+		},
+		stop: stopFor("priority"),
+		maxSweeps: 5,
+	});
+
+	t("the prioritised one was handed out first", () => eq(order[0], "me-1", order.join(",")));
+	t("and the rest still all got done", () => eq(order.length, 3, order.join(",")));
+	// Ties must not be reshuffled, or an unprioritised backlog changes behaviour
+	// for no reason anybody asked for.
+	t("equal priorities keep the order they were written down in", () =>
+		eq(order.slice(1).join(","), "trivia,chores", order.join(",")));
+}
