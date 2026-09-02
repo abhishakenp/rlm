@@ -14,7 +14,7 @@
  * Unverifiable is not the same as verified; that confusion is the whole bug.
  */
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import type { Proof } from "./graph.ts";
 
 export interface ProofResult {
@@ -75,6 +75,17 @@ export const check = async (
 
 		case "file": {
 			if (!existsSync(proof.path)) return { verdict: "failed", detail: `${proof.path} does not exist` };
+			if (proof.changedSince) {
+				let touched = 0;
+				try {
+					touched = statSync(proof.path).mtimeMs;
+				} catch (error: any) {
+					return { verdict: "errored", detail: `could not stat ${proof.path}: ${error?.message ?? error}` };
+				}
+				if (touched <= Date.parse(proof.changedSince)) {
+					return { verdict: "failed", detail: `${proof.path} has not been touched since the work started` };
+				}
+			}
 			if (proof.contains) {
 				let text = "";
 				try {
@@ -89,7 +100,10 @@ export const check = async (
 					};
 				}
 			}
-			return { verdict: "passed", detail: `${proof.path} is there` };
+			return {
+				verdict: "passed",
+				detail: proof.changedSince ? `${proof.path} has changed` : `${proof.path} is there`,
+			};
 		}
 
 		case "row": {

@@ -29,7 +29,7 @@ import {
 	type TaskInput,
 	type TaskState,
 } from "./graph.ts";
-import { CycleError } from "./graph.ts";
+import { CycleError, unanswerable, validateProof } from "./graph.ts";
 
 type Entry =
 	| { k: "declared"; at: string; goal: string; tasks: TaskInput[] }
@@ -38,7 +38,8 @@ type Entry =
 	| { k: "ended"; at: string; id: string; state: TaskState; attempt: Attempt; result?: string; reason?: string }
 	| { k: "reviewed"; at: string; id: string; review: Review }
 	| { k: "recovered"; at: string; id: string; why: string }
-	| { k: "refined"; at: string; id: string; tasks: TaskInput[] };
+	| { k: "refined"; at: string; id: string; tasks: TaskInput[] }
+	| { k: "answered"; at: string; id: string; proof: Task["proof"]; by: string };
 
 /** `~/.rlm/agent/delegate`, honouring $RLM_HOME the way the rest of rlm does. */
 export const defaultDir = (): string =>
@@ -152,6 +153,21 @@ export class Store {
 					}
 					break;
 				}
+				case "answered": {
+					const task = graph.tasks.find((t) => t.id === entry.id);
+					if (!task) break;
+					task.proof = entry.proof;
+					// Somebody has now said how to tell. The task goes back into the
+					// pool so something tries again against the real criterion —
+					// an answered question that nothing acts on is still a task
+					// nobody finished.
+					if (task.state !== "done" && task.state !== "running") {
+						task.state = "blocked";
+						task.reason = `${entry.by} said how to tell, on ${entry.at.slice(0, 10)}`;
+					}
+					task.updatedAt = entry.at;
+					break;
+				}
 				case "refined": {
 					const parent = graph.tasks.find((t) => t.id === entry.id);
 					if (!parent) break;
@@ -263,6 +279,21 @@ export class Store {
 		return this.load(graphId)!;
 	}
 
+	/**
+	 * Record the answer to "how will we know this is done?".
+	 *
+	 * The criterion is replaced and the task goes back into the pool, because
+	 * being told how to check something is only worth anything if something then
+	 * checks it.
+	 */
+	answered(graphId: string, id: string, proof: Task["proof"], by = "a person"): Graph {
+		const existing = this.load(graphId);
+		if (!existing?.tasks.some((t) => t.id === id)) throw new Error(`no such task: ${graphId}/${id}`);
+		validateProof(proof, id);
+		this.append(graphId, { k: "answered", at: new Date().toISOString(), id, proof, by });
+		return this.load(graphId)!;
+	}
+
 	began(graphId: string, id: string, at = new Date().toISOString()): void {
 		this.append(graphId, { k: "began", at, id });
 	}
@@ -319,6 +350,32 @@ export class Store {
 		return out;
 	}
 
+	/**
+	 * Every task nobody could work out a criterion for — one question each,
+	 * waiting for a person.
+	 *
+	 * Exposed as data rather than asked here: the asking belongs to whatever is
+	 * actually talking to him.
+	 */
+	questions(): Array<{ graph: string; goal: string; task: Task; question: string }> {
+		const out: Array<{ graph: string; goal: string; task: Task; question: string }> = [];
+		for (const id of this.ids()) {
+			const graph = this.load(id);
+			if (!graph) continue;
+			for (const task of unanswerable(graph.tasks)) {
+				out.push({
+					graph: graph.id,
+					goal: graph.goal,
+					task,
+					question:
+						`How will we know "${task.title}" is done? Name a command that exits 0, a file that must ` +
+						`exist or change, a row that must reach ACTIVE, or a command that must be in the registry.`,
+				});
+			}
+		}
+		return out;
+	}
+
 	/** Turns that ended with no way to tell whether the work happened. */
 	unverified(sinceMs = 24 * 60 * 60 * 1000): Array<{ graph: string; goal: string; task: Task }> {
 		const cutoff = Date.now() - sinceMs;
@@ -338,10 +395,10 @@ export class Store {
 	/**
 	 * Forget the noise, never the wounds.
 	 *
-	 * A journal whose every task is done or unproven, and which nothing has
-	 * touched in a fortnight, is a receipt. A journal with anything failed,
-	 * unreachable, rejected or still runnable in it is evidence, and stays
-	 * whatever its age.
+	 * A journal whose every task is proven done, and which nothing has touched
+	 * in a fortnight, is a receipt. Anything else is evidence and stays whatever
+	 * its age — `unproven` included, and `unproven` especially: a turn nobody
+	 * could check is the thing to go and look at, not the thing to tidy away.
 	 */
 	prune(maxAgeMs = 14 * 24 * 60 * 60 * 1000): string[] {
 		const cutoff = Date.now() - maxAgeMs;
@@ -350,7 +407,7 @@ export class Store {
 			const graph = this.load(id);
 			if (!graph) continue;
 			const keep =
-				graph.tasks.some((t) => t.state !== "done" && t.state !== "unproven") ||
+				graph.tasks.some((t) => t.state !== "done") ||
 				graph.tasks.some((t) => Date.parse(t.updatedAt) >= cutoff);
 			if (keep) continue;
 			try {

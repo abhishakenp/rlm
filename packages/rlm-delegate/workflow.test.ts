@@ -142,7 +142,9 @@ console.log("\none request, one row");
 {
 	// The boundary records the request in code before any of this runs. The loop
 	// must refine that record, not open a second graph beside it.
-	const request = "a request that arrived at the door";
+	// A request the matcher CAN read a criterion out of, because matching the
+	// intake record on "it has no criterion" was exactly the wrong test.
+	const request = "build me an rlm-example plugin";
 	const recorded = graphs.intake(request, { source: "test" })!;
 	const before = store.ids().length;
 	await makeDelegator(api).run(request);
@@ -154,6 +156,8 @@ console.log("\none request, one row");
 		eq(after.tasks.find((x) => x.id === "the-request")!.proof.kind, "rollup");
 	});
 	t("and the request is still there in the asker's words", () => eq(store.load(recorded.graph.id)!.goal, request));
+	t("even though the boundary had already read a criterion out of it", () =>
+		eq((recorded.graph.tasks[0].proof as any).kind, "row"));
 }
 
 fork.dispose();

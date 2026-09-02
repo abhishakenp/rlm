@@ -150,7 +150,95 @@ console.log("\nthe intelligent part is an improvement on the floor, never the fl
 	});
 }
 
-console.log("\nwounds are visible; receipts do not drown them");
+console.log("\na criterion is read out of the request before anyone is asked for one");
+{
+	const stateDir = path.join(DIR, "derive");
+	const { root } = await boot(stateDir, { run: async () => 0 });
+	const graphs = root.rlmDelegate;
+	const store = new Store(stateDir);
+	const criterionFor = (request: string) => {
+		const recorded = graphs.intake(request, { source: "test" })!;
+		return store.load(recorded.graph.id)!.tasks[0].proof as any;
+	};
+
+	t("a plugin has to reach ACTIVE, not merely be written", () => {
+		const proof = criterionFor("build me an iris-dirsize plugin");
+		eq(proof.kind, "row");
+		eq(proof.id, "iris-dirsize");
+		eq(proof.state, "ACTIVE");
+	});
+	t("a command has to be in the registry afterwards", () => {
+		const proof = criterionFor("add a command that does dirsize.of so i can run it");
+		eq(proof.kind, "command");
+		eq(proof.name, "dirsize.of");
+	});
+	t("a file to be fixed has to stop being the file it was", () => {
+		const proof = criterionFor("fix packages/rlm-log/src/index.ts please");
+		eq(proof.kind, "file");
+		ok(proof.path.endsWith("packages/rlm-log/src/index.ts"), proof.path);
+		ok(proof.changedSince, "nothing to compare against");
+	});
+	t("a command the asker said should pass becomes the criterion", () => {
+		const proof = criterionFor("make `npm test` pass");
+		eq(proof.kind, "shell");
+		eq(proof.run, "npm test");
+	});
+	t("a filename is not mistaken for a command", () => {
+		const proof = criterionFor("expose a tool that reads index.ts");
+		ok(proof.kind !== "command", `it read ${JSON.stringify(proof)}`);
+	});
+	t("and where nothing is confident, it says so rather than guessing", () => {
+		const proof = criterionFor("tell me what you think about the weather");
+		eq(proof.kind, "unstated");
+	});
+	t("a derived criterion is real work, not a question", () => {
+		const recorded = graphs.intake("build me an iris-notch plugin", { source: "test" })!;
+		const task = store.load(recorded.graph.id)!.tasks[0];
+		eq(task.state, "ready");
+		ok(!graphs.questions().some((q: any) => q.graph === recorded.graph.id), "it was filed as a question anyway");
+	});
+	t("deriving can never refuse the request", () => {
+		// Nothing in a request should be able to stop it being recorded.
+		const nasty = "fix `((((` and mount the [[[[ plugin at ~/\u0000/nope";
+		const recorded = graphs.intake(nasty, { source: "test" });
+		ok(recorded, "the request was not recorded");
+	});
+}
+
+console.log("\nan underivable request is a question, and the question is answerable");
+{
+	const stateDir = path.join(DIR, "questions");
+	const { root } = await boot(stateDir, { run: async () => 0 });
+	const graphs = root.rlmDelegate;
+	const store = new Store(stateDir);
+
+	await root.rlmModes.dispatch(["--print", "sort out the thing we talked about"]);
+	const graphId = store.ids()[0];
+
+	t("it ran, and it is unproven rather than done", () => eq(store.load(graphId)!.tasks[0].state, "unproven"));
+	t("it is a question, with a specific ask", () => {
+		const asked = graphs.questions();
+		eq(asked.length, 1);
+		ok(asked[0].question.includes("How will we know"), asked[0].question);
+		ok(asked[0].question.includes("sort out the thing"), asked[0].question);
+	});
+	t("answering it puts the task back into the pool", () => {
+		graphs.answer(graphId, "the-request", { kind: "shell", run: "exit 0" }, "abhi");
+		const task = store.load(graphId)!.tasks[0];
+		eq(task.state, "ready");
+		eq((task.proof as any).kind, "shell");
+		ok(task.reason!.includes("abhi"), task.reason);
+	});
+	t("and the question is gone once it is answered", () => eq(graphs.questions().length, 0));
+	t("something then tries again, against the real criterion", async () => {});
+	t("an answer that is not a criterion is refused", () => {
+		let threw: any;
+		try { graphs.answer(graphId, "the-request", { kind: "wishful" } as any); } catch (e) { threw = e; }
+		ok(threw, "anything was accepted as a criterion");
+	});
+}
+
+console.log("\nnothing rests in a state that reads like success");
 {
 	const stateDir = path.join(DIR, "wounds");
 	const { root } = await boot(stateDir, { run: async () => 0 });
@@ -159,31 +247,45 @@ console.log("\nwounds are visible; receipts do not drown them");
 	await root.rlmModes.dispatch(["--print", "a turn nobody could check"]);
 	const store = new Store(stateDir);
 
-	t("an unproven turn is not listed as live work", () => eq(store.open().length, 0));
-	t("but it is listed as unverified", () => {
+	t("an unproven turn IS still owed — it is not a quieter kind of done", () => {
+		eq(store.open().length, 1);
+		eq(store.load(store.ids()[0])!.tasks[0].state, "unproven");
+	});
+	t("it is listed as unverified too", () => {
 		const wounds = store.unverified();
 		eq(wounds.length, 1);
 		eq(wounds[0].task.title, "a turn nobody could check");
 	});
-	t("and the prompt says so, in its own quieter section", () => {
+	t("the prompt says it out loud, grouped and counted", () => {
 		const fragment = graphs.owedFragment();
-		ok(fragment.includes("no way to check"), fragment);
+		ok(fragment.includes("nobody can tell whether it worked — 1"), fragment);
 		ok(fragment.includes("a turn nobody could check"), fragment);
+		ok(fragment.includes("They are not finished"), fragment);
 	});
+	t("and it is counted among what is not proven done", () =>
+		ok(graphs.owedFragment().includes("1 task(s) are not proven done"), graphs.owedFragment()));
 	t("the prompt also says how to stop it happening", () =>
 		ok(graphs.owedFragment().includes("refine(graphId, taskId, tasks)"), "refine is not taught"));
 
 	graphs.declare("a real wound", [{ id: "hurt", title: "the thing that failed", proof: { kind: "shell", run: "exit 1" } }]);
 	await runGraph(store, store.ids().find((id) => store.load(id)!.goal === "a real wound")!, async () => "ok", { maxAttempts: 1, concurrency: 1 });
 
-	t("a failure IS live work — somebody has to look at it", () => eq(store.open().length, 1));
-	t("pruning forgets the receipt", () => {
-		const gone = store.prune(0);
-		eq(gone.length, 1);
+	t("a failure and an unproven turn are both still owed", () => {
+		eq(store.open().length, 2);
+		const states = store.ids().flatMap((id) => store.load(id)!.tasks.map((x) => x.state)).sort();
+		eq(states.join(","), "failed,unproven");
 	});
-	t("and keeps the wound, whatever its age", () => {
-		eq(store.ids().length, 1);
-		eq(store.load(store.ids()[0])!.goal, "a real wound");
+	t("pruning keeps everything that is not proven done, however old", () => {
+		const before = store.ids().length;
+		eq(store.prune(0).length, 0);
+		eq(store.ids().length, before);
+	});
+	t("an unproven turn never ages out", () =>
+		ok(store.ids().some((id) => store.load(id)!.tasks.some((x) => x.state === "unproven")), "it was tidied away"));
+	t("only a journal where everything is proven done is a receipt", () => {
+		const receipt = graphs.declare("finished work", [{ id: "d", title: "d", proof: { kind: "shell", run: "exit 0" } }]);
+		store.ended(receipt.id, "d", "done", { at: "now", ok: true, detail: "ok", proof: "passed" }, { result: "ok" });
+		ok(store.prune(-1).includes(receipt.id), "the receipt was kept");
 	});
 }
 

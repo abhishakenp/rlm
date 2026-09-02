@@ -114,9 +114,17 @@ export default (api: any) => ({
 		// If the boundary already wrote this request down — it does, in code,
 		// before any of this ran — refine that record rather than opening a
 		// second graph beside it. One request, one row.
+		//
+		// An intake record is a graph whose whole content is the request itself:
+		// one task, still the one the boundary wrote. Whether a criterion could
+		// be read out of it or not is beside the point — matching on that was a
+		// bug waiting for the day the matcher got better.
 		const recorded = graphs
 			.open()
-			.find((g: any) => g.goal === input && g.tasks.length === 1 && g.tasks[0].proof?.kind === "unstated");
+			.find(
+				(g: any) =>
+					g.goal === input && g.tasks.length === 1 && g.tasks[0].proof?.kind !== "rollup",
+			);
 
 		let graph: any;
 		try {

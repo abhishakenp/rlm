@@ -37,10 +37,24 @@ Every caller passes through there, Iris included (`node cordis-shell.mjs
 happens when the model is unavailable, confused, or lying — verified by killing
 the session mid-run and finding the request and the failure both on disk.
 
-What it records is one task holding the request verbatim and the honest
-criterion, `unstated`: *nobody has said how to tell.* That criterion can never
-pass. A turn that comes back ends `unproven` — a wound with a record rather than
-a wound without one — and a turn that does not come back ends `failed`.
+What it records is one task holding the request verbatim, and a criterion read
+out of the request itself — mechanically, with no model:
+
+| the request says | the criterion becomes |
+|---|---|
+| "build me an X plugin" | the row `X` reaches ACTIVE — written to disk is not mounted |
+| "add a command that does `y.z`" | `y.z` is in the registry afterwards |
+| "fix `path/to/Z`" | `path/to/Z` is not the file it was (`changedSince`) |
+| "make \`npm test\` pass" | that command exits 0 |
+
+Where nothing is confident it falls back to `unstated` — *nobody has said how to
+tell* — which can never pass. That is a **last** resort, and it is a question,
+not a conclusion. A turn that comes back on an unstated criterion ends
+`unproven`; a turn that does not come back ends `failed`.
+
+Deriving can never refuse a request: a bad guess produces a task that fails
+loudly, which is recoverable, while a throw at the boundary would stop work
+being handed over at all.
 
 `refine(graphId, taskId, tasks)` is the improvement on top: a model reads the
 recorded request and turns it into real tasks with real criteria and real edges.
@@ -82,10 +96,28 @@ blocked → ready → running → done
         unreachable                       something it needs died
 ```
 
-`unproven` is not "still owed" — nothing more will happen to it on its own, and
-listing it beside live work would drown the live work. It is reported separately
-by `unverified()` and in its own quieter section of the prompt. It *is* dead for
-dependents: work that came back with no way to check it is not a foundation.
+**`unproven` counts as still owed.** An earlier version of this package left it
+out on the grounds that it would drown the live work; that was the wrong trade.
+`unproven` means a turn ended and nobody can tell whether the work happened —
+which is not a quieter kind of success, it is the exact failure this package
+exists to prevent. Nine turns in one night ended with "Done" and nothing was
+built; in these terms those were nine unproven tasks everybody read as finished.
+If there are too many to read the answer is to group and count them, which the
+prompt does, never to stop saying them. It is also dead for dependents: work
+that came back with no way to check it is not a foundation. And it never ages
+out — only a journal where every task is *proven* done is a receipt.
+
+## Nothing rests in a state that reads like success
+
+Either a task is proven done, or it is visibly owed with something able to try
+again, or **a person has been asked a specific question**. `questions()` returns
+the third case as data — each unstated criterion with the sentence to put to
+whoever asked — and `answer(graphId, taskId, proof)` records the reply, replaces
+the criterion, and puts the task back into the pool so something tries again.
+
+The asking itself is not done here; it belongs to whatever is actually talking
+to him. What is guaranteed here is that the question exists, is specific, and
+does not go away on its own.
 
 `unreachable` is derived from the edges, never stored as a decision — so a
 dependent comes back on its own if the thing that failed is later fixed. A
@@ -160,6 +192,8 @@ journalled fact rather than a rendering.
 | `refine(graphId, taskId, tasks)` | Break a recorded request into real tasks; the parent becomes a rollup. |
 | `close(graphId, taskId, {ok, detail})` | Record how the turn went: `unproven` if it came back, `failed` if it did not. |
 | `unverified(sinceMs?)` | Turns nobody could check — the wounds. |
+| `questions()` | Every job waiting on one sentence from a person, with the question. |
+| `answer(graphId, taskId, proof, by?)` | Record how to judge it, and put it back into the pool. |
 | `declare(goal, tasks, id?)` | Write down what was asked. Throws — before writing — on a cycle, an unknown dependency, or a missing criterion. |
 | `add(graphId, tasks)` | Extend a graph, refusing a cycle across the whole thing. |
 | `run(graphId, runner?, options?)` | Work it. Defaults to `rlmSdk.spawn` per task. |
@@ -172,7 +206,7 @@ journalled fact rather than a rendering.
 
 Events: `rlm/delegate-intake`, `-declared`, `-refined`, `-began`, `-done`,
 `-unproven`, `-retry`, `-failed`, `-recovered`, `-capacity`, `-reviewed`,
-`-settled`, `-outstanding`.
+`-settled`, `-outstanding`, `-answered`.
 
 Journals are pruned after a fortnight — but only the receipts. A journal with
 anything failed, unreachable, rejected or still runnable in it is evidence and

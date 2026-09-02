@@ -35,6 +35,7 @@ import {
 	type TaskInput,
 } from "./graph.ts";
 import { capacity, explain as explainCapacity, type CapacityVerdict } from "./capacity.ts";
+import { derive } from "./derive.ts";
 import { check, type Probe } from "./proof.ts";
 import { run as runGraph, type Runner, type RunOptions } from "./scheduler.ts";
 import { Store, defaultDir } from "./store.ts";
@@ -51,6 +52,7 @@ export interface RlmDelegateConfig {
 	repeatFloor?: number;
 	skeletonPath?: string;
 	teachSkeleton?: boolean;
+	cwd?: string;
 }
 
 export const configFields = [
@@ -95,6 +97,11 @@ export const configFields = [
 		default: 2,
 		description:
 			"Stop after a task has failed this many times the same way. An agent that failed identically twice will fail a third time; the attempt is spent to no purpose and the failure is more useful written down.",
+	},
+	{
+		key: "cwd",
+		type: "string",
+		description: "Where relative paths in a request are resolved from when reading a criterion out of it. Defaults to the process working directory.",
 	},
 	{
 		key: "skeletonPath",
@@ -200,44 +207,56 @@ export class RlmDelegateService extends Service {
 	/** What is still owed, read from disk every time the prompt is built. */
 	owedFragment(): string {
 		const open = this.open();
-		const wounds = this.unverified();
-		if (!open.length && !wounds.length) return "";
-		const lines = open.flatMap((graph) => [
-			`  ${graph.id} — ${graph.goal}`,
-			...outstanding(graph.tasks).map(
-				(t) =>
-					`    [${t.state}] ${t.id}: ${t.title}${t.reason ? ` — ${t.reason.split("\n")[0]}` : ""}`,
-			),
-		]);
-		const woundLines = wounds.length
-			? [
-					"",
-					`### ${wounds.length} turn(s) in the last day ended with no way to check`,
-					"",
-					"Each of these was recorded at the door and never refined into anything a",
-					"criterion could be run against, so nobody can say whether the work happened.",
-					"That is the thing worth fixing, and `refine()` is how.",
-					"",
-					...wounds.slice(0, 8).map((w) => `  ${w.graph}/${w.task.id}: ${w.task.title}`),
-				]
-			: [];
+		const questions = this.questions();
+		if (!open.length && !questions.length) return "";
+
+		const all = open.flatMap((graph) => graph.tasks.map((task) => ({ graph, task })));
+		const live = all.filter(({ task }) => ["ready", "blocked", "running"].includes(task.state));
+		const stopped = all.filter(({ task }) => ["failed", "unreachable", "rejected"].includes(task.state));
+		const unchecked = all.filter(({ task }) => task.state === "unproven");
+
+		const line = ({ graph, task }: { graph: Graph; task: Task }) =>
+			`  ${graph.id}/${task.id} — ${task.title}${task.reason ? `\n      ${task.reason.split("\n")[0]}` : ""}`;
+
+		const section = (heading: string, rows: typeof all, note?: string) =>
+			rows.length ? ["", `### ${heading}`, ...(note ? ["", note] : []), "", ...rows.map(line)] : [];
 
 		return [
 			"## Still owed",
 			"",
-			"These were asked for and are not finished. They are on disk, written down when",
-			"they arrived — they are not in your context because someone repeated them, and",
-			"they survive you. Do not start new work while something here is `ready`, and",
-			"never report a turn complete because the turn ended: a task is done when its",
-			"criterion passes and at no other moment.",
+			`${all.length} task(s) are not proven done. They were written down when they arrived, they are`,
+			"on disk, and they outlive you — none of this is here because somebody repeated it.",
+			"A task is finished when its criterion passes and at no other moment.",
+			...section("Live — something can pick these up now", live),
+			...section(
+				"Stopped — these need a decision",
+				stopped,
+				"Each one has a reason on it. Fix the cause and it becomes runnable again on its own.",
+			),
+			...section(
+				`Ran, but nobody can tell whether it worked — ${unchecked.length}`,
+				unchecked,
+				"These are the dangerous ones. A turn ended and no criterion was ever run, which is exactly " +
+					"what nine \"Done\" reports in one night turned out to be. They are not finished. Give one a " +
+					"criterion with `answer()` and it goes back into the pool, or refine it into tasks that have one.",
+			),
+			...(questions.length
+				? [
+						"",
+						`### ${questions.length} waiting on one sentence from him`,
+						"",
+						"Nothing could be read out of the request that a machine could check. Ask — being asked",
+						"ten times is better than finding out tomorrow that everything stopped. Then record the",
+						"answer with `answer(graphId, taskId, proof)`.",
+						"",
+						...questions.slice(0, 10).map((q) => `  ${q.graph}/${q.task.id} — ${q.question}`),
+					]
+				: []),
 			"",
-			...lines,
-			...woundLines,
-			"",
-			"Through rlmDelegate: `status()`, `run(graphId)`, `declare(goal, tasks)`, and",
-			"`refine(graphId, taskId, tasks)` to break a recorded request into real tasks —",
-			"each with `needs` for anything it must wait for, and a `proof` that some",
-			"command, file, row or registry entry can settle without asking anybody.",
+			"Through rlmDelegate: `status()`, `run(graphId)`, `declare(goal, tasks)`,",
+			"`refine(graphId, taskId, tasks)` to break a recorded request into real tasks — each with",
+			"`needs` for anything it must wait for and a `proof` some command, file, row or registry",
+			"entry can settle without asking anybody — and `answer(graphId, taskId, proof)` once he says how.",
 		].join("\n");
 	}
 
@@ -305,22 +324,42 @@ export class RlmDelegateService extends Service {
 		if (!text) return null;
 		const taskId = options.taskId ?? "the-request";
 		const title = (text.split("\n").find((l) => l.trim()) ?? text).trim().slice(0, 140);
+
+		// Read a criterion out of the request before settling for "nobody said".
+		// Much of what arrives says how it could be checked, in words — a plugin
+		// that has to reach ACTIVE, a command that has to be in the registry, a
+		// file that has to stop being the file it was. Deriving one costs no
+		// model call and turns a question into a check. Where nothing is
+		// confident, `unstated` is still the answer, but as a last resort.
+		//
+		// This must never be able to refuse the request: a bad guess produces a
+		// task that fails loudly, which is recoverable, while a throw here would
+		// stop work from being handed over at all.
+		let read: ReturnType<typeof derive> = null;
 		try {
-			const graph = this.store.create(text, [
-				{
-					id: taskId,
-					title,
-					prompt: text,
-					proof: {
-						kind: "unstated",
-						note: options.source
-							? `arrived from ${options.source}; nobody has said how to tell it is finished`
-							: undefined,
-					},
-				},
-			]);
-			this.ctx.emit?.("rlm/delegate-intake", { graph: graph.id, source: options.source, title });
-			this.ctx.logger?.info?.(`rlm-delegate: recorded ${graph.id} at intake — ${title}`);
+			read = derive(text, { cwd: this.config.cwd });
+		} catch (error: any) {
+			this.ctx.logger?.warn?.(`rlm-delegate: could not read a criterion: ${error?.message ?? error}`);
+		}
+		const proof = read?.proof ?? {
+			kind: "unstated" as const,
+			note: `nobody has said how to tell this is finished${options.source ? `; it arrived from ${options.source}` : ""}`,
+		};
+
+		try {
+			const graph = this.store.create(text, [{ id: taskId, title, prompt: text, proof }]);
+			this.ctx.emit?.("rlm/delegate-intake", {
+				graph: graph.id,
+				source: options.source,
+				title,
+				criterion: proof.kind,
+				why: read?.why,
+			});
+			this.ctx.logger?.info?.(
+				read
+					? `rlm-delegate: recorded ${graph.id} — ${title} (${read.why})`
+					: `rlm-delegate: recorded ${graph.id} — ${title} (no criterion could be read; this is a question)`,
+			);
 			return { graph, taskId };
 		} catch (error: any) {
 			// The floor must never be the thing that stops a request being
@@ -374,6 +413,31 @@ export class RlmDelegateService extends Service {
 			this.ctx.emit?.("rlm/delegate-failed", { graph: graphId, task: taskId, reason: detail });
 		}
 		return this.store.load(graphId);
+	}
+
+	/**
+	 * Every job waiting on one sentence from a person, as data.
+	 *
+	 * The asking is not done here — it belongs to whatever is actually talking
+	 * to him. What is guaranteed here is that the question exists, is specific,
+	 * and does not go away on its own.
+	 */
+	questions() {
+		try {
+			return this.store.questions();
+		} catch {
+			return [];
+		}
+	}
+
+	/**
+	 * Somebody said how to tell. Replace the criterion and put the task back
+	 * into the pool, so something tries again against the real thing.
+	 */
+	answer(graphId: string, taskId: string, proof: Task["proof"], by = "a person"): Graph {
+		const graph = this.store.answered(graphId, taskId, proof, by);
+		this.ctx.emit?.("rlm/delegate-answered", { graph: graphId, task: taskId, criterion: proof.kind, by });
+		return graph;
 	}
 
 	/** Turns that ended with no way to tell whether the work happened. */

@@ -50,8 +50,13 @@ export type TaskState =
 export type Proof =
 	/** Exit zero. A test, a build, a command that actually does the thing. */
 	| { kind: "shell"; run: string; cwd?: string; timeoutMs?: number }
-	/** A file exists, and optionally contains something. */
-	| { kind: "file"; path: string; contains?: string }
+	/**
+	 * A file exists, and optionally contains something — or has been touched
+	 * since a moment that was noted before the work started. `changedSince` is
+	 * what makes "fix the thing in X" checkable: nobody can satisfy it by
+	 * leaving X exactly as it was.
+	 */
+	| { kind: "file"; path: string; contains?: string; changedSince?: string }
 	/** A composition row reached a fiber state — mounted, not merely written. */
 	| { kind: "row"; id: string; state?: string }
 	/** A command or tool is actually in the live registry under this name. */
@@ -190,11 +195,22 @@ const DEAD: TaskState[] = ["failed", "rejected", "unreachable", "unproven"];
 export const outstanding = (tasks: Task[]): Task[] => tasks.filter((t) => t.state !== "done");
 
 /**
- * Work that still has somewhere to go: something could pick it up, or somebody
- * needs to look at why it stopped.
+ * Everything that is not proven done.
+ *
+ * `unproven` is in here, and that is the whole point of the state. It means a
+ * turn ended and nobody can tell whether the work happened — which is not a
+ * quieter kind of success, it is the exact failure this package exists to make
+ * impossible. Nine turns in one night ended with the word "Done" and nothing
+ * had been built; in these terms those were nine unproven tasks that everybody
+ * read as finished.
+ *
+ * An earlier version of this file left them out of "still owed" on the grounds
+ * that they would drown the live work. That was the wrong trade: if there are
+ * too many to read, the answer is to group them and count them, never to stop
+ * saying them. A state meaning "we do not know" must not be somewhere a task
+ * can come to rest.
  */
-export const owed = (tasks: Task[]): Task[] =>
-	tasks.filter((t) => t.state !== "done" && t.state !== "unproven");
+export const owed = (tasks: Task[]): Task[] => tasks.filter((t) => t.state !== "done");
 
 /**
  * Turns that ended with nobody able to say whether the work happened.
@@ -205,6 +221,18 @@ export const owed = (tasks: Task[]): Task[] =>
  * record exists whether or not anything intelligent noticed at the time.
  */
 export const unverified = (tasks: Task[]): Task[] => tasks.filter((t) => t.state === "unproven");
+
+/**
+ * Tasks whose criterion nobody could work out — each one a question waiting for
+ * a person.
+ *
+ * Not a kind of failure, and not a thing to retry: handing back a task nobody
+ * can judge produces another turn nobody can judge. What it needs is one
+ * sentence from whoever asked. Being asked ten times beats finding out tomorrow
+ * that everything stopped.
+ */
+export const unanswerable = (tasks: Task[]): Task[] =>
+	tasks.filter((t) => t.proof.kind === "unstated" && t.state !== "done");
 
 /** No task can move again without someone intervening. */
 export const isFinished = (tasks: Task[]): boolean =>
@@ -417,7 +445,9 @@ export const describeProof = (proof: Proof): string => {
 		case "shell":
 			return `\`${proof.run}\` exits 0`;
 		case "file":
-			return proof.contains ? `${proof.path} contains ${JSON.stringify(proof.contains)}` : `${proof.path} exists`;
+			if (proof.contains) return `${proof.path} contains ${JSON.stringify(proof.contains)}`;
+			if (proof.changedSince) return `${proof.path} has changed since the work started`;
+			return `${proof.path} exists`;
 		case "row":
 			return `row ${proof.id} reaches ${proof.state ?? "ACTIVE"}`;
 		case "command":
