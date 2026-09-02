@@ -250,7 +250,16 @@ export class RlmDelegateService extends Service {
 			id: "still-owed",
 			priority: 92,
 			when: "always",
-			content: () => this.owedFragment(),
+			// Never to a child. A delegated agent has been handed exactly one task
+			// and can do nothing about the other two hundred and eighty — so the
+			// whole backlog is 47,091 characters of context it cannot act on,
+			// wrapped around a 619-character job. Seventy-six to one, rebuilt from
+			// disk on every prompt, on every attempt.
+			//
+			// `intake()` already refuses for children, for the neighbouring reason
+			// that a child recording new top-level requests makes the backlog grow
+			// by working it. Same guard, same env var, same argument.
+			content: () => (process.env.RLM_DELEGATE_CHILD ? "" : this.owedFragment()),
 		});
 		if (owed?.dispose) this.teardowns.add(() => owed.dispose());
 
