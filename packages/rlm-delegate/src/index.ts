@@ -35,6 +35,7 @@ import {
 	type TaskInput,
 } from "./graph.ts";
 import { capacity, explain as explainCapacity, type CapacityVerdict } from "./capacity.ts";
+import { add as addLesson, load as loadLessons } from "./lessons.ts";
 import { derive } from "./derive.ts";
 import { check, type Probe } from "./proof.ts";
 import { run as runGraph, type Runner, type RunOptions } from "./scheduler.ts";
@@ -257,6 +258,46 @@ export class RlmDelegateService extends Service {
 		// the same things at length, per graph, with reasons — which is the wrong
 		// shape for the question "is anything missing?". This is one line per
 		// task, sorted so the stopped work cannot hide under the finished work.
+		// `rlm lesson "<his words>" -- <what happened>` — a correction becomes a
+		// standing criterion. This is the growth path, and it is the point: the
+		// reviewer's criteria have to come from him, and he changes his mind
+		// every second, so a thing he said once must start being checked without
+		// anybody editing code.
+		modes.register({
+			id: "lesson",
+			priority: 62,
+			claims: (argv: string[]) => argv[0] === "lesson",
+			run: async (argv: string[]) => {
+				const rest = argv.slice(1);
+				if (!rest.length || rest[0] === "list") {
+					const all = loadLessons();
+					for (const l of all) {
+						console.log(`  ${l.id}`);
+						console.log(`      ${l.rule}`);
+						console.log(`      he said: "${l.said}"`);
+					}
+					console.log(`\n  ${all.length} lesson(s) — every one a thing that already went wrong`);
+					return 0;
+				}
+				const split = rest.indexOf("--");
+				const said = (split === -1 ? rest : rest.slice(0, split)).join(" ").trim();
+				const incident = split === -1 ? "" : rest.slice(split + 1).join(" ").trim();
+				if (!said) {
+					console.log('  say what he said: rlm lesson "<his words>" -- <what happened>');
+					return 2;
+				}
+				// The rule is his sentence. A paraphrase of mine is the exact thing
+				// this exists to avoid.
+				const id =
+					said.toLowerCase().replace(/[^a-z0-9]+/g, "-").split("-").filter(Boolean).slice(0, 5).join("-") ||
+					`lesson-${Date.now()}`;
+				const lesson = addLesson({ id, rule: said, said, incident: incident || "(not recorded)" });
+				console.log(`  recorded ${lesson.id}`);
+				console.log(`      "${lesson.said}"`);
+				return 0;
+			},
+		});
+
 		modes.register({
 			id: "tasks",
 			priority: 61,
