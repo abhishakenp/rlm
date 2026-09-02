@@ -20,7 +20,7 @@ import { check } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/proof.ts";
 import { Gate, Stop } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/stop.ts";
 import { diagnose } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/lapse.ts";
 import { askIn, derive } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/derive.ts";
-import { alreadyTrue, noteBaselines } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/refine.ts";
+import { alreadyTrue, ephemeral, noteBaselines } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/refine.ts";
 
 let pass = 0, fail = 0;
 const t = (name: string, fn: () => void) => {
@@ -780,4 +780,86 @@ console.log("\na task that was given up on before any of this existed is picked 
 	t("and it is proven done", () => eq(state("collect-checkably"), "done", JSON.stringify(after.tasks.map((x) => [x.id, x.state]))));
 	t("the task stuck behind it is unstuck, not unreachable", () => eq(state("behind"), "done", String(state("behind"))));
 	t("nothing is left owed", () => eq(report.owed.length, 0, report.owed.join(",")));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\ntwo ways a criterion names a place that is not there");
+{
+	// Both were real, both read as the agent having done nothing, and between
+	// them they stranded thirteen tasks.
+	const work = path.join(DIR, "places");
+	fs.mkdirSync(work, { recursive: true });
+
+	// 1. `~` is a shell courtesy, not a path. `read-spec` checked
+	//    `~/proj/rlm/docs/outloop.md contains "me-1"`, the file was plainly
+	//    there, and the criterion said it did not exist.
+	const home = os.homedir();
+	const spot = path.join(home, `.rlm-proof-expand-${process.pid}.txt`);
+	fs.writeFileSync(spot, "me-1 and me-2\n", "utf8");
+	try {
+		const asWritten = `~/${path.relative(home, spot)}`;
+		const got = await check({ kind: "file", path: asWritten, contains: "me-1" });
+		t("a criterion written with ~ finds the file that is actually there", () =>
+			eq(got.verdict, "passed", `${asWritten} → ${got.verdict}: ${got.detail}`));
+		const missing = await check({ kind: "file", path: "~/.rlm-proof-definitely-absent-xyz" });
+		t("and a ~ path that really is absent still fails", () => eq(missing.verdict, "failed", missing.detail));
+	} finally {
+		fs.rmSync(spot, { force: true });
+	}
+
+	// 2. A delegated agent gets a fresh temp directory, so a criterion inside
+	//    one checks a place that existed only for the run that wrote it.
+	const fleeting = ephemeral([
+		{ id: "a", title: "a", prompt: "a", proof: { kind: "file", path: path.join(os.tmpdir(), "iris-rlm-abc", "SKILL.md"), contains: "name:" } },
+		{ id: "b", title: "b", prompt: "b", proof: { kind: "shell", run: `test -s ${path.join(work, "b.txt")}` } },
+	] as any);
+	t("a criterion inside a per-run temp directory is spotted", () =>
+		eq(fleeting.map((f) => f.id).join(","), "a", JSON.stringify(fleeting)));
+	t("and one somewhere that outlives the run is left alone", () =>
+		ok(!fleeting.some((f) => f.id === "b"), JSON.stringify(fleeting)));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\na stopped task whose criterion passes now is done, without redoing the work");
+{
+	// `read-spec` failed twice against `~/proj/rlm/docs/outloop.md` while the
+	// file sat plainly there — `~` was never expanded. Fixing the expansion has
+	// to be enough to free it and the four tasks behind it. Nobody should have
+	// to re-run work that was done correctly the first time.
+	const store = new Store(path.join(DIR, "late"));
+	const work = path.join(DIR, "late-work");
+	fs.mkdirSync(work, { recursive: true });
+	const spec = path.join(work, "outloop.md");
+
+	store.create("read the spec", [
+		{ id: "read-spec", title: "read the spec", prompt: "read it", proof: { kind: "file", path: spec, contains: "me-1" } },
+		{ id: "behind", title: "the one behind", prompt: "behind", needs: ["read-spec"], proof: { kind: "file", path: path.join(work, "behind.txt") } },
+	]);
+	const id = store.ids().find((g) => store.load(g)!.tasks.some((t) => t.id === "read-spec"))!;
+	store.ended(id, "read-spec", "failed", { ok: false, detail: "does not exist", shape: "does not exist" } as any, {
+		reason: "gave up after failing the same way 2 times",
+	});
+
+	// The work really was done — it is only the judging that was broken, and
+	// that is what has just been repaired.
+	fs.writeFileSync(spec, "me-1 and me-2\n", "utf8");
+
+	let ran = 0;
+	const report = await drive(store, {
+		runner: async (task: any) => {
+			ran += 1;
+			fs.writeFileSync(path.join(work, `${task.id}.txt`), "done\n", "utf8");
+			return "ok";
+		},
+		stop: stopFor("late"),
+		maxSweeps: 5,
+	});
+
+	const after = store.load(id)!;
+	t("the stopped task is settled from its own criterion", () =>
+		eq(after.tasks.find((x) => x.id === "read-spec")?.state, "done",
+			JSON.stringify(after.tasks.map((x) => [x.id, x.state]))));
+	t("and the work was not re-run to get there", () => eq(ran, 1, `runner called ${ran} times — only 'behind' should have run`));
+	t("the task behind it is unstuck", () => eq(after.tasks.find((x) => x.id === "behind")?.state, "done"));
+	t("nothing left owed", () => eq(report.owed.length, 0, report.owed.join(",")));
 }

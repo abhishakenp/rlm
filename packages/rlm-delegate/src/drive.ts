@@ -33,7 +33,7 @@ import { impasses, renderImpasses, type Impasse } from "./impasse.ts";
 import { needsRefining, refineOne, type Planner } from "./refine.ts";
 import { run as runGraph, type Runner } from "./scheduler.ts";
 import { Gate, Stop } from "./stop.ts";
-import type { Probe } from "./proof.ts";
+import { check, type Probe } from "./proof.ts";
 import type { Store } from "./store.ts";
 
 export interface DriveOptions {
@@ -209,6 +209,33 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 			// hands a dead end back as it runs; this is the same rule applied to
 			// the ones that already stopped, every sweep, so it is the drive's
 			// own job rather than a repair somebody has to remember to run.
+			// First, and regardless of whether anybody can re-plan: a stopped task
+			// whose criterion passes now is done. The criterion is the arbiter
+			// everywhere else in this file, and it does not stop being the
+			// arbiter because an earlier attempt was judged against a broken
+			// version of it. `read-spec` failed twice on
+			// `~/proj/rlm/docs/outloop.md` while the file sat plainly there,
+			// because `~` was never expanded; fixing that must be enough to free
+			// it, without anybody re-running the work.
+			let settledLate = 0;
+			for (const graph of open) {
+				for (const task of graph.tasks) {
+					if (task.state !== "failed") continue;
+					const settled = await check(task.proof, { cwd: options.cwd, probe: options.probe }).catch(() => null);
+					if (settled?.verdict !== "passed") continue;
+					store.ended(graph.id, task.id, "done", { ok: true, detail: settled.detail, proofDetail: settled.detail } as any, {
+						result: `its criterion passes now: ${settled.detail}`,
+					});
+					say("rlm/drive-settled-late", { graph: graph.id, task: task.id, detail: settled.detail });
+					settledLate += 1;
+				}
+			}
+			// `unreachable` is derived from what a task stands on, so freeing the
+			// parent frees the children — but only on a fresh read. Working from
+			// the list loaded before the repair would leave them unreachable for
+			// the rest of the sweep, which is the whole bug wearing a new hat.
+			if (settledLate) open = store.open().filter((g) => !options.only?.length || options.only.includes(g.id));
+
 			if (planner) {
 				for (const graph of open) {
 					for (const task of graph.tasks) {

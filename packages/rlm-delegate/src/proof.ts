@@ -15,7 +15,25 @@
  */
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { Proof } from "./graph.ts";
+
+/**
+ * `~` is a shell courtesy, not a path.
+ *
+ * `existsSync("~/proj/rlm/docs/outloop.md")` is false while the file is
+ * plainly there, so the criterion read "does not exist", the task was charged
+ * two failed attempts, and four tasks went unreachable behind it. The agent
+ * had very likely done the work. Nobody writing a criterion by hand thinks
+ * about this, and they should not have to.
+ */
+export const expand = (path: string): string => {
+	if (path === "~") return homedir();
+	if (path.startsWith("~/")) return join(homedir(), path.slice(2));
+	if (path.startsWith("$HOME/")) return join(homedir(), path.slice(6));
+	return path;
+};
 
 export interface ProofResult {
 	verdict: "passed" | "failed" | "errored" | "unstated";
@@ -74,11 +92,12 @@ export const check = async (
 		}
 
 		case "file": {
-			if (!existsSync(proof.path)) return { verdict: "failed", detail: `${proof.path} does not exist` };
+			const path = expand(proof.path);
+			if (!existsSync(path)) return { verdict: "failed", detail: `${proof.path} does not exist` };
 			if (proof.changedSince) {
 				let touched = 0;
 				try {
-					touched = statSync(proof.path).mtimeMs;
+					touched = statSync(path).mtimeMs;
 				} catch (error: any) {
 					return { verdict: "errored", detail: `could not stat ${proof.path}: ${error?.message ?? error}` };
 				}
@@ -89,7 +108,7 @@ export const check = async (
 			if (proof.contains) {
 				let text = "";
 				try {
-					text = readFileSync(proof.path, "utf8");
+					text = readFileSync(path, "utf8");
 				} catch (error: any) {
 					return { verdict: "errored", detail: `could not read ${proof.path}: ${error?.message ?? error}` };
 				}
@@ -142,7 +161,8 @@ export const check = async (
 
 		case "shell": {
 			try {
-				const { code, out } = await shell(proof.run, proof.cwd ?? options.cwd, proof.timeoutMs ?? 60_000);
+				const where = proof.cwd ?? options.cwd;
+				const { code, out } = await shell(proof.run, where ? expand(where) : undefined, proof.timeoutMs ?? 60_000);
 				const tail = out.split("\n").slice(-12).join("\n");
 				return code === 0
 					? { verdict: "passed", detail: tail || `${proof.run} exited 0` }

@@ -25,6 +25,9 @@
  *     heading for a question. A bad decomposition that gets written down is
  *     worse than none, because it looks like progress.
  */
+import { existsSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname } from "node:path";
 import { askIn } from "./derive.ts";
 import { describeProof, type Graph, type Proof, type Task, type TaskInput } from "./graph.ts";
 import { check } from "./proof.ts";
@@ -114,6 +117,56 @@ export const alreadyTrue = async (
  * it. Nothing here judges: it only writes down what was true at the one moment
  * when the answer is known for certain.
  */
+/**
+ * Criteria that name a place which will not be there next time.
+ *
+ * A delegated agent runs in a fresh temp directory, so a criterion like
+ * `/var/folders/…/T/iris-rlm-mkzFts/skills/fashion-trends/SKILL.md contains …`
+ * is checking a directory that existed only for the run that wrote it. It
+ * cannot hold afterwards no matter how well the work was done, and it fails
+ * with "does not exist", which reads exactly like the agent having done
+ * nothing. Two tasks failed this way and nine went unreachable behind them.
+ *
+ * This is decidable before anybody starts, which is the only good moment: the
+ * plan is refused and the planner is told to name somewhere that outlives the
+ * run.
+ */
+export const ephemeral = (tasks: TaskInput[]): Array<{ id: string; where: string }> => {
+	// Both spellings: macOS hands out /var/folders/… while realpath gives
+	// /private/var/folders/…, and a plan can carry either.
+	let real = tmpdir();
+	try {
+		real = realpathSync(tmpdir());
+	} catch {
+		/* the temp dir is always there; if it is not, nothing below matters */
+	}
+	const temporary = (place: string) => [real, tmpdir(), "/tmp/"].some((prefix) => place.includes(prefix));
+
+	const found: Array<{ id: string; where: string }> = [];
+	for (const task of tasks) {
+		const proof: any = task.proof;
+		if (!proof) continue;
+		const places = [proof.path, proof.cwd].filter((x): x is string => typeof x === "string");
+		// A shell criterion carries its paths inside the command text, so the
+		// whole command is searched for a temp path rather than parsed.
+		if (typeof proof.run === "string") {
+			for (const word of proof.run.split(/\s+/)) if (temporary(word)) places.push(word);
+		}
+		for (const place of places) {
+			if (!temporary(place)) continue;
+			// Under the temp area *and* nothing there yet. A workspace somebody
+			// deliberately made for this run exists already and is fine to check
+			// against; a directory the plan merely imagines is one the agent will
+			// create fresh, differently, on every attempt.
+			const parent = dirname(place);
+			if (existsSync(parent)) continue;
+			found.push({ id: task.id, where: place });
+			break;
+		}
+	}
+	return found;
+};
+
 export const noteBaselines = async (tasks: TaskInput[], cwd?: string): Promise<void> => {
 	for (const task of tasks) {
 		if (task.proof?.kind !== "shell") continue;
@@ -181,6 +234,18 @@ export const refineOne = async (
 		}
 		// Before it is written down: did any of these already pass, with nobody
 		// having done anything? Those are receipts, not criteria.
+		// Somewhere that will not exist next time is not somewhere.
+		const fleeting = ephemeral(tasks);
+		if (fleeting.length) {
+			refusal =
+				`${fleeting.length} of your criteria point inside a temporary directory that only exists for one ` +
+				`run: ${fleeting.map((f) => `${f.id} (${f.where})`).join("; ")}. ` +
+				`Whoever does the work gets a different temporary directory, so the check will say the file is ` +
+				`missing however well the work was done. Name somewhere that outlives the run.`;
+			say("rlm/delegate-refine-refused", { graph: graph.id, task: task.id, why: refusal, ephemeral: fleeting.map((f) => f.id) });
+			continue;
+		}
+
 		if (!options.allowVacuous) {
 			const vacuous = await alreadyTrue(tasks, options.cwd);
 			if (vacuous.length) {
