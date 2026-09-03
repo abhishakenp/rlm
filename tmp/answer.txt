@@ -1,0 +1,39 @@
+FINDINGS SUMMARY
+
+1. CORDIS.YML LINES 530-580
+   - cordis.yml has only 276 lines. Lines 530-580 do not exist.
+   - The file contains NO "evolve" anywhere.
+   - The effective composition DOES include evolve via overlay ~/.rlm/cordis.patch.yml.
+
+2. IRIS-EVOLVE IMPLEMENTATION
+   - Source: /Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts
+   - Propose vs Act distinction:
+     * mode: 'propose' (DEFAULT): Finds gaps/shapes, offers suggestions via iris-suggest, writes to journal. Changes NOTHING.
+     * mode: 'act': Finds gaps/shapes, claims autonomy budget, calls rlm.delegate() to learn skills. Also gated by autonomy (quiet hours, kill switch still block).
+   - Config to enable act: mode: 'act' in evolve config.
+   - "outcome: nothing" = NORMAL HEALTHY - means cycle ran and found nothing worth acting on. NOT a failure.
+
+3. RLM SELF-EVOLUTION
+   - RLM uses the "refine" row (not iris-evolve). The refine row wraps the coding-agent refinement system.
+   - The "evolve" in iris-commands is a stub that only returns status "available".
+   - The actual evolve row is defined in the overlay file, not base cordis.yml.
+
+4. CHECK FAILURE EXPLANATION
+   - The check `grep "evolve" /Users/abhi/proj/rlm/cordis.yml` fails because base cordis.yml has NO "evolve".
+   - But the OVERLAY (~/.rlm/cordis.patch.yml) DOES have:
+     - id: evolve
+     - name: ./packages/rlm-refine/src/index.ts
+   - The effective composition (base + overlay) DOES include evolve.
+   - The guard blocks direct edits to cordis.yml, but the overlay is the proper mechanism.
+   - The check is looking at the wrong place—it should search the effective composition.
+
+5. SELF-EVOLUTION TESTS
+   - 15 tests in iris-evolve/test/evolve.test.ts covering all 5 outcomes and both modes.
+   - More tests in iris-sama/iris-kernel test files.
+
+RECOMMENDATION
+- The check should be updated to search both the base file AND the overlay file, or better, search the effective composition.
+- If you absolutely need "evolve" in base cordis.yml, you would need to add it there, but the overlay is the intended mechanism.
+- The overlay already contains the evolve row pointing to rlm-refine, so self-evolution is working.
+
+All details written to /Users/abhi/proj/rlm/tmp/findings.json

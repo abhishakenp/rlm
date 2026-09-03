@@ -1,0 +1,276 @@
+# rlm — the application, as data.
+#
+# This file IS rlm. Every capability is a row; there is no privileged core and
+# no row that needs a restart to change. Load order comes from what each row
+# injects, never from position here — position is for reading.
+#
+#   Recording      log
+#   Boot           boot                    where things are, the overlay, shutdown
+#   Reload         timer, hmr, rlm-hmr
+#   Foundation     config, context, tui, prompt
+#   Self-extension compose, plugins, self  rlm's hands on this file
+#   Core           session, tools, refine, code, workflow, learn, gitpixel
+#   Agent          agent                   the LLM loop
+#   Presentation   renderer, print, sdk, modes
+#
+# The user's overlay is `~/.rlm/cordis.patch.yml`, layered over this file by the
+# `boot` row and re-applied whenever it changes. Everything rlm decides about
+# itself is written there and nowhere else, so `git diff` on this file only ever
+# shows what a person did, and deleting the overlay returns rlm to stock.
+#
+# ## Hot reload, accurately
+#
+# `fiber.restart()` is NOT the mechanism, and three places in this repo used to
+# say it was. It re-runs the plugin callback against the *cached* module, so a
+# source edit has no effect. What actually happens is
+# `registry.delete(oldPlugin)` followed by `registry.plugin(newPlugin,
+# oldFiber._config)` for each live fiber, after the changed modules and
+# everything downstream of them have been evicted from Node's ESM load cache.
+# `@deepseek-ai/cordis-plugin-hmr` does that; `rlm-hmr` adds what it does not —
+# watching the resource directories (skills, extensions, prompts, workflows)
+# that live outside the module graph, and translating a reload into the events a
+# live AgentSession listens for.
+#
+# Two fibers of one row therefore coexist for as long as the old disposer takes.
+# That is what lets in-flight work finish, and it is why anything singleton — a
+# port, a lock, a sidecar — has to be acquired inside `ctx.effect()`.
+
+# ─── Recording ───────────────────────────────────────────────────────────────
+#
+# First row of all: everything after it can be explained from the log, and a
+# failure during boot is exactly the one you cannot reproduce on demand.
+
+- id: log
+  name: './packages/rlm-log/src/index.ts'
+  config:
+    level: info
+
+# ─── Boot ────────────────────────────────────────────────────────────────────
+#
+# Second, because everything below it wants to know where the repo and the
+# home directory are, and because the overlay it layers on top of this file has
+# to be in place before rows start reading their own config. `cordis-shell.mjs`
+# used to do all of this; a bug in any of it therefore cost a restart, which is
+# the one thing rlm is not allowed to need in order to change itself.
+
+- id: boot
+  name: './packages/rlm-boot/src/index.ts'
+
+# ─── Who is watching ─────────────────────────────────────────────────────────
+#
+# Every row below that carries `inject: [rlmLive]` exists for a person sitting
+# at a terminal, and this row is what decides whether there is one. It hands
+# out `rlmLive` when somebody is watching and withholds it when nobody is, so a
+# `--print` child — fifteen seconds long, one question, no terminal — never
+# starts them at all.
+#
+# Withheld rather than disabled on purpose. Rows mount concurrently (the loader
+# creates every entry in one `Promise.allSettled`), so a row that reached in
+# and switched `hmr` off would always be switching off a watcher that had
+# already opened its 1,207 file descriptors. A row waiting on a service that
+# never arrives opens nothing.
+#
+# The park list is here rather than in that row's config because this is where
+# it belongs: "this exists for a human" is a fact about the composition, it is
+# visible in `rlm rows` beside everything else, and the overlay can add a row
+# to the set or take one out without touching any code.
+
+- id: headless
+  name: './packages/rlm-headless/src/index.ts'
+
+# ─── Reload ──────────────────────────────────────────────────────────────────
+#
+# First rows on purpose: reload is itself a fiber, so editing a plugin reloads
+# it. `hmr` is the upstream plugin DSH declares in its own base composition —
+# it traces Node's module graph, clears the affected caches and swaps only the
+# plugin entries that depend on what changed. `rlm-hmr` adds the two things it
+# does not do: it watches the agent's resource directories (skills, extensions,
+# prompts, workflows live outside the repo and are not modules) and translates
+# reload announcements into the events a live AgentSession listens for. With no
+# official plugin present — under bun, or without --expose-internals — rlm-hmr
+# reloads modules itself instead.
+#
+# Both are `rlmLive`, and `hmr` is the expensive one: chokidar cannot resolve
+# `fsevents` in this repo, so it falls back to one `fs.watch` per file and
+# holds 1,207 open descriptors over `packages/` — every README, CHANGELOG, PNG
+# and .pyc included — all of them stat'd and opened before the first token is
+# asked for. Nothing edits a file during a fifteen-second answer.
+#
+# `rlm-hmr` has to be parked alongside it and not on its own: in `auto` mode it
+# falls back to watching everything *itself* when the official plugin is
+# absent, so parking only `hmr` would move the cost rather than remove it.
+
+- id: timer
+  name: '@deepseek-ai/cordis-plugin-timer'
+
+- id: hmr
+  name: '@deepseek-ai/cordis-plugin-hmr'
+  inject: ['rlmLive']
+  config:
+    root: ['packages']
+    ignored: ['**/node_modules', '**/dist', '**/.*']
+    debounce: 100
+
+- id: rlm-hmr
+  name: './packages/rlm-hmr/src/index.ts'
+  inject: ['rlmLive']
+  config:
+    roots: ['packages']
+    debounce: 100
+
+# ─── Foundation ──────────────────────────────────────────────────────────────
+
+- id: config
+  name: './packages/rlm-config/src/index.ts'
+  config:
+    cwd: .
+
+- id: context
+  name: './packages/rlm-context/src/index.ts'
+  config:
+    projectRoot: .
+
+# `rlmLive`: panels, spinners and key handling, for a terminal a one-shot answer
+# does not have. Reached from a code cell as `tui.*` through a `globalThis`
+# proxy that already tolerates its absence, so a headless run degrades rather
+# than throws.
+- id: tui
+  name: './packages/rlm-tui/src/index.ts'
+  inject: ['rlmLive']
+
+- id: prompt
+  name: './packages/rlm-prompt/src/index.ts'
+
+# ─── Self-extension ──────────────────────────────────────────────────────────
+#
+# The three rows that make this file writable by the thing it composes.
+# `compose` reads the composition and writes the overlay; `plugins` scaffolds a
+# package, mounts it, and refuses to call a row that did not start "mounted";
+# `self` is the seam that puts both in reach of a code cell, as `self.*`.
+#
+# They are three rows and not one because the capability and the surface it is
+# offered through are different concerns: a second surface (a slash command, a
+# socket) is a new row beside `self`, not an edit to `plugins`.
+
+- id: compose
+  name: './packages/rlm-compose/src/index.ts'
+
+- id: plugins
+  name: './packages/rlm-plugins/src/index.ts'
+  config:
+    staleAfterMinutes: 30
+    rollbackOnFailure: true
+    mountTimeout: 4000
+
+- id: self
+  name: './packages/rlm-self/src/index.ts'
+
+# ─── Core ────────────────────────────────────────────────────────────────────
+
+- id: session
+  name: './packages/rlm-session/src/index.ts'
+
+- id: tools
+  name: './packages/rlm-tools/src/index.ts'
+  config:
+    timeout: 60000
+    maxOutputChars: 65536
+
+- id: refine
+  name: './packages/rlm-refine/src/index.ts'
+
+- id: code
+  name: './packages/rlm-code/src/index.ts'
+  config:
+    timeout: 60000
+    maxOutputChars: 65536
+
+- id: workflow
+  name: './packages/rlm-workflow/src/index.ts'
+  config:
+    workflowsDir: ~/.rlm/agent/workflows
+
+# The delegation loop's memory. Above `workflow` in reading order because the
+# workflow that does the delegating asks this row for the list first: what was
+# asked is written down before any of it is attempted, and it is still written
+# down after the process that was attempting it has gone. Load order still comes
+# from `inject` — this row injects nothing, so it is up early either way.
+#
+# It also contributes two prompt fragments, both read from disk when the prompt
+# is built rather than at mount: what is still owed, and the current source of
+# the delegator workflow itself.
+- id: delegate
+  name: './packages/rlm-delegate/src/index.ts'
+
+# The row that keeps the fleet from editing the thing that bounds the fleet.
+#
+# `capacity()` in the delegate row decides how many children may run at once,
+# and it reads that off the machine rather than from a setting. Every child is
+# an rlm with a `code` tool, so without this row a task that will not start can
+# be "fixed" by raising the ceiling that stopped it — which is how the laptop
+# hosting the fleet dies.
+#
+# Two layers, and both are in the row rather than bolted into what they defend:
+# a `tool_call` handler that refuses a cell writing a protected path, and a
+# watcher that puts back an unauthorised change however it got there.
+#
+# `protect` extends the list; it cannot shorten it. The guard's own source and
+# this file are protected whatever is written here, because otherwise the
+# shortest way through the door is to edit the door or delete this row.
+#
+# Above `learn` in reading order only. Load order comes from `inject`.
+- id: guard
+  name: './packages/rlm-guard/src/index.ts'
+  config:
+    cwd: .
+    protect:
+      - 'packages/rlm-delegate/src/capacity.ts'
+    restore: true
+    debounceMs: 400
+    unlockMaxMinutes: 60
+
+- id: learn
+  name: './packages/rlm-learn/src/index.ts'
+  config:
+    reflectInterval: 60000
+    maxLearningsBeforeReflect: 10
+
+- id: gitpixel
+  name: './packages/rlm-gitpixel/src/index.ts'
+  config:
+    cwd: .
+    warmOnStart: true
+
+
+# ─── Agent ───────────────────────────────────────────────────────────────────
+
+- id: agent
+  name: './packages/rlm-agent/src/index.ts'
+  config:
+# `rlmLive`: this row *is* the interactive surface. The `interactive` mode is
+# the only thing that asks for it, and that mode cannot be reached in a run
+# nobody is watching — `--headless` implies `--print`.
+- id: renderer
+  name: './packages/rlm-tui-renderer/src/index.ts'
+  inject: ['rlmLive']
+  config:
+    cwd: .
+
+- id: print
+  name: './packages/rlm-print/src/index.ts'
+  config:
+    cwd: .
+
+- id: sdk
+  name: './packages/rlm-sdk/src/index.ts'
+  config:
+    maxDepth: 10
+    defaultModel: auto/best-free
+
+# Which face rlm shows for this invocation. Last, because a mode runs the rows
+# above it and there is nothing to run until they are there. The host asks this
+# row what to do and does it; that is the whole of `main()` now.
+
+- id: modes
+  name: './packages/rlm-modes/src/index.ts'
+

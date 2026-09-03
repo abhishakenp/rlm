@@ -1,0 +1,10 @@
+Testing proofs with quoted strings:
+
+Proof 1: shell command with single quotes
+Command: echo 'hello world'
+
+Proof 2: shell command with double quotes  
+Command: echo "test value"
+
+Proof 3: file contains with quoted substring
+Contains: "quoted content"

@@ -1,0 +1,7 @@
+=== me-1-proposer ===
+./diagnosis/rlm-acpx-iris-failures.md
+
+=== me-2-reviewer ===
+./scripts/check-skills.test.ts
+./packages/rlm-delegate/src/scheduler.ts
+./packages/rlm-delegate/drive.test.ts

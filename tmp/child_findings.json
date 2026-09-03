@@ -1,0 +1,59 @@
+{
+  "cordis_analysis": {
+    "lines_count": 276,
+    "lines_530_580": "DO NOT EXIST - file is only 276 lines",
+    "evolve_in_base": false,
+    "evolve_in_overlay": true,
+    "overlay_path": "~/.rlm/cordis.patch.yml",
+    "overlay_content": ""
+  },
+  "iris_evolve_implementation": {
+    "source": "/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts",
+    "propose_vs_act": {
+      "mode: propose (default)": "Finds gaps/shapes, offers suggestion via iris-suggest, writes journal. Changes NOTHING. costs zero autonomy budget.",
+      "mode: act": "Finds gaps/shapes, claims autonomy budget, calls rlm.delegate() to learn a skill. Skill written to disk. Also gated by autonomy (quiet hours, kill switch still block it)."
+    },
+    "config_to_enable_act": "mode: 'act' in evolve config. Example: - id: evolve\\n  name: ./path/to/iris-evolve/src/index.ts\\n  config:\\n    mode: act\\n    enabled: true",
+    "five_outcomes": {
+      "nothing": "NORMAL HEALTHY - cycle ran successfully, found nothing worth acting on. NOT a failure.",
+      "proposed": "Found something, offered as suggestion via iris-suggest",
+      "acted": "Found something, delegated to rlm, learned a skill",
+      "blocked": "Found something but autonomy said no (no rlm row, quiet hours, kill switch)",
+      "failed": "Delegation to rlm returned error"
+    }
+  },
+  "rlm_self_evolution": {
+    "mechanism": "The \"refine\" row in cordis.yml wraps the coding-agent refinement system",
+    "refine_source": "/Users/abhi/proj/rlm/packages/rlm-refine/src/index.ts",
+    "evolve_command": "Stub only - just returns status \"available\", no implementation. Defined in iris-commands.",
+    "iris_commands_evolve": "Returns {command: evolve, status: available, usage: iris evolve} — a stub"
+  },
+  "check_failure_explanation": {
+    "what_check_runs": "grep \"evolve\" /Users/abhi/proj/rlm/cordis.yml",
+    "why_it_fails": "Base cordis.yml has no \"evolve\" entry. Evolve IS in overlay (~/.rlm/cordis.patch.yml) as id: evolve pointing to rlm-refine.",
+    "effective_composition_has_evolve": true,
+    "how_rlm_works": "boot row layers ~/.rlm/cordis.patch.yml over base cordis.yml. The overlay IS the composition mechanism.",
+    "guard_blocks_direct_edits": "rlm-guard protects cordis.yml. Cannot write it directly from a code cell."
+  },
+  "self_evolution_tests": {
+    "main_test_file": "/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/test/evolve.test.ts",
+    "test_count": 15,
+    "outcomes_tested": [
+      "nothing",
+      "proposed",
+      "acted",
+      "blocked",
+      "failed"
+    ],
+    "modes_tested": [
+      "propose",
+      "act"
+    ],
+    "other_test_files": [
+      "/Users/abhi/proj/sensei/iris-sama/iris-kernel/test/evolve-goals.test.ts",
+      "/Users/abhi/proj/sensei/iris-sama/iris-kernel/test/kernel-evolve.test.ts",
+      "/Users/abhi/proj/sensei/iris-sama/iris-kernel/test/evolve-scheduler.test.ts",
+      "/Users/abhi/proj/sensei/iris-mama/packages/iris-lapse/test/lapse.test.ts"
+    ]
+  }
+}

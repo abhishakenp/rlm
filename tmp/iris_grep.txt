@@ -1,0 +1,76 @@
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/nl.ts:73:/** Whether a probed `llm` service can actually answer a prompt. */
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/nl.ts:96: * The commands worth putting in front of the model, best first.
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/nl.ts:108: * to the top one. So the two halves fit: the matcher narrows, and the model,
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/nl.ts:109: * which is good at exactly the thing the matcher is bad at, chooses.
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/nl.ts:116:  // `0` is the escape hatch: show the model everything, accept the cost. On a
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/nl.ts:144: * Three things happen after the model speaks, and all three are the difference
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/nl.ts:149: *    than reported — the model can be inventive about names in a way that
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/nl.ts:152: *    `unsure` with whatever candidates the model offered, which is the same
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/nl.ts:158: *    a suggestion, because a model that says 0.3 is telling you something and
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/nl.ts:176:   * nothing to narrow — and that is exactly the sentence a model is *most*
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/nl.ts:211:  // The model declining. `candidates` is advisory, so anything it names that
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/nl.ts:246: * The command list as the model sees it. Examples do most of the work.
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/nl.ts:248: * `compact` drops the parameter descriptions and the examples, keeping names,
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/nl.ts:251: * only when the alternative is showing the model nothing at all. See the
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/nl.ts:254:export function buildPrompt(commands: CommandInfo[], text: string, compact = false): string {
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/nl.ts:258:      if (compact) {
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/nl.ts:283:    '  {"name": "<exact name from the list>", "args": {"<parameter>": "<value>"}, "confidence": <0 to 1>}',
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/nl.ts:288:    '- Use only names spelled exactly as they appear above. Never invent one.',
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/nl.ts:367:  // An exact command name anywhere in the text settles it with no scoring.
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/nl.ts:400:  // question rather than an action.
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/protocol.ts:11: * These types are the contract, not the implementation. `bin/iris` is plain
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/protocol.ts:13: * first would be unusable exactly when you need it most, which is when Iris is
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/protocol.ts:41:   * only place that fact is actually known — a pipe gets structure, a terminal
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/protocol.ts:61:   * put a model call in front of the shortest screen Iris has.
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:18: * a client, and the answer comes from the one that is actually running.
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:50:    /** A terminal attached or detached. @mode emit */
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:52:    /** A request was served: op, whether it succeeded, milliseconds. @mode emit */
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:70:  /** Put the one line about acting through `iris` on the per-turn channel too. */
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:85:    .description('Accept plain-English requests, not just exact command names.')
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:98:      'How many commands are put in front of the fast model when it is working out what you meant. It sees the ones whose words are closest to what you said, so this is a trade between how much it costs to ask and how sure you are the right command was on the list. Zero shows it everything, which is slower and, on a metered provider, much more expensive.',
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:103:      'How sure the model has to say it is before Iris acts on its choice rather than offering it, from 0 to 1. Below this you get the suggestion instead of the action.',
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:106:  // outright won because the user's own words named the command; a model can
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:112:      'Ask before running a command that changes something, when it was the model that worked out which command you meant. Iris says exactly what she would run and waits; say yes, or paste the line yourself. Turning this off lets a plain-English sentence change your setup on a model’s guess, with nothing in between.',
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:125:  // characters and a maximum of 156 — so a cap near the median keeps almost
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:132:      'How many characters of each command’s summary go into the catalogue in her system prompt. The whole catalogue is resent on every turn of a conversation, so this is a direct trade between how much she is told about each command up front and what every model call costs. Zero means no gist at all — names only.',
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:137:      'Also put one line — that acting means running one of her own `iris` commands — on the per-turn channel, beside the decision rather than at the top of a 33,000-character prompt. These are the exact words that were measured to turn a refusal into a correct first call; they were hardcoded at one call site and are registered here so every turn gets them. Off leaves only the catalogue section above.',
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:151: * person would actually want to change — how long to wait at all — is
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:162: * an over-long socket path did exactly that and took the process out with an
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:203:   * they send a model confidently at a command that no longer exists.
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:206:   * is the surface that already has to be complete and current. rlm acts by
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:207:   * running `iris <command>`, so what the CLI can reach is exactly what Iris
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:250:   * present, 4,649 characters above the decision, and lost to a habit all
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:297:   * example inline, and at 120 commands that was 38k characters — 71% of her
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:299:   * enough on its own to put her over a hosted model's request ceiling.
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:305:   * exact bug and was fixed the same way.
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:307:   * What survives is what a chooser actually needs: which commands exist, one
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:311:   * first are qualification, which is exactly what `help` is for.
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:335:          'You act by running `iris`, one command per invocation. It prints a string or',
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:414:        // trying to bind this exact path — `partialReload` imports every
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:511:   * can tell apart exactly: more than one evaluation means a predecessor of
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:658:      // natural-language path buries a one-character typo under a paragraph
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:675:   * — every `list` sees exactly what Iris can do at the moment of asking.
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:693:   * and three lines away from the actual problem, which was `set` for `use`.
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:743:   * model's guess.** The word matcher is allowed to, and that is not an
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:746:   * their own sentence. A model can reach a command through a chain of
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:750:   * The interaction is a *staged* confirmation rather than an interactive
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:753:   * means "waiting for you". So the offer is a refusal that quotes the exact
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:771:    // no longer exists. Measured: `IRIS_HUMAN=0 iris "activate the browser"`
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:779:    // the same caller can already issue `iris control.activate ref="browser"`
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:781:    // and it refuses a *phrasing*, not an action. Making the refusal
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:782:    // actionable therefore moves no authority; it stops wasting a delegation
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:783:    // on impossible advice. The interlock that would actually close the hole
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:804:    // the single most dangerous sentence this path could produce. The exact
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:820:   * on it two sentences later is exactly the accident the offer exists to
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:884:    // Costing a model call — or a side effect — to answer that would defeat
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:932:    // Ground truth, and the last gate before anything runs. The model was
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:957:    // model reasoned about, not less.
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:983:    // where the limitation is the actual reason they did not get what they
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/index.ts:1015: * it is the model's signal that there is more, and the section above tells it
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/resolve.ts:10: * one-character-class typo it was about to be. A token with a dot in it and no
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/resolve.ts:17: * a command carries for the model — which one every caller sets. That is
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/resolve.ts:56:/** Overlapping letter pairs in common, as a fraction. */
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/resolve.ts:117:  /** The one obvious answer, when exactly one is clearly ahead of the rest. */
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/resolve.ts:132: * characters of `voice.` drown the three that are actually wrong, and puts
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/resolve.ts:211: * moment two answers are possible. Guessing between two parameters is exactly
+/Users/abhi/proj/sensei/iris-mama/packages/iris-cli/src/resolve.ts:218: * the model's benefit and are written by whoever wrote the command, which

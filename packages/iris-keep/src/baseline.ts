@@ -16,7 +16,7 @@ export function ignored(path: string): boolean {
   // New test file patterns
   if (/.(test|spec).(ts|js)$/.test(p)) return true; // *.test.ts, *.spec.ts, *.test.js, *.spec.js
   // Test directories: test/, __tests__/, tests/
-  if (/^test\//.test(p) || /^__tests__\//.test(p) || /^tests\//.test(p)) return true;
+  if (/^test\//.test(p) || /^__tests___\//.test(p) || /^tests\//.test(p)) return true;
 
   // If none of the above, do not ignore
   return false;

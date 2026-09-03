@@ -1,0 +1,78 @@
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:7: * there was nothing for them to act on — no command registry to compose, no
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:18: * cycle end in exactly one of five outcomes rather than in a paragraph.
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:22: * **One action per cycle, chosen deterministically.** Not a plan, not a
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:26: * **Propose by default; act only when told to.** `mode: 'propose'` is the
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:28: * `iris-suggest` and writes it down. Turning on `act` is a separate, described
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:29: * decision, and even then every action goes past `iris-autonomy` first.
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:33: * a cycle inventing work to justify itself, which is exactly what 1,091
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:50:    /** A cycle finished, whatever it decided. Carries the whole entry. @mode emit */
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:59:  mode: 'propose' | 'act'
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:75:  mode: Schema.union(['propose', 'act'] as const)
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:76:    .default('propose')
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:78:      '`propose` means she works out what would help and offers it to you, changing nothing. `act` means she goes ahead — currently that means asking the stronger model to teach her something you have asked for three times and could not have. Start on `propose` and read a week of `evolve.log` before changing it.',
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:86:      'How long after starting up before the first look, in milliseconds. Five minutes by default: the first minute after boot is the worst possible time to start background work, and a plugin that acts the instant it loads is one you cannot safely restart.',
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:96:    .description('How many times you must have asked for the same missing thing before a cycle will act on it. This is on top of the gaps row’s own threshold, so it can be made stricter here without changing what she notices.'),
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:100:      'How many times she must have failed the *same way* before a cycle will put it to you. On top of the lapse row’s own threshold, so it can be made stricter here without changing what she notices. A repeated failure is a fact about the system, not about one mistake, and it is deliberately harder to trip than noticing one.',
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:177:      `evolve: looking every ${this.config.everyMinutes}min in ${this.config.mode} mode, first in ${Math.round(this.config.firstRunDelayMs / 1000)}s`,
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:197:        action: null,
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:212:        action: null,
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:250:    // time is the exact move that produced the six.
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:252:    if (shape) return this.proposeShape(shape, { unattended, observed, started, lapse, suggest, autonomy })
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:260:        action: null,
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:266:        // could act on.
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:279:    const action = { kind: 'gap.learn', what: `have rlm work out how to "${top.exemplar}" and keep the skill`, target: top.id }
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:281:    // Propose mode is the shipped one and it changes nothing. The idea goes to
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:283:    if (this.config.mode !== 'act') {
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:291:              action: `iris ask text="${top.exemplar}"`,
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:295:      // Claimed either way: the point of proposing is to propose once.
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:296:      gaps?.claim?.(top.id, 'evolve:proposed')
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:301:        action,
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:302:        outcome: 'proposed',
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:309:    // ── act mode ────────────────────────────────────────────────────────────
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:315:        action,
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:317:        reason: 'the autonomy row is not mounted, and she does not act unasked without it',
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:326:        action,
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:335:      what: action.what,
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:338:      // deliberately not a model's opinion of itself: the evidence that this
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:352:        action,
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:360:    if (!gaps?.claim?.(top.id, 'evolve:acting')) {
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:366:        action,
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:396:        action,
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:410:      action,
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:411:      outcome: 'acted',
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:420:   * A repeated failure, put to him and never acted on.
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:426:   * **It is proposed in `act` mode too, and not by an `if`.** The change a
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:432:   * case written here: if he ever decides a self-diagnosis may act, he says so
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:438:  private async proposeShape(
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:445:    const action = { kind: 'lapse.fix', what: proposal?.change ?? finding.cause.sentence, target: finding.shapeId }
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:448:    if (this.config.mode === 'act') {
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:462:        action,
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:482:            action: `iris lapse.why id=${finding.shapeId}`,
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:486:    // Claimed either way: the point of proposing is to propose once.
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:487:    lapse?.claim?.(finding.shapeId, 'evolve:proposed')
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:492:      action,
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:493:      outcome: 'proposed',
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:503:   * Probed per call rather than captured, so the redact row reloading — which
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:505:   * with a config that no longer exists. A redactor that throws returns the
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:510:    const redact = this.ctx.get('redact') as { text(input: string): string } | undefined
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:511:    if (!redact) return text
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:513:      return redact.text(text)
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:550:      redacted: 'write',
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:562:    // Mirrored into the one log with the fields intact, so that `log.why` can
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:564:    // three things read its exact shape — but a cycle that only exists in a
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:578:        action: entry.action?.kind,
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:600:      mode: this.config.mode,
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:603:      acted: by('acted'),
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:604:      proposed: by('proposed'),
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:658:        // is a reaction to.
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:683:          s.enabled ? `On, every ${s.everyMinutes} minutes, in ${s.mode} mode.` : 'Off — cycles only run when you ask.',
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/index.ts:684:          `${s.cycles} cycles: ${s.acted} acted, ${s.proposed} proposed, ${s.nothing} found nothing, ${s.blocked} blocked, ${s.failed} failed.`,
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/journal.ts:23:  | 'proposed'
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/journal.ts:25:  | 'acted'
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/journal.ts:26:  /** Found something and was not allowed to act. `reason` says who said no. */
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/journal.ts:42:  action: { kind: string; what: string; target?: string } | null
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/journal.ts:46:  /** Exactly how to reverse it, when something happened. */
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/journal.ts:59: * valid composition — it finds things and proposes them and never acts. Thirty
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/journal.ts:96:     * `@iris/redact` intercepts — so nothing was cleaning it. Almost every
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/journal.ts:97:     * field here is model-written prose about what a cycle *observed*, which
+/Users/abhi/proj/sensei/iris-mama/packages/iris-evolve/src/journal.ts:116:      // cycle that threw. The action itself is in the autonomy ledger too.
