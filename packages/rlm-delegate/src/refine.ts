@@ -29,6 +29,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname } from "node:path";
 import { askIn } from "./derive.ts";
+import { forgeable, forgeryIn, type Reach } from "./forgeable.ts";
 import { describeProof, type Graph, type Proof, type Task, type TaskInput } from "./graph.ts";
 import { HostDown, isHostFailure, isStop } from "./host.ts";
 import { check } from "./proof.ts";
@@ -70,7 +71,7 @@ express ordering in the prose; nobody reads prose to schedule.
 
 
 The criterion is the hard part, and it is where every plan here has failed.
-Four ways it goes wrong, all observed, all of which get the plan refused:
+Five ways it goes wrong, all observed, all of which get the plan refused:
 
   1. It already passes. A check that is true before anybody starts is a
      receipt, not a criterion. Ask yourself: would this command exit non-zero
@@ -85,6 +86,20 @@ Four ways it goes wrong, all observed, all of which get the plan refused:
   4. It checks something adjacent to the ask rather than the ask. "Did a file
      get written" when the request was "does the command work" will pass while
      the thing he wanted is still broken. Check the effect he asked for.
+
+  5. The doer owns the oracle. This is the expensive one and it is the reason
+     four children spent a night writing fake executables. A criterion that
+     runs a *name* is satisfied by putting a program under that name, and
+     from inside the task that is not cheating, it is the shortest route to a
+     green check. It is worse when the
+     name does not exist yet, because then creating it is the only way the
+     check can ever pass. A criterion is only evidence if something in the
+     chain that produces the verdict is outside the reach of whoever is being
+     judged: a system tool, an installed binary, a file the guard protects, an
+     observation nobody in the fleet can author. Ask: if the agent did none of
+     the work and only wanted the check to pass, what is the cheapest thing it
+     could write? If the answer is "the thing the check runs", write a
+     different check.
 
 Prefer a criterion whose verdict changes the moment the work is done, and
 which a stranger could run without knowing anything about how it was done.
@@ -244,6 +259,87 @@ export const needsRefining = (graph: Graph): Task[] =>
 	graph.tasks.filter((task) => task.proof.kind === "unstated" && !NOT_WORTH_PLANNING.has(task.state));
 
 /**
+ * The criteria that were already written down before anybody screened them.
+ *
+ * A screen at the door does nothing about what is already inside. When the
+ * forgeable screen went in there were 44 pending criteria in the live graphs
+ * whose oracle the fleet owns — mostly `iris <something>`, which resolves
+ * through a protected shim into a checkout the fleet edits all day. Left alone
+ * they would each have been run, passed, and believed.
+ *
+ * Deleting them is not an option — his rule is that no task is ever thrown
+ * away — and neither is failing them, because the *task* is real and only the
+ * *proof* is not. So the criterion is taken off and the task goes back to
+ * `unstated`, which is the one state that means "owed, and nobody has said how
+ * to tell yet". `needsRefining` then hands it to the planner, the planner's
+ * replacement is screened by the same three screens as any other plan, and if
+ * no honest criterion can be written for it after three goes the existing path
+ * turns it into a question for him. Nothing is lost at any step, and it is the
+ * same mechanism the drive already uses for a check that never moved.
+ *
+ * It converges rather than looping: a task it touches is `unstated` afterwards
+ * and is skipped on the next pass, and the attempt ceiling is the same one the
+ * drive's own re-planning uses.
+ */
+export const reopenForged = (
+	store: Store,
+	graphs: Graph[],
+	say: (event: string, data: Record<string, unknown>) => void = () => {},
+	options: { reach?: Reach; maxAttempts?: number } = {},
+): number => {
+	let reopened = 0;
+	for (const graph of graphs) {
+		for (const task of graph.tasks) {
+			if (NOT_WORTH_PLANNING.has(task.state)) continue;
+			if (task.proof?.kind === undefined || task.proof.kind === "unstated" || task.proof.kind === "rollup") continue;
+			// The same ceiling the drive uses when it re-plans a check that never
+			// moved. A task that has already burned this many attempts is not
+			// helped by a fourth criterion.
+			if (task.attempts.length >= 2 * (options.maxAttempts ?? 3)) continue;
+			const forged = forgeryIn(task.proof, options.reach);
+			if (!forged) continue;
+			// `absent` is left alone here, and only here.
+			//
+			// A criterion naming a program that does not exist can never pass, and
+			// that is already somebody's job: `inertIf` records what it printed
+			// before the work, the scheduler notices it printed the same thing
+			// afterwards, and the task is asked about with the check named as the
+			// fault rather than the agent. That path says more to him than this one
+			// can — it distinguishes "the check is broken" from "the work failed" —
+			// and taking the criterion off before the first attempt destroys the
+			// evidence it runs on. Measured: doing so silently turned off
+			// drive.test.ts's "the inert check was named as the fault, not the
+			// agent".
+			//
+			// At *plan* time it is refused, because a criterion that has not been
+			// written yet should never name a program nobody has installed. Once it
+			// is written down, the cheaper reading is the one already in place.
+			if (forged.grip === "absent") continue;
+			try {
+				store.answered(
+					graph.id,
+					task.id,
+					{ kind: "unstated", note: `the criterion was withdrawn: ${forged.why}` },
+					"the drive, because this check could be satisfied by writing the thing it checks",
+				);
+				say("rlm/delegate-forgeable-withdrawn", {
+					graph: graph.id,
+					task: task.id,
+					grip: forged.grip,
+					oracle: forged.oracle,
+					was: task.proof.kind === "shell" ? task.proof.run : describeProof(task.proof),
+					why: forged.why,
+				});
+				reopened += 1;
+			} catch (error: any) {
+				say("rlm/delegate-graph-error", { graph: graph.id, task: task.id, error: String(error?.message ?? error) });
+			}
+		}
+	}
+	return reopened;
+};
+
+/**
  * Ask, and write the answer down only if the graph accepts it.
  *
  * Returns the number of tasks the request became, or 0 if it stays as it is.
@@ -254,7 +350,7 @@ export const refineOne = async (
 	task: Task,
 	plan: Planner,
 	say: (event: string, data: Record<string, unknown>) => void = () => {},
-	options: { cwd?: string; allowVacuous?: boolean } = {},
+	options: { cwd?: string; allowVacuous?: boolean; reach?: Reach } = {},
 ): Promise<number> => {
 	// The ask, not the envelope. Handing a model eleven kilobytes of standing
 	// instructions and asking what the jobs are gets it a plan for the
@@ -319,6 +415,26 @@ export const refineOne = async (
 				`Whoever does the work gets a different temporary directory, so the check will say the file is ` +
 				`missing however well the work was done. Name somewhere that outlives the run.`;
 			say("rlm/delegate-refine-refused", { graph: graph.id, task: task.id, why: refusal, ephemeral: fleeting.map((f) => f.id) });
+			continue;
+		}
+
+		// Before it is run: could the doer make it say yes without doing the
+		// work? Checked ahead of `alreadyTrue` for two reasons. It is nearly
+		// free — resolving a name against PATH is a handful of `stat` calls,
+		// while `alreadyTrue` actually executes every shell criterion in the
+		// plan. And executing a criterion whose oracle the fleet owns is the one
+		// thing worth not doing at all.
+		const forged = forgeable(tasks, options.reach);
+		if (forged.length) {
+			refusal =
+				`${forged.length} of your criteria can be made true without the work being done, because whatever ` +
+				`answers them is something the agent can write: ${forged.map((f) => `${f.id} — ${f.why}`).join("; ")}. ` +
+				`A check is evidence only when something in the chain that produces its verdict is out of reach of ` +
+				`whoever is being judged. Name one: a system tool, an installed binary, a file under a protected ` +
+				`path, a state nobody in the fleet can author. If the honest answer is that no such check exists for ` +
+				`this job, say {"kind":"unstated","note":"..."} and it becomes a question for him instead — that is a ` +
+				`better outcome than a check that would have lied.`;
+			say("rlm/delegate-refine-refused", { graph: graph.id, task: task.id, why: refusal, forgeable: forged.map((f) => f.id) });
 			continue;
 		}
 

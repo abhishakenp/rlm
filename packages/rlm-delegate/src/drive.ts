@@ -31,7 +31,8 @@ import { capacity } from "./capacity.ts";
 import { outstanding, runnable, type Graph, type Task } from "./graph.ts";
 import { impasses, renderImpasses, type Impasse } from "./impasse.ts";
 import { isHostDown } from "./host.ts";
-import { needsRefining, refineOne, type Planner } from "./refine.ts";
+import type { Reach } from "./forgeable.ts";
+import { needsRefining, refineOne, reopenForged, type Planner } from "./refine.ts";
 import { run as runGraph, type RunOptions, type Runner } from "./scheduler.ts";
 import { Gate, Stop } from "./stop.ts";
 import { check, type Probe } from "./proof.ts";
@@ -100,6 +101,13 @@ export interface DriveOptions {
 	makePlanner?: (signal: AbortSignal) => Planner;
 	/** Refine at most this many recorded requests per sweep. */
 	refineLimit?: number;
+	/**
+	 * What the fleet may and may not write, for the forgeable screen.
+	 *
+	 * Defaults to this machine, read off PATH. Tests pass a made-up one so the
+	 * screen can be exercised without depending on what happens to be installed.
+	 */
+	reach?: Reach;
 }
 
 export interface DriveReport {
@@ -350,7 +358,7 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 					});
 					let into = 0;
 					try {
-						into = await refineOne(store, item.graph, item.task, planner, say, { cwd: options.cwd });
+						into = await refineOne(store, item.graph, item.task, planner, say, { cwd: options.cwd, reach: options.reach });
 					} catch (error: any) {
 						// The planner child could not boot. Nothing was written
 						// against the task, and the next one in the queue would
@@ -567,6 +575,31 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 			// the list loaded before the repair would leave them unreachable for
 			// the rest of the sweep, which is the whole bug wearing a new hat.
 			if (settledLate) open = store.open().filter((g) => !options.only?.length || options.only.includes(g.id));
+
+			// A criterion whose oracle the fleet owns is not evidence, whether it
+			// was written before the screen existed or after. Only with a planner:
+			// taking a criterion off is only safe when something is going to give
+			// the task a better one, and without a planner it would leave the task
+			// permanently unjudgeable. The task itself is untouched — this moves
+			// the *proof* back to `unstated`, which is where `needsRefining` finds
+			// it a sentence later.
+			if (planner) {
+				// Re-read with `recoverRunning: false`, the same way the scheduler
+				// does. `store.open()` rewrites every `running` task to `ready` as
+				// crash recovery, so from up here a task an agent is holding right
+				// now is indistinguishable from one a dead run abandoned — and
+				// taking the criterion off a task that is in somebody's hands means
+				// it comes back to a graph that no longer knows what it was for. The
+				// existing replan block below is immune to this because it only ever
+				// touches `failed` and `unproven`; this one reaches `ready`, so it
+				// has to ask the question the other one never needed to.
+				const held = open.map((g) => store.load(g.id, { recoverRunning: false })).filter((g): g is Graph => Boolean(g));
+				const withdrawn = reopenForged(store, held, say, { reach: options.reach, maxAttempts: options.maxAttempts });
+				if (withdrawn) {
+					say("rlm/delegate-forgeable-swept", { withdrawn });
+					open = store.open().filter((g) => !options.only?.length || options.only.includes(g.id));
+				}
+			}
 
 			if (planner) {
 				for (const graph of open) {

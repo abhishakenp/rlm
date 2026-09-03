@@ -15,6 +15,9 @@ import { Store } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/store.ts";
 import { run as runGraph } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/scheduler.ts";
 import { capacity } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/capacity.ts";
 import { judge } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/lapse.ts";
+import { forgeable, forgeryIn, gripOn, segments } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/forgeable.ts";
+import { refineOne, reopenForged } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/refine.ts";
+import { confineTo, plannerScope, profileFor } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/confine.ts";
 
 let pass = 0, fail = 0;
 const t = (name: string, fn: () => void) => {
@@ -465,6 +468,223 @@ console.log("\nan unstated task is not run through the service — it is left fo
 
 	fork.dispose();
 	await settleMs(150);
+}
+
+
+console.log("\na planner is asked for a paragraph, so it does not get the repo to write in");
+{
+	const scope = plannerScope(os.homedir());
+	t("the plans directory is in its scope, and it exists", () => {
+		ok(scope.writable.includes(path.join(os.homedir(), ".plans")), JSON.stringify(scope.writable));
+		ok(fs.existsSync(path.join(os.homedir(), ".plans")), "~/.plans was not made");
+	});
+	t("the repo is not", () =>
+		ok(!scope.writable.some((dir: string) => "/Users/abhi/proj/rlm".startsWith(dir) && dir !== "/"), JSON.stringify(scope.writable)));
+	t("the profile reads everything and writes only inside the scope", () => {
+		const profile = profileFor(2);
+		ok(profile.includes("(allow default)"), profile);
+		ok(profile.includes("(deny file-write*)"), profile);
+		eq(profile.split("allow file-write*").length - 1, 2, profile);
+	});
+	t("confine returns the argv shape agent.ts expects, with the real command last", () => {
+		const confine = confineTo({ writable: [os.tmpdir()] });
+		ok(confine, "no confinement on this machine");
+		const argv = confine!("/bin/echo", ["hi"]);
+		eq(argv[0], "/usr/bin/sandbox-exec");
+		eq(argv[argv.length - 2], "/bin/echo");
+		eq(argv[argv.length - 1], "hi");
+	});
+	// The bound is only worth anything if the kernel really refuses. Run it.
+	t("a confined process cannot write outside its scope, by any route", () => {
+		const inside = path.join(DIR, "confine-inside.txt");
+		const outside = path.join(DIR, "..", `confine-outside-${process.pid}.txt`);
+		const confine = confineTo({ writable: [fs.realpathSync(DIR)] })!;
+		const script =
+			`const fs=require("node:fs");const out={};` +
+			`try{fs.writeFileSync(${JSON.stringify(inside)},"x");out.inside="wrote"}catch(e){out.inside=e.code}` +
+			`try{fs.writeFileSync(${JSON.stringify(outside)},"x");out.outside="wrote"}catch(e){out.outside=e.code}` +
+			`out.read=fs.readFileSync("/Users/abhi/proj/rlm/package.json","utf8").length>0;` +
+			`console.log(JSON.stringify(out));`;
+		const [bin, ...rest] = confine(process.execPath, ["-e", script]);
+		const ran = spawnSync(bin, rest, { encoding: "utf8" });
+		eq(ran.status, 0, ran.stderr);
+		const said = JSON.parse(ran.stdout.trim());
+		eq(said.inside, "wrote");
+		eq(said.outside, "EPERM", `expected EPERM outside the scope, got ${said.outside}`);
+		eq(said.read, true, "reads must stay open — a planner has to read the repo");
+		ok(!fs.existsSync(outside), "the file outside the scope was created");
+	});
+}
+
+console.log("\na criterion the doer can answer itself is not a criterion");
+{
+	// A machine made up on the spot, so the screen is tested against a known
+	// world rather than against whatever happens to be installed today.
+	// Through realpath, both ends. macOS hands out /var/folders/… and resolves it
+	// to /private/var/folders/…, and a sealed directory recorded under one
+	// spelling never matches a program resolved under the other.
+	const world = fs.realpathSync(DIR) + "/reach";
+	const sealedbin = path.join(world, "opt", "bin");
+	const work = path.join(world, "work");
+	fs.mkdirSync(sealedbin, { recursive: true });
+	fs.mkdirSync(work, { recursive: true });
+	fs.writeFileSync(path.join(sealedbin, "realtool"), "#!/bin/sh\necho hello\n", { mode: 0o755 });
+	fs.writeFileSync(path.join(sealedbin, "shim"), `#!/bin/bash\nexec ${path.join(work, "impl")} "$@"\n`, { mode: 0o755 });
+	fs.writeFileSync(path.join(work, "impl"), "#!/bin/sh\necho real\n", { mode: 0o755 });
+	fs.writeFileSync(path.join(work, "loose"), "#!/bin/sh\necho loose\n", { mode: 0o755 });
+	// The system directories are in it because they are in every real one, and
+	// leaving them out would make `grep` look like a name nobody had installed.
+	const reach = {
+		sealed: [sealedbin, "/bin", "/usr/bin"],
+		lookup: [sealedbin, work, "/bin", "/usr/bin"],
+		home: world,
+		root: path.join(world, "repo"),
+	};
+
+	t("a program the fleet cannot write is sound", () => eq(gripOn("realtool", reach), null));
+	t("a program in a directory nothing seals can be rewritten", () =>
+		eq(gripOn("loose", reach)?.grip, "rebindable"));
+	t("a name that resolves to nothing is the worst case, not the safest", () =>
+		eq(gripOn("nosuchtool", reach)?.grip, "absent"));
+	t("a sealed one-line launcher into a writable tree seals nothing", () => {
+		const grip = gripOn("shim", reach);
+		eq(grip?.grip, "delegating");
+		eq(grip?.lands, path.join(work, "impl"));
+	});
+
+	t("the head of a clause is observed; what reads it downstream is not", () => {
+		const parsed = segments("shim status | grep -q ok && echo done");
+		eq(parsed.length, 3);
+		eq(parsed[0]!.head, true);
+		eq(parsed[0]!.pipedInto, true);
+		eq(parsed[1]!.head, false);
+		// `&& echo done` starts a clause and nothing reads it, so it decides
+		// nothing — the distinction that stopped an honest criterion being flagged.
+		eq(parsed[2]!.head, true);
+		eq(parsed[2]!.pipedInto, false);
+	});
+
+	const grep = (run: string) => forgeryIn({ kind: "shell", run } as any, reach);
+	t("running a name the agent can rebind, and matching a string, is forgeable", () =>
+		eq(grep("shim ears self | grep -q '\"daemon\":\"connected\"'")?.grip, "delegating"));
+	t("so is running a name that does not exist yet", () =>
+		eq(grep("nosuchtool commands | grep -E 'config|recall' && echo FOUND")?.grip, "absent"));
+	t("so is a program reached only through a command substitution", () =>
+		eq(grep("TEXT=$(shim transcribe /tmp/a.wav) && test -n \"$TEXT\"")?.grip, "delegating"));
+	t("a criterion that compares itself with itself is forgeable", () =>
+		eq(grep("echo 'skill' | grep -q 'skill'")?.grip, "self-produced"));
+	t("but a trailing echo nobody reads is not — it decides nothing", () =>
+		eq(grep("realtool run | grep -q PASS && echo 'Tests passed'"), null));
+	t("reading a file through sound tools is a file criterion, not a forgery", () =>
+		eq(grep(`grep -q needle ${path.join(work, "impl")}`), null));
+	t("and an ordinary file criterion is left alone", () =>
+		eq(forgeryIn({ kind: "file", path: path.join(work, "notes.md"), contains: "x" } as any, reach), null));
+	t("a criterion about the contents of a command on PATH is the hijack itself", () =>
+		eq(forgeryIn({ kind: "file", path: path.join(sealedbin, "shim"), contains: "connected" } as any, reach)?.grip,
+			"rebindable"));
+	t("a row criterion has no oracle to rebind", () =>
+		eq(forgeryIn({ kind: "row", id: "delegate", state: "ACTIVE" } as any, reach), null));
+
+	t("forgeable() reports one finding per task, naming the task", () => {
+		const found = forgeable(
+			[
+				{ id: "bad", title: "b", proof: { kind: "shell", run: "shim x | grep -q y" } },
+				{ id: "good", title: "g", proof: { kind: "shell", run: "realtool x | grep -q y" } },
+			] as any,
+			reach,
+		);
+		eq(found.length, 1);
+		eq(found[0]!.id, "bad");
+		ok(found[0]!.why.includes(path.join(work, "impl")), found[0]!.why);
+	});
+
+	// ── the plan is refused, and the criterion is never run ──────────────────
+	{
+		const store = new Store(path.join(DIR, "forgeable-refine"));
+		const g = store.create("make the shim say connected", [
+			{ id: "job", title: "make it say connected", proof: { kind: "unstated" } },
+		] as any);
+		const sentinel = path.join(DIR, "the-forged-criterion-ran");
+		const asked: string[] = [];
+		const events: Array<[string, any]> = [];
+		let turn = 0;
+		const planner = async (prompt: string) => {
+			asked.push(prompt);
+			turn += 1;
+			return turn === 1
+				? JSON.stringify([
+						{ id: "a", title: "A", proof: { kind: "shell", run: `shim self && touch ${sentinel}` } },
+					])
+				: JSON.stringify([{ id: "a", title: "A", proof: { kind: "shell", run: "exit 1" } }]);
+		};
+		const into = await refineOne(store, g, g.tasks[0] as any, planner as any, (e, d) => events.push([e, d]), { reach });
+
+		t("the forgeable plan was refused and the second one accepted", () => eq(into, 1));
+		t("a refusal was journalled naming the task whose oracle was owned", () => {
+			const refusal = events.find(([e]) => e === "rlm/delegate-refine-refused");
+			ok(refusal, "no refusal event");
+			ok(Array.isArray(refusal![1].forgeable), "refusal did not name the forgeable criteria");
+			eq(refusal![1].forgeable[0], "a");
+		});
+		t("the planner was told exactly why, in the words it has to fix", () => {
+			ok(asked.length >= 2, `planner asked ${asked.length} times`);
+			ok(asked[1]!.includes("can be made true without the work being done"), asked[1]!.slice(-400));
+		});
+		t("the forgeable criterion was never executed — the screen runs before it", () =>
+			ok(!fs.existsSync(sentinel), "the criterion ran; the screen is in the wrong order"));
+		t("the task became real work with a criterion that can fail", () => {
+			const after = store.load(g.id)!;
+			const job = after.tasks.find((task: any) => task.id === "a")!;
+			eq(job.proof.kind, "shell");
+		});
+	}
+
+	// ── what was already in the graphs ───────────────────────────────────────
+	{
+		const store = new Store(path.join(DIR, "forgeable-sweep"));
+		const g = store.create("already queued", [
+			{ id: "forged", title: "F", proof: { kind: "shell", run: "shim notify.status | grep -q running" } },
+			{ id: "sound", title: "S", proof: { kind: "shell", run: "realtool notify.status | grep -q running" } },
+		] as any);
+		const events: Array<[string, any]> = [];
+		const swept = reopenForged(store, [g], (e, d) => events.push([e, d]), { reach });
+		const after = store.load(g.id)!;
+		const forged = after.tasks.find((task: any) => task.id === "forged")!;
+		const sound = after.tasks.find((task: any) => task.id === "sound")!;
+
+		t("the already-queued forgeable criterion was withdrawn", () => eq(swept, 1));
+		t("the sound one beside it was left exactly as it was", () => eq(sound.proof.kind, "shell"));
+		t("the task itself was not thrown away — only its proof", () => {
+			eq(forged.proof.kind, "unstated");
+			ok(after.tasks.some((task: any) => task.id === "forged"), "the task disappeared");
+			ok(forged.state !== "rejected", `state is ${forged.state}`);
+		});
+		t("it says why, so the journal records what was withdrawn and what it was", () => {
+			const said = events.find(([e]) => e === "rlm/delegate-forgeable-withdrawn");
+			ok(said, "nothing was journalled");
+			eq(said![1].grip, "delegating");
+			ok(String(said![1].was).includes("shim notify.status"), said![1].was);
+		});
+		t("a second sweep does nothing, so it converges instead of looping", () =>
+			eq(reopenForged(store, [store.load(g.id)!], () => {}, { reach }), 0));
+
+		// A task in an agent's hands keeps its criterion. `store.open()` rewrites
+		// `running` to `ready` as crash recovery, so the drive re-reads with
+		// `recoverRunning: false` before sweeping — without that, this passes for
+		// the wrong reason and the real drive pulls criteria out from under live
+		// work.
+		t("a task an agent is holding right now is left alone", () => {
+			const held = new Store(path.join(DIR, "forgeable-inflight"));
+			const hg = held.create("in flight", [
+				{ id: "busy", title: "B", proof: { kind: "shell", run: "shim status | grep -q ok" } },
+			] as any);
+			held.began(hg.id, "busy");
+			eq(reopenForged(held, [held.load(hg.id, { recoverRunning: false })!], () => {}, { reach }), 0);
+			// and the same graph read the way `open()` reads it would have been swept,
+			// which is exactly why the drive does not read it that way.
+			eq(reopenForged(held, [held.load(hg.id)!], () => {}, { reach }), 1);
+		});
+	}
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

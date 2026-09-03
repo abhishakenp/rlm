@@ -43,6 +43,7 @@ import { drive as driveGraphs, renderReport, type DriveOptions, type DriveReport
 import { impasses, renderImpasses, type Impasse } from "./impasse.ts";
 import { rlmAgent } from "./agent.ts";
 import { askModel, route as modelRoute } from "./ask.ts";
+import { confineTo, plannerScope } from "./confine.ts";
 import { me2 } from "./me2.ts";
 import { Stop } from "./stop.ts";
 import { Store, defaultDir } from "./store.ts";
@@ -903,6 +904,21 @@ export class RlmDelegateService extends Service {
 		// The planner is the same agent, asked a different question. Cheap to
 		// build here and worth having by default: without one, a request that is
 		// fifteen jobs in a paragraph can only become a question.
+		//
+		// It is the same agent, and it is deliberately not given the same reach.
+		// Asked to write a plan, a planner with the repo in its write scope does
+		// the work instead — `install-and-wire-the-iris-17` is the recorded case:
+		// a planning call in which the child did the job, deleted a correct file
+		// as "wrong place", and was killed at its ten-minute ceiling. A plan is a
+		// paragraph. So the child is wrapped in a kernel-enforced write scope that
+		// contains `~/.plans` and what its own boot needs, and does not contain
+		// the repo, PATH, or the graphs — see confine.ts. It keeps a write tool,
+		// pointed somewhere a plan belongs.
+		//
+		// If the machine cannot enforce it, the planner runs as it always did and
+		// says so once. A bound nobody can see failing is worse than none.
+		const bound = confineTo(plannerScope());
+		if (!bound) this.ctx.logger?.warn?.("rlm-delegate: no sandbox-exec here, so the planner runs with the same reach as the runner");
 		const makePlanner =
 			options.makePlanner ??
 			((signal: AbortSignal) => {
@@ -911,6 +927,7 @@ export class RlmDelegateService extends Service {
 					cwd: this.config.cwd ?? process.cwd(),
 					timeoutMs: Math.min(this.config.attemptTimeoutMs ?? 2_700_000, 600_000),
 					signal,
+					...(bound ? { confine: bound } : {}),
 				});
 				return (prompt: string, task: any, graph: any) => ask({ ...task, prompt }, graph);
 			});
@@ -1018,7 +1035,9 @@ export { drive, renderReport, type DriveOptions, type DriveReport } from "./driv
 export { impasses, renderImpasses, type Impasse, type ImpasseKind } from "./impasse.ts";
 export { Stop, Gate, DESKTOP_STOP, IRIS_STOP } from "./stop.ts";
 export { rlmAgent, type AgentOptions } from "./agent.ts";
-export { refineOne, needsRefining, parsePlan, PLAN_INSTRUCTIONS, type Planner } from "./refine.ts";
+export { refineOne, needsRefining, parsePlan, reopenForged, PLAN_INSTRUCTIONS, type Planner } from "./refine.ts";
+export { confineTo, plannerScope, bootPaths, profileFor, available as canConfine, type Scope } from "./confine.ts";
+export { forgeable, forgeryIn, reachOf, gripOn, whichIs, type Forgery, type Grip, type Reach } from "./forgeable.ts";
 export { askIn } from "./derive.ts";
 export { diagnose, type Diagnosis, type Carrier, type CauseKind } from "./lapse.ts";
 export { nextAttempt } from "./scheduler.ts";
