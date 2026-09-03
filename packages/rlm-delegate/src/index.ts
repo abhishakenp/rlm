@@ -48,7 +48,7 @@ import { askModel, route as modelRoute } from "./ask.ts";
 import { confineTo, plannerScope } from "./confine.ts";
 import { me2 } from "./me2.ts";
 import { Stop } from "./stop.ts";
-import { Store, defaultDir } from "./store.ts";
+import { Store, defaultDir, mintId } from "./store.ts";
 
 /**
  * The events this row emits, declared to the kernel.
@@ -251,7 +251,11 @@ const anotherDriveSweeping = (): number | null => {
 			if (!row) continue;
 			const pid = Number(row[1]);
 			parents.set(pid, Number(row[2]));
-			if (/cordis-shell\.mjs\s+drive(\s|$)/.test(row[3])) drives.push(pid);
+			// Flags may sit between the entry and the subcommand — the supervisor
+			// now passes `--headless` there, and a pattern that demanded them
+			// adjacent would have stopped matching the moment it did, switching
+			// this guard off in silence.
+			if (/cordis-shell\.mjs(\s+\S+)*\s+drive(\s|$)/.test(row[3])) drives.push(pid);
 		}
 		const mine = new Set<number>();
 		for (let pid = process.pid; pid > 1 && !mine.has(pid); pid = parents.get(pid) ?? 0) mine.add(pid);
@@ -428,6 +432,30 @@ export class RlmDelegateService extends Service {
 				console.log(`  recorded ${lesson.id}`);
 				console.log(`      "${lesson.said}"`);
 				return 0;
+			},
+		});
+
+		modes.register({
+			id: "test-task",
+			priority: 63,
+			claims: (argv: string[]) => argv[0] === "test-task",
+			run: async (argv: string[]) => {
+				const at = argv.indexOf("--id");
+				if (at === -1 || !argv[at + 1]) {
+					console.log("  usage: rlm test-task --id <id>");
+					return 1;
+				}
+				const taskId = argv[at + 1];
+				const req = "test-task " + taskId;
+				const graph = this.store.create(req, [{
+					id: taskId,
+					title: "test: " + taskId,
+					prompt: "echo " + taskId,
+					proof: { kind: "shell", run: "echo ok" }
+				}]);
+				const report = await this.drive({ follow: false, executor: process.env.RLM_EXECUTOR || "rlm" });
+				console.log(this.store.status(graph.id));
+				return report.owed.length ? 1 : 0;
 			},
 		});
 
