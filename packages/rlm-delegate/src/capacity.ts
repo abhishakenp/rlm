@@ -389,10 +389,19 @@ export const readings = (): Reading[] => {
 		// The floor's number is a different number, from the kernel — see
 		// kernelMemory(). The arithmetic only stands in when it cannot answer.
 		const kernel = kernelMemory();
-		const strained = kernel.level !== null && kernel.level > 1;
+		// Critical only. Warning is not trouble, and treating it as trouble
+		// overrules his rule with a signal that is not a free percentage:
+		// measured here at 07:02, the kernel said level 2 *and* 39% free, and
+		// the fleet sat at zero for thirty minutes with 3.2 GB available and
+		// 85% of the cores idle. His rule says spin at 30% or more free, and
+		// at 39% free it says spin. macOS raises the warning level early and
+		// often on a laptop; level 4 is the one that means the machine is
+		// actually in trouble, and that is the one allowed to overrule a
+		// percentage. Below critical the percentage speaks for itself.
+		const strained = kernel.level !== null && kernel.level >= 4;
 		const headroom = strained ? 0 : (kernel.free ?? Math.max(0, Math.min(1, free / total)));
 		const source = strained
-			? `the kernel reports memory pressure level ${kernel.level} — above normal, so this reads as no headroom at all`
+			? `the kernel reports memory pressure level ${kernel.level} — critical, so this reads as no headroom at all`
 			: kernel.free !== null
 				? "kernel-reported free"
 				: "available ÷ total, no kernel reading";
