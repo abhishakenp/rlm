@@ -61,7 +61,7 @@ const quoted = (text: string): string[] => {
  */
 const PLACEHOLDER = /(…|\.\.\.|<[^>]*>|\{[^}]*\}|\[[^\]]*\]|[=:]\s*$|\bTODO\b)/;
 
-const RUNNER = /^(npm|npx|bun|bunx|node|pnpm|yarn|make|cargo|pytest|python3?|go|git|rlm|iris|sh|bash|\.\/)\b/;
+const RUNNER = /^(npm|npx|bun|bunx|node|pnpm|yarn|make|cargo|pytest|python3?|go|git|rlm|iris|sh|bash|echo|\.\/)\b/;
 const VERIFIABLE = /\b(pass(es|ing)?|exits? 0|succeeds?|green|works?|returns?|prove[sn]?)\b/i;
 
 /** A plugin/package name: kebab-case, at least two characters, no spaces. */
