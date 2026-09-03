@@ -341,7 +341,28 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 		 * it and a journal that has not moved is stuck, whatever its slot count
 		 * says.
 		 */
-		const starving = size > held && ready > held;
+		/**
+		 * A gap worth calling a stall, not merely a gap.
+		 *
+		 * The first version of this asked only whether there was *a* free slot
+		 * and *a* task that could have used it. Watched against a real sweep that
+		 * was working perfectly well, that is true almost constantly:
+		 *
+		 *     [03:44:47] 12/13 slot(s) busy, 0 queued, 13 runnable, nothing journalled for  60s
+		 *     [03:47:47] 10/12 slot(s) busy, 0 queued, 13 runnable, nothing journalled for 240s
+		 *
+		 * Twelve of thirteen slots in use is a saturated fleet, and tasks that
+		 * take minutes are why nothing was journalled — both normal. Sixty
+		 * seconds later that rule would have killed it, which is a worse fault
+		 * than the one this exists to catch.
+		 *
+		 * So the test is half the fleet, which is the difference between the two
+		 * pictures rather than a threshold picked to fit: the sweep this was
+		 * written for sat at one slot of twelve for ten minutes. A fleet using
+		 * most of what it has is slow; a fleet using almost none of what it has,
+		 * with work in front of it, is stuck.
+		 */
+		const starving = size >= 2 && held * 2 < size && ready > held;
 		if (held > 0 && !starving) return;
 		stalledBy =
 			held > 0
