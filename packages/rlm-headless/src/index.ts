@@ -30,30 +30,63 @@
  *     and skips the repository re-index it otherwise runs at every
  *     `session_start`.
  *   - **`rlmLive`** is provided **only when a person is there**. It carries
- *     nothing. Its entire purpose is to be named in another row's `inject`, so
- *     that row cannot start while it is absent.
+ *     nothing. It is the live half of the same fact, in the form a fiber can
+ *     depend on, and it is what makes the verdict *movable* — provide it and
+ *     the expensive rows come up, take it away and they go down.
  *
- * `inject` is why this is a row and not a branch in an argument parser, and it
- * is the only mechanism available here that is race-free. The loader creates
- * every entry in one `Promise.allSettled`, so rows mount concurrently and
- * position in `cordis.yml` buys nothing: a row that reached in and disabled
- * `hmr` would always be reaching for a watcher that had already opened its
- * 1,207 handles. A row whose injected service never arrives never starts at
- * all. Nothing is opened and then closed; it is not opened.
+ * ## How rows are actually left out, and why `inject` is no longer it
  *
- * The consequence is that the park list lives in `cordis.yml`, as an `inject`
- * on each parked row, and not in this file's config. That is the right place
- * for it. "This row exists for a human" is a fact about the composition, it
- * shows up in `rlm rows` beside everything else, and the overlay can add a row
- * to the set or take one out of it without touching any code.
+ * The first version of this row parked the expensive rows by naming `rlmLive`
+ * in each of their `inject` lists. That mechanism was race-free and it was
+ * wrong, for a reason nothing about the race touches: **it made the
+ * composition unreducible.** Delete this row from `cordis.yml` and nothing
+ * provides `rlmLive` at all, so every row that named it waits for ever. The
+ * observed result, booting a composition with the `headless` entry removed:
+ * `hmr`, `rlm-hmr`, `tui` and `renderer` all PENDING, 26 open descriptors, no
+ * watcher and no renderer — an rlm with hot reload silently off, in a
+ * composition that never mentions headlessness. Removing the policy row turned
+ * the policy all the way up instead of off. Absence of this row has to mean
+ * absence of an opinion.
+ *
+ * So the rows ask, rather than being told:
+ *
+ *   - `rlm-hmr` and the `hmr` wrapper call `whenWatched()` from
+ *     `packages/rlm-hmr/src/live.ts`, which reads `ctx.get("rlmHeadless")`.
+ *     No row → `undefined` → no opinion → watch, the way rlm always did.
+ *   - `tui` and `renderer` need no gate at all. Measured: `tui`'s whole mount
+ *     is one `globalThis` assignment, and `renderer`'s `[Service.init]` only
+ *     subscribes to events — everything expensive is behind `start()`, which
+ *     only the `interactive` mode calls, and `--headless` implies `--print`.
+ *     They carried `inject: ['rlmLive']` for tidiness, and it bought nothing.
+ *
+ * **The race, answered rather than avoided.** The paragraph this replaces was
+ * right that a naive `ctx.get` in `apply` cannot be trusted: rows mount
+ * concurrently in one `Promise.allSettled`, and cordis will not hand out a
+ * service whose fiber is still LOADING, so a row can be told "no opinion"
+ * merely because this row has not finished starting — and for `hmr` that
+ * answer costs ~1,283 file watches that then have to be closed again. The
+ * answer is not to ask sooner but to ask *later, before committing anything*:
+ * `whenWatched` does its probe inside `ctx.inject({ loader: { await: true } },
+ * …)`, a child fiber that cannot run until the loader tree has settled, while
+ * the row it belongs to stays ACTIVE. By then every row has reached ACTIVE or
+ * failed. Nothing is opened and then closed; it is still not opened.
+ *
+ * `hmr` is a package, not a file in this repo, so it cannot be taught to ask.
+ * It is wrapped by `./packages/rlm-hmr/src/official.ts`, a row that always
+ * mounts, costs nothing, and mounts the real plugin as a child fiber only once
+ * the verdict is known. That is strictly cheaper than the `inject` it
+ * replaces, which still had to import the module to discover the plugin object
+ * for a fiber that then parked for ever.
  *
  * ## Turning it off again
  *
- * `rlmLive` is a normal service on a normal fiber. Provide it and the parked
- * rows mount; take it away and they dispose. So headless is not a property of
- * the process that has to be settled before boot — `set(false)` at any moment
- * brings hot reload up inside a running rlm, which is the property this project
- * exists to have and would have been a poor thing to spend on a startup flag.
+ * The verdict is still live, and that property survived the change of
+ * mechanism. `whenWatched` re-reads it on every `internal/service` for
+ * `rlmHeadless` or `rlmLive`, so `set(false)` at any moment still brings hot
+ * reload up inside a running rlm — the property this project exists to have,
+ * and a poor thing to have spent on a startup flag. Removing this row from a
+ * *running* composition moves the same way: `rlmHeadless` goes, the rows hear
+ * it, and they come up, which is the one behaviour `inject` got backwards.
  */
 import { Service } from "@deepseek-ai/cordis";
 
@@ -74,6 +107,14 @@ export interface HeadlessVerdict {
 	why: string;
 	/** Rows that named the token and are therefore not running. */
 	parked: string[];
+	/**
+	 * The one session being watched, if any.
+	 *
+	 * Not the same question as `on`. `on` is about the invocation — was
+	 * `--headless` passed — and this is about attention, which moves at runtime
+	 * and is what actually decides whether the live rows are mounted right now.
+	 */
+	watching: string | null;
 }
 
 export interface RlmHeadlessConfig {
@@ -94,6 +135,16 @@ export interface RlmHeadlessConfig {
 	 * Empty string means none.
 	 */
 	childFlags?: string;
+	/**
+	 * Tasks one pooled worker may hold at once. `0` or `1` means no pool.
+	 *
+	 * The delegate asks this row whether to pool its children, for the same
+	 * reason it asks about their Node flags: what an unwatched child costs is a
+	 * fact about unwatched children, and this is the row whose whole subject is
+	 * that. Removing this row from the composition therefore removes the pool
+	 * too, and rlm spawns one process per task exactly as it always did.
+	 */
+	childPoolSlots?: number;
 }
 
 /**
@@ -134,6 +185,23 @@ export interface RlmHeadlessConfig {
  */
 const DEFAULT_CHILD_FLAGS = "--max-semi-space-size=2 --optimize-for-size";
 
+/**
+ * How many tasks one pooled worker holds at once.
+ *
+ * The whole argument for a pool is in one measurement: a real delegated child
+ * sampled every 700 ms reaches 143 MB at 1.4 s and is flat from there through
+ * the model call. The boot is the cost and the task is not, so eight tasks in
+ * one process cost about what one task in one process costs, and eight
+ * processes cost eight times that for no reason.
+ *
+ * Eight rather than "all of them" because a worker is also the unit of blast
+ * radius: the `code` tool is a vm with `require` in scope, so a task can take
+ * its worker down, and everything sharing that worker is re-queued when it
+ * does. Eight is the number where the fixed cost is amortised and a bad task
+ * costs one boot, not the fleet.
+ */
+const DEFAULT_POOL_SLOTS = 8;
+
 export const configFields = [
 	{
 		key: "force",
@@ -161,6 +229,13 @@ export const configFields = [
 		default: DEFAULT_CHILD_FLAGS,
 		description:
 			"Node flags to start an unwatched one-shot child with, space separated. These are the ones that trade a little speed for a lot of resident memory, which is the right trade for a process that spends almost all of its life waiting on a model. Empty to pass none.",
+	},
+	{
+		key: "childPoolSlots",
+		type: "number",
+		default: DEFAULT_POOL_SLOTS,
+		description:
+			"How many delegated tasks one long-lived worker process holds at once. A delegated child used to be one process per task, ~110-125 MB each, and the memory went almost entirely on booting the composition so the process was ready to do a task — measured flat from 1.4 s onward, right through the model call. Pooling pays that boot once for the fleet instead of once per task. 0 or 1 turns the pool off and every task gets its own process again.",
 	},
 	{
 		key: "token",
@@ -208,20 +283,20 @@ export const detect = (
 ): HeadlessVerdict => {
 	const flag = config.flag ?? "--headless";
 	const variable = config.env ?? "RLM_HEADLESS";
-	if (config.force === "on") return { on: true, why: "the headless row is configured on", parked: [] };
-	if (config.force === "off") return { on: false, why: "the headless row is configured off", parked: [] };
+	if (config.force === "on") return { on: true, why: "the headless row is configured on", parked: [], watching: null };
+	if (config.force === "off") return { on: false, why: "the headless row is configured off", parked: [], watching: null };
 	// `--headless=1` as well as a bare `--headless`. Half the callers that pass
 	// flags programmatically spell it with the equals sign, and a flag that is
 	// silently ignored is worse than one that does not exist — which is the
 	// state `--headless` was already in when this row was written.
 	if (argv.some((a) => a === flag || a.startsWith(`${flag}=`))) {
-		return { on: true, why: `${flag} was passed`, parked: [] };
+		return { on: true, why: `${flag} was passed`, parked: [], watching: null };
 	}
 	const value = env[variable];
 	if (value !== undefined && !DENIALS.has(value.trim().toLowerCase())) {
-		return { on: true, why: `${variable}=${value}`, parked: [] };
+		return { on: true, why: `${variable}=${value}`, parked: [], watching: null };
 	}
-	return { on: false, why: "no flag and no environment variable — somebody is watching", parked: [] };
+	return { on: false, why: "no flag and no environment variable — somebody is watching", parked: [], watching: null };
 };
 
 /**
@@ -248,10 +323,46 @@ export class RlmHeadlessService extends Service {
 
 	declare config: RlmHeadlessConfig;
 
-	private verdict: HeadlessVerdict = { on: false, why: "not decided yet", parked: [] };
+	private verdict: HeadlessVerdict = { on: false, why: "not decided yet", parked: [], watching: null };
 
 	/** Releases the token, when it is currently handed out. */
 	private release?: () => void;
+
+	/**
+	 * The one session being watched right now, or nothing.
+	 *
+	 * His question, and it is the whole reason this is not a boolean any more:
+	 * *"when i open 1 delegator agent, the other 900 subagents are still
+	 * headless, and when i open one of the subagents, all other 900-1 subagents
+	 * and the main delegator agents are headless?"*
+	 *
+	 * So: a viewport, not a switch. One session at a time is watched — there is
+	 * one of him — and opening a different one moves it. A process that holds
+	 * the watched session hands out `rlmLive`; every other process in the fleet,
+	 * and this one the moment attention moves away, does not.
+	 */
+	private attention: string | null = null;
+
+	/**
+	 * Rows that have told this one they left their expensive part out.
+	 *
+	 * The decision that mattered when this row was written: **a parked row
+	 * reports PENDING for ever, and a fiber stuck at PENDING is exactly the
+	 * shape of a boot that went wrong.** "Waiting for a service that is coming"
+	 * and "waiting for a service that was deliberately withheld" are the same
+	 * fiber, so the difference had to be said out loud, and `explain()` said it
+	 * by reading `inject` off the loader.
+	 *
+	 * Under the current mechanism the rows are ACTIVE — it is a part of their
+	 * work that is skipped, not the row — so reading the loader cannot see it at
+	 * all. Losing the distinction would be the real regression, so the rows say
+	 * so themselves: `whenWatched()` calls `deferred()` when it skips and
+	 * `resumed()` when it takes the work up again. Better evidence than the old
+	 * inference, in fact, because it is the row reporting what it actually did
+	 * rather than this one guessing from a fiber state that has three other
+	 * causes.
+	 */
+	private standDown = new Set<string>();
 
 	constructor(ctx: any, config: RlmHeadlessConfig = {}) {
 		super(ctx, undefined as any);
@@ -265,6 +376,20 @@ export class RlmHeadlessService extends Service {
 	/** Whether this run is unwatched. */
 	get on(): boolean {
 		return this.verdict.on;
+	}
+
+	/**
+	 * Whether the expensive rows should be up.
+	 *
+	 * **Read this, not `on`.** They are not each other's negation: a headless
+	 * process that is attending one of its sessions is live, because somebody
+	 * has opened that agent. `on` answers "was this invocation unwatched",
+	 * which is only half the question once one process holds many agents.
+	 * `apply()` decides the token from exactly this, and `whenWatched()` reads
+	 * exactly this, so the token and the probe can never disagree.
+	 */
+	get live(): boolean {
+		return !this.verdict.on || this.attention !== null;
 	}
 
 	/** The name rows inject to say they need a person. */
@@ -292,7 +417,23 @@ export class RlmHeadlessService extends Service {
 
 	/** The decision, with its reasoning and its consequences attached. */
 	report(): HeadlessVerdict {
-		return { ...this.verdict, parked: this.parked() };
+		return { ...this.verdict, parked: this.parked(), watching: this.attention };
+	}
+
+	/**
+	 * The Node worker pool's width, or 0 for "do not pool".
+	 *
+	 * Deliberately **not** gated on `this.on`, for the same reason
+	 * `childNodeFlags()` is not: whether *this* process is watched says nothing
+	 * about the children it spawns. The drive runs as `rlm drive` with no
+	 * `--headless` on its command line — it is a mode, not a print — and every
+	 * child it spawns is `--headless` regardless. Gating here would mean the one
+	 * process in the fleet that actually spawns children never pools any of them.
+	 */
+	childPoolSlots(): number {
+		const raw = this.config.childPoolSlots;
+		const slots = typeof raw === "number" && Number.isFinite(raw) ? Math.floor(raw) : DEFAULT_POOL_SLOTS;
+		return slots > 1 ? slots : 0;
 	}
 
 	/**
@@ -311,9 +452,68 @@ export class RlmHeadlessService extends Service {
 
 	/** Decide by hand, without touching the command line. */
 	set(on: boolean, why = on ? "switched on" : "switched off"): HeadlessVerdict {
-		this.verdict = { on, why, parked: [] };
+		this.verdict = { on, why, parked: [], watching: null };
 		this.apply();
 		return this.report();
+	}
+
+	/**
+	 * Watch one session in this process, or none.
+	 *
+	 * This is the per-agent half of headless, and it is a *fact about a
+	 * session*, not about a process — which it had to become the moment one
+	 * process started holding eight agents. The caller names the session it is
+	 * opening; `null` closes the viewport.
+	 *
+	 * It is authoritative rather than advisory: `apply()` reads it, so attending
+	 * a session in a headless process hands out `rlmLive` and the parked rows
+	 * mount, and letting go takes them away again. No restart, no flag, no
+	 * second mechanism — the same token, the same rows, decided by attention
+	 * instead of by the command line.
+	 *
+	 * **What is single, honestly.** The rows that come up are the ones that
+	 * exist for a person: `hmr`, `tui`, `renderer`. Each of those is singular by
+	 * nature — one module watcher, one terminal, one keyboard, one stdout — so
+	 * this can hand out the token for exactly one session at a time and no more.
+	 * That is not a limitation being worked around; it is the shape of there
+	 * being one of him. A second concurrent viewer would need those rows to
+	 * become per-session first, and they are not.
+	 */
+	attend(sessionId: string | null): HeadlessVerdict {
+		const previous = this.attention;
+		this.attention = sessionId ?? null;
+		if (previous !== this.attention) {
+			this.apply();
+			this.ctx.emit?.("rlm/attention", { watching: this.attention, previous });
+		}
+		return this.report();
+	}
+
+	/** The session being watched here, or nothing. */
+	watching(): string | null {
+		return this.attention;
+	}
+
+	/** Is this particular session the one being watched? */
+	watches(sessionId: string): boolean {
+		return this.attention !== null && this.attention === sessionId;
+	}
+
+	/**
+	 * A row saying it has left its expensive part out because of this verdict.
+	 *
+	 * Called by `whenWatched()`, and by anything else that would rather do less
+	 * than disappear. Idempotent, and safe to call on a row this one has never
+	 * heard of — the report is a record of what happened, not a permission
+	 * system.
+	 */
+	deferred(row: string): void {
+		this.standDown.add(row);
+	}
+
+	/** …and the same row saying it has taken that work up again. */
+	resumed(row: string): void {
+		this.standDown.delete(row);
 	}
 
 	/**
@@ -350,7 +550,11 @@ export class RlmHeadlessService extends Service {
 	 * watching, and the rows that were waiting on an assertion stop waiting.
 	 */
 	private apply() {
-		const live = !this.verdict.on;
+		// Two ways to be live, and the second is the one that moves. Either
+		// nobody said this run was unwatched, or somebody has opened one of the
+		// agents running in it. Attention wins over the flag, which is what makes
+		// "open a subagent" mean something inside a headless worker.
+		const live = this.live;
 		if (live && !this.release) this.release = this.ctx.provide?.(this.token, { since: Date.now() });
 		else if (!live && this.release) {
 			this.release();
@@ -360,40 +564,54 @@ export class RlmHeadlessService extends Service {
 	}
 
 	/**
-	 * The rows that named the token and are therefore not running.
+	 * What is not running because of this verdict, from both directions.
 	 *
-	 * Read off the loader rather than kept in a list here, so it cannot drift
-	 * from what the composition actually says. A row counts as parked when it
-	 * injects the token and is not ACTIVE — the same test whether this row
-	 * parked it or it was never going to load anyway, which is honest: both are
-	 * rows the composition asked for and did not get.
+	 * **What the rows said.** `whenWatched()` reports itself through
+	 * `deferred()`, which is the mechanism in force for `hmr` and `rlm-hmr`.
+	 * These rows are ACTIVE; it is the watcher inside them that is not, and no
+	 * amount of looking at fiber states would show it.
+	 *
+	 * **What the composition says.** The loader is still read for rows carrying
+	 * `inject: [token]`, because nothing stops an overlay or a future row from
+	 * using that spelling, and a row parked that way is genuinely not running.
+	 * Stock `cordis.yml` no longer has any — this branch finds nothing here, and
+	 * that is the point of the change rather than dead code: the report has to
+	 * keep telling the truth for a composition that is not this one.
+	 *
+	 * A row counts as parked from the loader when it injects the token and is
+	 * not ACTIVE, whether this row parked it or it was never going to load
+	 * anyway. Both are rows the composition asked for and did not get.
 	 */
 	parked(): string[] {
-		if (!this.verdict.on) return [];
-		const out: string[] = [];
+		if (this.live) return [];
+		const out = new Set<string>(this.standDown);
 		try {
 			for (const entry of (this.ctx as any).loader?.entries?.() ?? []) {
 				const options = entry?.options ?? {};
 				if (!options.name || options.disabled) continue;
 				if (!injectsToken(options.inject, this.token)) continue;
 				if (entry?.fiber?.state === ACTIVE) continue;
-				out.push(options.id ?? options.name);
+				out.add(options.id ?? options.name);
 			}
 		} catch {
 			/* no loader, or a shape this does not know — an empty list is honest */
 		}
-		return out;
+		return [...out];
 	}
 
 	/** The decision and what it cost, in the words a person would use. */
 	explain(): string {
 		const report = this.report();
-		if (!report.on) return `headless off — ${report.why}`;
+		const watched = report.watching ? ` — watching ${report.watching}` : "";
+		if (!report.on) return `headless off — ${report.why}${watched}`;
+		if (report.watching) {
+			return `headless on — ${report.why} — but ${report.watching} is open, so the live rows are up for it`;
+		}
 		return [
 			`headless on — ${report.why}`,
 			report.parked.length
 				? `  not started: ${report.parked.join(", ")}`
-				: `  nothing was left out — no row in this composition injects ${this.token}`,
+				: "  nothing was left out — no row in this composition asked to be",
 		].join("\n");
 	}
 }

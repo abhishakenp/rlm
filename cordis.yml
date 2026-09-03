@@ -58,22 +58,30 @@
 
 # ─── Who is watching ─────────────────────────────────────────────────────────
 #
-# Every row below that carries `inject: [rlmLive]` exists for a person sitting
-# at a terminal, and this row is what decides whether there is one. It hands
-# out `rlmLive` when somebody is watching and withholds it when nobody is, so a
-# `--print` child — fifteen seconds long, one question, no terminal — never
-# starts them at all.
+# Some rows below exist for a person sitting at a terminal, and this row is
+# what decides whether there is one. It publishes that verdict as `rlmHeadless`
+# and hands out `rlmLive` while somebody is watching, so a `--print` child —
+# fifteen seconds long, one question, no terminal — never opens a file watcher
+# it will not live long enough to use.
 #
-# Withheld rather than disabled on purpose. Rows mount concurrently (the loader
-# creates every entry in one `Promise.allSettled`), so a row that reached in
-# and switched `hmr` off would always be switching off a watcher that had
-# already opened its 1,207 file descriptors. A row waiting on a service that
-# never arrives opens nothing.
+# **This row is an opinion, and removing it removes the opinion.** No row here
+# names `rlmLive` in an `inject` any more, and that is deliberate: an injected
+# token that nothing provides parks its row for ever, so deleting this entry
+# used to leave `hmr`, `rlm-hmr`, `tui` and `renderer` all PENDING — hot reload
+# and the renderer silently off, in a composition that never mentions
+# headlessness. Take this row out now and rlm boots exactly as it did before
+# the row existed: everything mounted, everything in the foreground.
 #
-# The park list is here rather than in that row's config because this is where
-# it belongs: "this exists for a human" is a fact about the composition, it is
-# visible in `rlm rows` beside everything else, and the overlay can add a row
-# to the set or take one out without touching any code.
+# The expensive rows ask instead of being told, through `whenWatched()` in
+# `packages/rlm-hmr/src/live.ts`. It probes `rlmHeadless` from inside a child
+# fiber that waits on `loader` with `await: true`, so the question is asked
+# after the composition has settled and before anything is opened — which is
+# what the concurrent `Promise.allSettled` mount made impossible for a plain
+# probe in `apply`. Nothing is opened and then closed.
+#
+# `rlm rows` therefore shows these rows ACTIVE in a headless run; what is left
+# out is inside them. `rlmHeadless.explain()` is what names it, from the rows'
+# own reports rather than from a fiber state.
 
 - id: headless
   name: './packages/rlm-headless/src/index.ts'
@@ -90,22 +98,29 @@
 # official plugin present — under bun, or without --expose-internals — rlm-hmr
 # reloads modules itself instead.
 #
-# Both are `rlmLive`, and `hmr` is the expensive one: chokidar cannot resolve
-# `fsevents` in this repo, so it falls back to one `fs.watch` per file and
-# holds 1,207 open descriptors over `packages/` — every README, CHANGELOG, PNG
-# and .pyc included — all of them stat'd and opened before the first token is
-# asked for. Nothing edits a file during a fifteen-second answer.
+# Both stand down when nobody is watching, and `hmr` is the expensive one:
+# chokidar cannot resolve `fsevents` in this repo, so it falls back to one
+# `fs.watch` per file and holds ~1,283 open descriptors over `packages/` —
+# every README, CHANGELOG, PNG and .pyc included — all of them stat'd and
+# opened before the first token is asked for. Nothing edits a file during a
+# fifteen-second answer. Measured on this composition: 1,327 open descriptors
+# watching, 26 not.
 #
-# `rlm-hmr` has to be parked alongside it and not on its own: in `auto` mode it
-# falls back to watching everything *itself* when the official plugin is
-# absent, so parking only `hmr` would move the cost rather than remove it.
+# `rlm-hmr` has to stand down alongside it and not on its own: in `auto` mode
+# it watches the package roots *itself* whether or not the official plugin is
+# there, so standing only `hmr` down would move the cost rather than remove it.
+#
+# `hmr` is a package and cannot be taught to ask the question, so it is reached
+# through `./packages/rlm-hmr/src/official.ts` — a row that always mounts, costs
+# nothing, and mounts the real plugin as a child fiber once the verdict is in.
+# The plugin still provides the `hmr` service from there, which is what
+# `rlm-hmr` probes to decide whether to bridge or reload modules itself.
 
 - id: timer
   name: '@deepseek-ai/cordis-plugin-timer'
 
 - id: hmr
-  name: '@deepseek-ai/cordis-plugin-hmr'
-  inject: ['rlmLive']
+  name: './packages/rlm-hmr/src/official.ts'
   config:
     root: ['packages']
     ignored: ['**/node_modules', '**/dist', '**/.*']
@@ -113,7 +128,6 @@
 
 - id: rlm-hmr
   name: './packages/rlm-hmr/src/index.ts'
-  inject: ['rlmLive']
   config:
     roots: ['packages']
     debounce: 100
@@ -130,13 +144,15 @@
   config:
     projectRoot: .
 
-# `rlmLive`: panels, spinners and key handling, for a terminal a one-shot answer
-# does not have. Reached from a code cell as `tui.*` through a `globalThis`
-# proxy that already tolerates its absence, so a headless run degrades rather
-# than throws.
+# Panels, spinners and key handling, for a terminal a one-shot answer does not
+# have. Reached from a code cell as `tui.*` through a `globalThis` proxy.
+#
+# No gate, on measurement: this row's entire mount is one `globalThis`
+# assignment and a log line — every panel it can draw is created on demand. It
+# used to be parked in a headless run, which bought nothing and cost the code
+# cell its `tui.*` handle.
 - id: tui
   name: './packages/rlm-tui/src/index.ts'
-  inject: ['rlmLive']
 
 - id: prompt
   name: './packages/rlm-prompt/src/index.ts'
@@ -247,12 +263,16 @@
 - id: agent
   name: './packages/rlm-agent/src/index.ts'
   config:
-# `rlmLive`: this row *is* the interactive surface. The `interactive` mode is
-# the only thing that asks for it, and that mode cannot be reached in a run
-# nobody is watching — `--headless` implies `--print`.
+# This row *is* the interactive surface, and it is already gated by being one:
+# everything expensive lives behind `start()`, which only the `interactive`
+# mode calls, and that mode cannot be reached in a run nobody is watching —
+# `--headless` implies `--print`. `[Service.init]` only subscribes to events.
+#
+# So it is not parked either. Parking never saved the one cost it does pay, a
+# static import of the theme module, because the loader has to import a row's
+# module to find the plugin object even when the fiber then parks for ever.
 - id: renderer
   name: './packages/rlm-tui-renderer/src/index.ts'
-  inject: ['rlmLive']
   config:
     cwd: .
 

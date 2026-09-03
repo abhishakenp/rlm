@@ -46,6 +46,7 @@ import { join, relative, sep } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
+import { whenWatched } from "./live.ts";
 
 const require_ = createRequire(import.meta.url);
 
@@ -161,7 +162,14 @@ export class RlmHmrService extends Service {
 			);
 		}
 
-		this.ctx.effect(() => {
+		// Gated, not injected. This row used to carry `inject: ['rlmLive']` in
+		// `cordis.yml`, which parked it whenever the headless row withheld that
+		// token — and parked it for ever when the headless row was removed from
+		// the composition altogether, because then nobody provided the token at
+		// all. Asking at the use site instead means no headless row is no
+		// opinion, and no opinion is "watch, the way rlm always did". See
+		// `./live.ts` for why this is race-free without `inject`.
+		whenWatched(this.ctx, "rlm-hmr", () => {
 			const watchers = this.install();
 			return () => {
 				for (const w of watchers) {
