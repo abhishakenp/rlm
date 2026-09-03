@@ -76,15 +76,59 @@ export class RlmModesService extends Service {
 			.sort((a, b) => b.priority - a.priority);
 	}
 
+	/**
+	 * The verb first, wherever the flags happen to sit.
+	 *
+	 * Every mode claims on `argv[0] === "<verb>"`, which is a rule about
+	 * position and not about the verb, and it fails the moment anything is put
+	 * in front of it. `scripts/drive-supervisor.sh` started passing
+	 * `cordis-shell.mjs --headless drive` — a correct thing to want, since the
+	 * drive was never being told it is headless — and from that moment
+	 * `argv[0]` was `--headless`, no verb mode claimed the invocation, and
+	 * `print` took it instead: `print` claims whenever stdin is not a TTY,
+	 * which under launchd it never is. Print then found no prompt and returned
+	 * 1 through a logger nothing was reading.
+	 *
+	 * So every sweep exited 1 in under a second, saying nothing at all, and the
+	 * backlog stopped moving while the log looked like a supervisor doing its
+	 * job. Measured: three consecutive `sweep ended rc=1` one second after
+	 * `sweep starting`, with an empty stdout and an empty stderr.
+	 *
+	 * The flags are moved after the verb rather than dropped, because they are
+	 * still meant for whoever reads them — `detect()` in @rlm/headless scans
+	 * the whole line and does not care where the flag sits.
+	 *
+	 * `--print` and `--mode` are left alone: both own the token that follows
+	 * them, so `rlm --print "tasks"` must stay a print of the word "tasks" and
+	 * not become the tasks mode.
+	 */
+	private hoist(argv: string[]): string[] {
+		if (!argv.length || !argv[0].startsWith("-")) return argv;
+		if (argv.includes("--print") || argv.includes("--mode")) return argv;
+		for (let i = 1; i < argv.length; i++) {
+			const arg = argv[i];
+			// Not a bare token, or a bare token that names no mode — a flag's
+			// value, most likely. Either way it is not the verb.
+			if (arg.startsWith("-") || !this.modes.has(arg)) continue;
+			// The flags go to the *end*, not straight after the verb: a verb with
+			// a sub-verb reads it as `argv[1]`, and `drive --headless status` would
+			// leave `--headless` sitting where `status` has to be — which silently
+			// turns a status query into a live sweep.
+			return [arg, ...argv.slice(i + 1), ...argv.slice(0, i)];
+		}
+		return argv;
+	}
+
 	/** Which mode this invocation belongs to. */
 	choose(argv: string[] = process.argv.slice(2)): Mode | undefined {
 		if (this.config.force) return this.modes.get(this.config.force);
 		const flagged = argv.indexOf("--mode");
 		if (flagged !== -1 && argv[flagged + 1]) return this.modes.get(argv[flagged + 1]);
+		const line = this.hoist(argv);
 		return [...this.modes.values()]
 			.filter((m) => {
 				try {
-					return m.claims(argv);
+					return m.claims(line);
 				} catch {
 					return false;
 				}
@@ -94,12 +138,15 @@ export class RlmModesService extends Service {
 
 	/** Choose and run. Resolves with the exit code the host should use. */
 	async dispatch(argv: string[] = process.argv.slice(2)): Promise<number> {
+		// The mode runs on the same line `choose` judged it by, or a verb with
+		// a sub-verb — `drive status` — would lose the sub-verb to the flags.
+		const line = this.hoist(argv);
 		const mode = this.choose(argv);
 		if (!mode) {
 			throw new Error(`no mode claims this invocation. Known modes: ${this.list().map((m) => m.id).join(", ") || "(none)"}`);
 		}
 		this.ctx.logger?.info?.(`modes: ${mode.id}`);
-		return await mode.run(argv);
+		return await mode.run(line);
 	}
 
 	// ── the two rlm has always had ───────────────────────────────────────────
@@ -125,6 +172,19 @@ export class RlmModesService extends Service {
 						if (!service) throw new Error("the print row is not mounted");
 						const prompt = this.printPrompt(argv) ?? (await readStdin());
 						if (!prompt) {
+							// stderr and not only the logger. A non-zero exit that
+							// explains itself nowhere is what let the whole fleet
+							// stop for an hour a sweep while the supervisor's log
+							// read "sweep starting / sweep ended rc=1" and nothing
+							// else. Anything that exits non-zero has to say why on a
+							// stream somebody is actually capturing.
+							const known = this.list().map((m) => m.id).join(", ");
+							process.stderr.write(
+								`[rlm] nothing to do: no mode claimed this invocation, so it fell through to print, ` +
+									`and there was no prompt to print.\n` +
+									`[rlm] the command line was: ${argv.join(" ") || "(empty)"}\n` +
+									`[rlm] modes that could have claimed it: ${known || "(none)"}\n`,
+							);
 							this.ctx.logger?.warn?.('modes: nothing to do — pass --print "..." or pipe something in');
 							return 1;
 						}
