@@ -35,6 +35,22 @@ while true; do
   done
   if [ "$stood_down" = "1" ]; then sleep 60; continue; fi
 
+  # One sweep at a time, across processes.
+  #
+  # There is no cross-process lock on the store, so two drives can pick up the
+  # same task and both work it. That used to be prevented only by there being
+  # exactly one supervisor — which stopped being true the moment a supervisor
+  # died and left its sweep running with ppid 1, and again the moment this
+  # became a launchd job that starts whether or not an orphan is still going.
+  # `pgrep -f` sees every drive on the machine, orphan or not, so this holds
+  # even when nothing is anybody's child any more.
+  others=$(/usr/bin/pgrep -f "cordis-shell.mjs drive" | /usr/bin/grep -v "^$$\$" | /usr/bin/wc -l | /usr/bin/tr -d ' ')
+  if [ "$others" != "0" ]; then
+    echo "[$(date +%H:%M:%S)] a drive is already sweeping ($others) — standing by" >> "$LOG"
+    sleep 30
+    continue
+  fi
+
   echo "[$(date +%H:%M:%S)] sweep starting" >> "$LOG"
   if [ -n "$TIMEOUT" ]; then
     "$TIMEOUT" 3600 "$N" cordis-shell.mjs drive >> "$LOG" 2>&1

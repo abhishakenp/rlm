@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.abhi.rlm.drive</string>
+
+  <!-- The supervisor is the thing that keeps the backlog moving. It used to be
+       whatever shell happened to have started it, and when that parent died the
+       running sweep was orphaned to ppid 1 and nothing ever started another one
+       — the backlog stopped and nothing said so. launchd has no parent to lose. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>/Users/abhi/proj/rlm/scripts/drive-supervisor.sh</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- The script is its own forever-loop; KeepAlive is the backstop for the
+       loop itself dying. Throttled so a script that fails instantly cannot spin. -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/abhi/proj/rlm</string>
+
+  <!-- launchd hands a job a minimal PATH with no /opt/homebrew/bin. The script
+       names its own tools by full path and exports a real PATH for the
+       children, but this makes the job's own environment sane too. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/abhi/.local/share/fnm/node-versions/v22.23.1/installation/bin</string>
+    <key>HOME</key>
+    <string>/Users/abhi</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/abhi/.rlm/agent/delegate/supervisor.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/abhi/.rlm/agent/delegate/supervisor.launchd.log</string>
+</dict>
+</plist>
