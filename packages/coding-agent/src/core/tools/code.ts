@@ -22,7 +22,8 @@ import * as os from "node:os";
 import { existsSync } from "node:fs";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { TextContent } from "@earendil-works/pi-ai";
-import { type Static, Type } from "typebox";
+import type { Static } from "typebox";
+import { Type } from "@earendil-works/pi-ai/typebox";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 

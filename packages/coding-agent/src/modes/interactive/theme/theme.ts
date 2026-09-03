@@ -14,7 +14,8 @@ import {
 	type SelectListTheme,
 } from "@earendil-works/pi-tui";
 import chalk from "chalk";
-import { type Static, type TProperties, Type } from "typebox";
+import type { Static, TProperties } from "typebox";
+import { Type } from "@earendil-works/pi-ai/typebox";
 import type { Validator } from "typebox/compile";
 import { getCustomThemesDir, getThemesDir } from "../../../config.js";
 import type { SourceInfo } from "../../../core/source-info.js";
@@ -118,7 +119,7 @@ let validateThemeJson: Validator<TProperties, typeof ThemeJsonSchema> | undefine
 let themeValidatorPromise: Promise<void> | undefined;
 
 export function preloadThemeValidator(): Promise<void> {
-	themeValidatorPromise ??= import("typebox/compile").then(({ Compile }) => {
+	themeValidatorPromise ??= import("@earendil-works/pi-ai/typebox").then(({ Compile }) => {
 		validateThemeJson = Compile(ThemeJsonSchema);
 	});
 	return themeValidatorPromise;

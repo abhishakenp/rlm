@@ -2,7 +2,8 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Box, type Component, Container, Spacer, Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
-import { type Static, Type } from "typebox";
+import type { Static } from "typebox";
+import { Type } from "@earendil-works/pi-ai/typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.js";
 import {
 	countChangedLines,

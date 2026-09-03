@@ -9,7 +9,7 @@
  *
  * Used via baseToolsOverride in createAgentSession() to replace kernel.
  */
-import { Type } from "typebox";
+import { Type } from "@earendil-works/pi-ai/typebox";
 
 const jsCodeSchema = Type.Object({
 	code: Type.String({

@@ -1,0 +1,1 @@
+- Changed `Type`, `Compile` and `Value` to load from a bundled build of typebox, removing 20-25 MB of per-process module-loading overhead without any change to schema building or validation behaviour. Added the `@earendil-works/pi-ai/typebox` subpath export and the `bundle-typebox` script that regenerates it.

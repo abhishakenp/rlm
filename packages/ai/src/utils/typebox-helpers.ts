@@ -1,4 +1,5 @@
-import { type TUnsafe, Type } from "typebox";
+import type { TUnsafe } from "typebox";
+import { Type } from "../typebox.js";
 
 /**
  * Creates a string enum schema compatible with Google's API and other providers

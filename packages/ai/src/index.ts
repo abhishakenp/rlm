@@ -1,5 +1,5 @@
 export type { Static, TSchema } from "typebox";
-export { Type } from "typebox";
+export { Type } from "./typebox.js";
 
 export * from "./api-registry.js";
 export * from "./env-api-keys.js";

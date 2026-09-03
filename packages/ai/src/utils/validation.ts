@@ -1,6 +1,5 @@
-import { Compile } from "typebox/compile";
+import { Compile, Value } from "../typebox.js";
 import type { TLocalizedValidationError } from "typebox/error";
-import { Value } from "typebox/value";
 import type { Tool, ToolCall } from "../types.js";
 
 const validatorCache = new WeakMap<object, ReturnType<typeof Compile>>();
