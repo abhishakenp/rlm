@@ -607,7 +607,27 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 		 */
 		const barren = new Map<string, string>();
 		for (;;) {
-			if (abort.signal.aborted || stoppedBy) return;
+			if (abort.signal.aborted || stoppedBy) {
+				// Wait for what is already running, so its results are journalled
+				// rather than abandoned mid-write. The batch version got this for
+				// free by awaiting the whole set; a rolling one has to say it.
+				//
+				// Bounded, though, and that is the point. The reason a sweep aborts
+				// is usually that it has been declared stuck, and a stuck sweep is
+				// exactly the one whose graphs will not come back — waiting on them
+				// without a bound puts the stop back where it started, needing the
+				// process killed. Twenty seconds is enough for a turn that is
+				// finishing to write down what it did, and short enough that the
+				// hard exit stays the last resort rather than the usual route out.
+				if (live.size) {
+					const grace = new Promise<void>((resolve) => {
+						const timer = setTimeout(resolve, 20_000);
+						timer.unref?.();
+					});
+					await Promise.race([Promise.allSettled([...live.values()]), grace]);
+				}
+				return;
+			}
 			const open = read();
 			const mark = fingerprint(open);
 			// Judged now, against a read taken after they finished.

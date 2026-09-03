@@ -591,6 +591,13 @@ export class RlmDelegateService extends Service {
 					only: argv.filter((a) => a.startsWith("g-")).length ? argv.filter((a) => a.startsWith("g-")) : undefined,
 				});
 				console.log(renderReport(report));
+				// A sweep that ended itself because it had stopped working is not
+				// the same outcome as one that worked everything it could, and the
+				// supervisor's log is where the difference has to be visible. 75 is
+				// EX_TEMPFAIL: distinct from the 1 that means "settled, still owed",
+				// from the 78 a broken composition exits, and from the 124 the
+				// external timeout leaves behind.
+				if (report.ended === "stalled") return 75;
 				return report.owed.length ? 1 : 0;
 			},
 		});
