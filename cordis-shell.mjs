@@ -116,7 +116,17 @@ function requireModernNode() {
 
 requireModernNode();
 
-if (!process.execArgv.includes("--expose-internals")) {
+// Bun needs neither of the two flags, so there is nothing for a re-exec to add.
+// It executes TypeScript itself, and it has no `--expose-internals`: handing it
+// `--import node_modules/tsx/dist/loader.mjs` fails outright with "Cannot find
+// module './cjs/index.cjs'" and the child dies before there is a composition to
+// report it. What the flag buys is module hot reload, and the processes started
+// under bun are pooled workers and `--print` children, which never reload
+// anything. `cordis-plugin-loader` reports the internal loader as unreachable,
+// `packages/rlm-hmr/src/official.ts` already reads exactly that case and says so
+// in the log, and `rlm-hmr` reloads modules itself. Under node nothing changes:
+// `process.versions.bun` is undefined and the re-exec happens as before.
+if (!process.versions.bun && !process.execArgv.includes("--expose-internals")) {
 	const localTsx = join(here, "node_modules", "tsx", "dist", "loader.mjs");
 	if (!existsSync(localTsx)) die("missing node_modules/tsx — run `npm install` first");
 	const { spawn } = await import("node:child_process");

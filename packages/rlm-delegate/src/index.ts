@@ -982,17 +982,30 @@ export class RlmDelegateService extends Service {
 		// question. Probed with `ctx.get` and not `inject`: cordis 4 has no
 		// optional inject, and a composition without `@rlm/headless` must still
 		// be able to spawn a child — it would simply spawn a more expensive one.
-		const childFlags =
-			(this.ctx.get("rlmHeadless") as { childNodeFlags?: () => string[] } | undefined)?.childNodeFlags?.() ?? [];
+		const headless = this.ctx.get("rlmHeadless") as
+			| {
+					childNodeFlags?: () => string[];
+					childRuntimeFlags?: () => string[];
+					childRuntime?: () => { command: string; kind: "node" | "bun" };
+					childPoolSlots?: () => number;
+			  }
+			| undefined;
+		// What *runs* an unwatched child, asked of the same row and for the same
+		// reason the flags are. Measured: the interpreter floor is 39 MB for node
+		// and 21 MB for bun, and a node child also carries the tsx loader and the
+		// `esbuild --service` process tsx starts beside it. A composition without
+		// the row keeps the interpreter running this one, which is what it always
+		// did.
+		const runtime = headless?.childRuntime?.() ?? { command: process.execPath, kind: "node" as const };
+		const childFlags = headless?.childRuntimeFlags?.() ?? headless?.childNodeFlags?.() ?? [];
 
 		// Whether children are pooled is the headless row's answer too, for the
 		// same reason the flags are: what an unwatched child costs is a fact
 		// about unwatched children. Probed with `ctx.get`, so a composition
 		// without `@rlm/headless` spawns one process per task exactly as before —
 		// that is the whole of the switch, and it is the one he asked for.
-		const slots =
-			(this.ctx.get("rlmHeadless") as { childPoolSlots?: () => number } | undefined)?.childPoolSlots?.() ?? 0;
-		const pool = slots > 1 ? this.workers(slots, childFlags) : null;
+		const slots = headless?.childPoolSlots?.() ?? 0;
+		const pool = slots > 1 ? this.workers(slots, childFlags, runtime) : null;
 		// Said out loud on the way in, beside the me-2 line, for the same reason:
 		// "children are pooled" is exactly the kind of claim that is invisible
 		// when it is false, and the whole point of the pool is a number he can
@@ -1000,8 +1013,8 @@ export class RlmDelegateService extends Service {
 		// drive's own log, which is where somebody looks.
 		console.log(
 			pool
-				? `  children are pooled — ${slots} task(s) per worker, at most ${Math.max(1, Math.ceil(this.capacity().limit / slots))} worker(s)`
-				: "  children are one process each — no headless row asked for a pool",
+				? `  children are pooled on ${runtime.kind} — ${slots} task(s) per worker, at most ${Math.max(1, Math.ceil(this.capacity().limit / slots))} worker(s)`
+				: `  children are one ${runtime.kind} process each — no headless row asked for a pool`,
 		);
 
 		const makeRunner =
@@ -1013,6 +1026,8 @@ export class RlmDelegateService extends Service {
 							entry: this.config.entry ?? process.argv[1],
 							cwd: this.config.cwd ?? process.cwd(),
 							timeoutMs: this.config.attemptTimeoutMs ?? 2_700_000,
+							node: runtime.command,
+							runtime: runtime.kind,
 							nodeFlags: childFlags,
 							signal,
 						}));
@@ -1042,6 +1057,8 @@ export class RlmDelegateService extends Service {
 					entry: this.config.entry ?? process.argv[1],
 					cwd: this.config.cwd ?? process.cwd(),
 					timeoutMs: Math.min(this.config.attemptTimeoutMs ?? 2_700_000, 600_000),
+					node: runtime.command,
+					runtime: runtime.kind,
 					nodeFlags: childFlags,
 					signal,
 					...(bound ? { confine: bound } : {}),
@@ -1099,12 +1116,14 @@ export class RlmDelegateService extends Service {
 	 * divided by how many tasks fit in one process. Inventing a second limit
 	 * beside `capacity()` is exactly what the guard row exists to stop.
 	 */
-	private workers(slots: number, childFlags: string[]): AgentPool {
+	private workers(slots: number, childFlags: string[], runtime: { command: string; kind: "node" | "bun" }): AgentPool {
 		if (this.pool) return this.pool;
 		this.pool = new AgentPool({
 			entry: this.config.entry ?? process.argv[1],
 			cwd: this.config.cwd ?? process.cwd(),
 			timeoutMs: this.config.attemptTimeoutMs ?? 2_700_000,
+			node: runtime.command,
+			runtime: runtime.kind,
 			nodeFlags: childFlags,
 			slots,
 			maxWorkers: Math.max(1, Math.ceil(this.capacity().limit / slots)),

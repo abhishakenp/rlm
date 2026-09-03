@@ -88,6 +88,9 @@
  * *running* composition moves the same way: `rlmHeadless` goes, the rows hear
  * it, and they come up, which is the one behaviour `inject` got backwards.
  */
+import { statSync } from "node:fs";
+import { homedir } from "node:os";
+import { delimiter, join } from "node:path";
 import { Service } from "@deepseek-ai/cordis";
 
 export const name = "rlm-headless";
@@ -135,6 +138,23 @@ export interface RlmHeadlessConfig {
 	 * Empty string means none.
 	 */
 	childFlags?: string;
+	/**
+	 * The interpreter an unwatched child is started with.
+	 *
+	 * A bare name is looked up on `PATH`; a path is used as given. When it
+	 * cannot be found the child falls back to the interpreter running this
+	 * process and says so once — the fleet must never become unable to spawn
+	 * because a setting names a binary that is not installed.
+	 */
+	childRuntime?: string;
+	/**
+	 * Flags for a bun child, space separated. Empty string means none.
+	 *
+	 * Separate from `childFlags` because they are not interchangeable: bun
+	 * ignores node's V8 sizing flags silently, and node does not know `--smol`.
+	 * Whichever runtime is chosen, only its own list is passed.
+	 */
+	childBunFlags?: string;
 	/**
 	 * Tasks one pooled worker may hold at once. `0` or `1` means no pool.
 	 *
@@ -202,6 +222,91 @@ const DEFAULT_CHILD_FLAGS = "--max-semi-space-size=2 --optimize-for-size";
  */
 const DEFAULT_POOL_SLOTS = 8;
 
+/**
+ * What an unwatched child is run by.
+ *
+ * **`node`, and the interpreter floor is why that is a surprise.** The case for
+ * bun was `bun -e ''` at 21 MB against `node -e ''` at 39 MB, plus the tsx
+ * loader a node child carries and the `esbuild --service` process tsx starts
+ * beside it at 16-17 MB. Bun runs TypeScript natively, so both of those really
+ * do go away — and the whole worker still costs more, because an empty
+ * interpreter is not the thing being paid for. Eight concurrent tasks through
+ * one warm pool, three runs each, sampled from outside with `ps` and
+ * `footprint`:
+ *
+ *              whole-tree RSS      footprint dirty     boot to ready
+ *     node     148-154 MB          101-109 MB          1.00-1.26 s
+ *     bun      250-266 MB          121-144 MB          0.50-0.75 s
+ *
+ * Bun also holds 70-94 MB the system lists as reclaimable, against node's
+ * 2.5-13 MB, which is most of the gap in the RSS column and is memory the OS
+ * can take back under pressure — so the honest number is the dirty one, and on
+ * that bun is 20-35 MB per worker worse, not better. It boots roughly twice as
+ * fast, and its throughput was better in two runs of three, on a workload whose
+ * wall clock is mostly a model call and therefore too noisy to bank.
+ *
+ * So the swap is built and it is one value away, and the default is the runtime
+ * that costs less, because reducing what a delegated agent costs is the whole
+ * point of the row this constant lives in. Set it to "bun" to trade ~30 MB a
+ * worker for half the boot latency.
+ *
+ * Everything else about bun checked out: it boots the whole composition and
+ * answers real tasks, IPC and detached process groups behave identically,
+ * `sandbox-exec` still refuses a write outside the scope, and a session written
+ * by a bun worker resumes in a node one from the same store.
+ *
+ * **The interactive host stays on node either way, and that part is permanent.**
+ * The flag bun cannot have is `--expose-internals`: `cordis-plugin-loader`
+ * reaches Node's internal ESM loader through it, `require("internal/modules/
+ * esm/loader")` throws outright under bun, and both `cordis-plugin-hmr` and
+ * `rlm-hmr.partialReload` need that loader to swap a module. A pooled worker
+ * and a `--print` child never reload a module, so they lose nothing; a person
+ * editing a row in front of a live rlm does, and that is the whole of the
+ * split.
+ *
+ * It is a setting rather than a constant so going back is one value and no
+ * migration: nothing about a child's state is written in a runtime's dialect.
+ */
+const DEFAULT_CHILD_RUNTIME = "node";
+
+/**
+ * What bun is handed instead of node's sizing flags.
+ *
+ * `--smol` is bun's own "prefer memory over speed" switch, the same trade
+ * `--optimize-for-size` and `--max-semi-space-size=2` make under V8. Bun
+ * accepts node's two silently — exit 0, no warning, no effect — so passing
+ * them would not break anything and would not do anything either, which is
+ * worse than passing the flag that works.
+ */
+const DEFAULT_CHILD_BUN_FLAGS = "--smol";
+
+/**
+ * A binary named on `PATH`, or nothing.
+ *
+ * `which` in twelve lines, because a row cannot shell out to answer a question
+ * asked on the spawn path. The three directories added at the end are not
+ * belt-and-braces: launchd hands a job a minimal `PATH` with no
+ * `/opt/homebrew/bin`, `drive-supervisor.sh` says so in its own header, and
+ * bun installs itself into `~/.bun/bin` which is on nobody's default path.
+ */
+const onPath = (name: string): string | null => {
+	const dirs = [
+		...(process.env.PATH ?? "").split(delimiter).filter(Boolean),
+		join(homedir(), ".bun", "bin"),
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+	];
+	for (const dir of name.includes("/") ? [""] : dirs) {
+		const candidate = name.includes("/") ? name : join(dir, name);
+		try {
+			if (statSync(candidate).isFile()) return candidate;
+		} catch {
+			/* not here */
+		}
+	}
+	return null;
+};
+
 export const configFields = [
 	{
 		key: "force",
@@ -229,6 +334,20 @@ export const configFields = [
 		default: DEFAULT_CHILD_FLAGS,
 		description:
 			"Node flags to start an unwatched one-shot child with, space separated. These are the ones that trade a little speed for a lot of resident memory, which is the right trade for a process that spends almost all of its life waiting on a model. Empty to pass none.",
+	},
+	{
+		key: "childRuntime",
+		type: "string",
+		default: DEFAULT_CHILD_RUNTIME,
+		description:
+			"What to run an unwatched one-shot child or a pooled worker with. 'bun' needs neither the tsx loader nor the esbuild service tsx starts beside it, and boots about twice as fast; measured on eight concurrent tasks in one warm pool it also costs 20-35 MB more dirty memory per worker than 'node', which is why node is the default. Both are fully working — a session written by one resumes in the other from the same store — so this is a one-value trade between boot latency and resident memory. The interactive host is not affected either way: it stays on node because module hot reload needs Node's internal ESM loader, which bun does not have. A name is looked up on PATH; a path is used as given; a binary that is not there falls back to whatever is running this, with a line in the log.",
+	},
+	{
+		key: "childBunFlags",
+		type: "string",
+		default: DEFAULT_CHILD_BUN_FLAGS,
+		description:
+			"Flags for a bun child, space separated. Bun accepts node's V8 sizing flags and does nothing with them, so it gets its own: --smol is the same trade in bun's words. Empty to pass none.",
 	},
 	{
 		key: "childPoolSlots",
@@ -328,6 +447,9 @@ export class RlmHeadlessService extends Service {
 	/** Releases the token, when it is currently handed out. */
 	private release?: () => void;
 
+	/** Said once, not once per spawn. */
+	private warnedRuntime = false;
+
 	/**
 	 * The one session being watched right now, or nothing.
 	 *
@@ -412,6 +534,58 @@ export class RlmHeadlessService extends Service {
 	 */
 	childNodeFlags(): string[] {
 		const raw = this.config.childFlags ?? DEFAULT_CHILD_FLAGS;
+		return raw.split(/\s+/).filter(Boolean);
+	}
+
+	/**
+	 * The interpreter an unwatched child should be started with, resolved.
+	 *
+	 * Deliberately **not** gated on `this.on`, for the same reason
+	 * `childNodeFlags()` is not: whether *this* process is watched says nothing
+	 * about the children it spawns.
+	 *
+	 * It answers a path and a kind rather than a name, because the two callers
+	 * need both: the path is what is exec'd, and the kind is what decides
+	 * whether a tsx loader and `--expose-internals` go on the command line in
+	 * front of it. Inferring the kind from the path is possible and is what
+	 * `runtimeOf` in `rlm-delegate` does as a fallback, but a symlink called
+	 * `node` pointing at bun would defeat it, and being wrong here is a child
+	 * that dies at boot.
+	 *
+	 * **Falling back is the point.** A setting naming a binary that is not
+	 * installed must not stop the fleet spawning — that is a configuration
+	 * mistake turning into an outage. So an unresolvable runtime becomes the
+	 * interpreter running this process, said once in the log rather than
+	 * silently, because a fleet quietly running on the other runtime from the
+	 * one that was asked for is exactly the kind of thing nobody notices until
+	 * the numbers do not match.
+	 */
+	childRuntime(): { command: string; kind: "node" | "bun" } {
+		const wanted = (this.config.childRuntime ?? DEFAULT_CHILD_RUNTIME).trim();
+		if (!wanted || wanted === "node") return { command: process.execPath, kind: "node" };
+		const found = onPath(wanted);
+		if (found) return { command: found, kind: /(^|\/)bun\d*$/.test(found) ? "bun" : "node" };
+		if (!this.warnedRuntime) {
+			this.warnedRuntime = true;
+			this.ctx.logger?.warn?.(
+				`headless: no \`${wanted}\` on PATH, so unwatched children run on ${process.execPath} instead`,
+			);
+		}
+		return { command: process.execPath, kind: "node" };
+	}
+
+	/**
+	 * The flags that child should be started with, for whichever runtime it is.
+	 *
+	 * One list or the other, never both and never the wrong one. Bun takes
+	 * node's V8 sizing flags without complaint and does nothing with them, so
+	 * passing them would look like a working setting and be a no-op; node
+	 * refuses `--smol` outright and exits 9. `childNodeFlags()` is still what
+	 * answers for node, so nothing that reads it has changed meaning.
+	 */
+	childRuntimeFlags(): string[] {
+		if (this.childRuntime().kind !== "bun") return this.childNodeFlags();
+		const raw = this.config.childBunFlags ?? DEFAULT_CHILD_BUN_FLAGS;
 		return raw.split(/\s+/).filter(Boolean);
 	}
 

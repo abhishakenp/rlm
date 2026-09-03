@@ -82,9 +82,7 @@
  * to `rlmHeadless.attend()`, which is where the fact belongs.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { rlmAgent, sessionFor, withCriterion, type AgentOptions } from "./agent.ts";
+import { planLaunch, rlmAgent, sessionFor, withCriterion, type AgentOptions } from "./agent.ts";
 import type { Graph, Task } from "./graph.ts";
 import type { Runner } from "./scheduler.ts";
 
@@ -443,15 +441,13 @@ export class AgentPool {
 	// ─── Workers ─────────────────────────────────────────────────────────────
 
 	private hire(): Worker | undefined {
-		const command = this.options.node ?? process.execPath;
-		// The same two decisions `agent.ts` makes, for the same reasons: skip
-		// rlm's re-exec when the tsx loader is where it should be (a launcher
-		// that does nothing but exec and wait measured 28 MB), and hand V8 the
-		// sizing flags, which only land on a command line we are writing.
-		const tsxLoader = join(dirname(this.options.entry), "node_modules", "tsx", "dist", "loader.mjs");
-		const direct = this.options.launcher !== true && existsSync(tsxLoader);
-		const nodeFlags = direct ? [...(this.options.nodeFlags ?? []), "--expose-internals", "--import", tsxLoader] : [];
-		const plain = [...nodeFlags, this.options.entry, "--headless", "--pool-worker", "--slots", String(this.slots)];
+		// The same decisions `agent.ts` makes, in the same function, so a worker
+		// and a one-shot can never be started differently by accident: skip rlm's
+		// re-exec (a launcher that does nothing but exec and wait measured 28 MB),
+		// hand the interpreter its sizing flags, and under bun leave out the tsx
+		// loader it does not need and the `--expose-internals` it does not have.
+		const { command, prefix } = planLaunch(this.options);
+		const plain = [...prefix, this.options.entry, "--headless", "--pool-worker", "--slots", String(this.slots)];
 		// The whole worker goes inside the sandbox, not each task. `sandbox-exec`
 		// applies the profile and then `exec`s in place, so the IPC descriptor and
 		// `NODE_CHANNEL_FD` survive it and the process that comes out is the same

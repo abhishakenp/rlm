@@ -59,6 +59,17 @@ export interface AgentOptions {
 	 */
 	launcher?: boolean;
 	/**
+	 * Which interpreter `node` names.
+	 *
+	 * Inferred from the binary's file name when it is not said, which is right
+	 * for `bun` and `node` and wrong for a symlink that hides one behind the
+	 * other — so the row that chooses the runtime says it outright rather than
+	 * letting a name decide. It changes two things and nothing else: bun runs
+	 * TypeScript itself, so there is no tsx loader to import, and bun has no
+	 * `--expose-internals`, so there is no re-exec for the flag to skip.
+	 */
+	runtime?: ChildRuntime;
+	/**
 	 * Extra Node flags for the child, in front of the entry point.
 	 *
 	 * Supplied by `@rlm/headless`, which is where the question "what should an
@@ -90,6 +101,59 @@ export interface AgentOptions {
 	confine?: (command: string, args: string[]) => string[];
 	onOutput?: (task: Task, chunk: string) => void;
 }
+
+/** The two interpreters a child can be. */
+export type ChildRuntime = "node" | "bun";
+
+/**
+ * Which interpreter a path names, read off its file name.
+ *
+ * A guess, and only a fallback: `@rlm/headless` resolves the runtime and says
+ * which it is, so this fires only for a caller that passed a binary and no
+ * verdict. Getting it wrong is not silent — a node binary treated as bun boots
+ * without the tsx loader and dies on the first `.ts` import, at the door.
+ */
+export const runtimeOf = (command: string): ChildRuntime => (/(^|[\\/])bun\d*(\.exe)?$/.test(command) ? "bun" : "node");
+
+/** What goes on the command line before the entry point, and what runs it. */
+export interface LaunchPlan {
+	command: string;
+	/** Everything in front of the entry point. */
+	prefix: string[];
+	runtime: ChildRuntime;
+}
+
+/**
+ * How to start a child, decided once for both spawners.
+ *
+ * `agent.ts` and `pool.ts` were making the same two decisions in the same words
+ * in two places, and the bun path adds a third to each. One function so they
+ * cannot drift — a worker started differently from a one-shot is a difference
+ * nobody would look for.
+ *
+ * **Under node** it is what it always was: skip rlm's own re-exec by handing
+ * node the two flags it only takes on a command line, and fall back to the
+ * re-exec if the tsx loader is not where it should be, because a wrong path
+ * here is a child that dies at boot rather than one that runs slower.
+ *
+ * **Under bun** there is nothing to skip and nothing to import. Bun executes
+ * TypeScript natively, so the tsx loader is not needed — which also removes the
+ * `esbuild --service` process tsx starts beside every child — and bun has no
+ * `--expose-internals`, so `cordis-shell.mjs` reads `process.versions.bun` and
+ * does not re-exec. The sizing flags still go on: bun ignores node's silently
+ * and takes its own.
+ */
+export const planLaunch = (
+	options: Pick<AgentOptions, "entry" | "node" | "runtime" | "nodeFlags" | "launcher">,
+): LaunchPlan => {
+	const command = options.node ?? process.execPath;
+	const runtime = options.runtime ?? runtimeOf(command);
+	const flags = options.nodeFlags ?? [];
+	if (runtime === "bun") return { command, prefix: [...flags], runtime };
+	const tsxLoader = join(dirname(options.entry), "node_modules", "tsx", "dist", "loader.mjs");
+	const direct = options.launcher !== true && existsSync(tsxLoader);
+	return { command, prefix: direct ? [...flags, "--expose-internals", "--import", tsxLoader] : [], runtime };
+};
 
 /**
  * One session per task, stable across every attempt on it.
@@ -130,7 +194,7 @@ export const withCriterion = (task: Task): string => {
 
 export const rlmAgent = (options: AgentOptions): Runner => {
 	return async (task: Task, graph: Graph): Promise<string> => {
-		const command = options.node ?? process.execPath;
+		const { command, prefix } = planLaunch(options);
 		// `--` before the prompt, always. Without it the prompt is just another
 		// token on a command line, and the moment a flag was added between
 		// `--print` and it, the reader took the flag instead and every child in
@@ -158,16 +222,8 @@ export const rlmAgent = (options: AgentOptions): Runner => {
 		// goes between `--print` and `--` again.
 		const headless = options.headless !== false ? ["--headless"] : [];
 
-		// Skip rlm's re-exec when we can hand Node the two flags it only takes on
-		// the command line. `existsSync` rather than trust: if the loader is not
-		// there, fall through and let cordis-shell re-exec itself, which is
-		// slower by one process and correct.
-		const tsxLoader = join(dirname(options.entry), "node_modules", "tsx", "dist", "loader.mjs");
-		const direct = options.launcher !== true && existsSync(tsxLoader);
-		const nodeFlags = direct ? [...(options.nodeFlags ?? []), "--expose-internals", "--import", tsxLoader] : [];
-
 		const args = [
-			...nodeFlags,
+			...prefix,
 			options.entry,
 			...headless,
 			"--print",
