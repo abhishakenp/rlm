@@ -9,13 +9,11 @@ import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { type Api, type ImageContent, type Model, modelsAreEqual } from "@earendil-works/pi-ai";
 import { registerBuiltinMcpOAuthProviders } from "@earendil-works/pi-ai/mcp";
-import { ProcessTerminal, setKeybindings, TUI } from "@earendil-works/pi-tui";
 import chalk from "chalk";
 import { type Args, type Mode, parseArgs } from "./cli/args.js";
 import { formatTopLevelHelp } from "./cli/command-registry.js";
 import { processFileArguments } from "./cli/file-processor.js";
 import { buildInitialMessage } from "./cli/initial-message.js";
-import { listModels } from "./cli/list-models.js";
 import { handlePublicCommand } from "./cli/public-command.js";
 import {
 	resolveSessionPath,
@@ -42,9 +40,7 @@ import {
 } from "./core/agent-session-services.js";
 import { formatNoModelsAvailableMessage } from "./core/auth-guidance.js";
 import { AuthStorage } from "./core/auth-storage.js";
-import { exportFromFile } from "./core/export-html/index.js";
 import type { ExtensionFactory } from "./core/extensions/types.js";
-import { KeybindingsManager } from "./core/keybindings.js";
 import { installFileLogSink, setLogContext } from "./core/logging.js";
 import type { ModelRegistry } from "./core/model-registry.js";
 import { findInitialModel, resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.js";
@@ -62,14 +58,7 @@ import { SettingsManager } from "./core/settings-manager.js";
 import { isTelemetryEnabled } from "./core/telemetry.js";
 import { printTimings, resetTimings, time } from "./core/timings.js";
 import { runMigrations, showDeprecationWarnings } from "./migrations.js";
-import {
-	ClientPromptStashStore,
-	createInteractiveModeLocalSessionHost,
-	InProcessAgentConnection,
-	InteractiveMode,
-	runPrintMode,
-} from "./modes/index.js";
-import { ExtensionSelectorComponent } from "./modes/interactive/components/extension-selector.js";
+import { runPrintMode } from "./modes/print-mode.js";
 import { initTheme, preloadCodeHighlighter, stopThemeWatcher } from "./modes/interactive/theme/theme.js";
 import { handleConfigCommand } from "./package-manager-cli.js";
 import { isLocalPath } from "./utils/paths.js";
@@ -615,6 +604,17 @@ async function promptForMissingSessionCwd(
 	issue: SessionCwdIssue,
 	settingsManager: SettingsManager,
 ): Promise<string | undefined> {
+	// Loaded here rather than at the top of the file: this prompt is the only
+	// thing in a non-interactive run that could ever want a terminal, and it
+	// fires only when a session's cwd has gone missing. A `--print` child that
+	// imported the TUI to never draw with it paid 366 KB of interactive-mode
+	// source and the whole of pi-tui on the way up, every time.
+	const [{ ProcessTerminal, setKeybindings, TUI }, { KeybindingsManager }, { ExtensionSelectorComponent }] =
+		await Promise.all([
+			import("@earendil-works/pi-tui"),
+			import("./core/keybindings.js"),
+			import("./modes/interactive/components/extension-selector.js"),
+		]);
 	initTheme(settingsManager.getTheme());
 	setKeybindings(KeybindingsManager.create());
 
@@ -717,6 +717,7 @@ export async function main(args: string[], options?: MainOptions) {
 		let result: string;
 		try {
 			const outputPath = parsed.messages.length > 0 ? parsed.messages[0] : undefined;
+			const { exportFromFile } = await import("./core/export-html/index.js");
 			result = await exportFromFile(parsed.export, outputPath);
 		} catch (error: unknown) {
 			const message = error instanceof Error ? error.message : "Failed to export session";
@@ -876,6 +877,7 @@ export async function main(args: string[], options?: MainOptions) {
 
 	if (parsed.listModels !== undefined) {
 		const searchPattern = typeof parsed.listModels === "string" ? parsed.listModels : undefined;
+		const { listModels } = await import("./cli/list-models.js");
 		await listModels(modelRegistry, searchPattern);
 		process.exit(0);
 	}
@@ -926,6 +928,12 @@ export async function main(args: string[], options?: MainOptions) {
 			console.log(chalk.dim(`Model scope: ${modelList} ${chalk.gray("(Ctrl+P to cycle)")}`));
 		}
 
+		// The interactive mode graph — 366 KB of `interactive-mode.ts` alone, plus
+		// eighty-odd components — is reached only from here. Imported at the top of
+		// the file it was reached by every `--print` child too, which is a terminal
+		// UI built, parsed and compiled for a process with no terminal.
+		const { InteractiveMode, createInteractiveModeLocalSessionHost, ClientPromptStashStore, InProcessAgentConnection } =
+			await import("./modes/index.js");
 		const interactiveMode = new InteractiveMode({
 			agentConnection: new InProcessAgentConnection(runtime),
 			localSessionHost: createInteractiveModeLocalSessionHost(runtime),

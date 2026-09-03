@@ -21,18 +21,26 @@
  * Hot-swappable: editing this file triggers fiber.restart() → fresh import.
  */
 import { Service } from "@deepseek-ai/cordis";
-import {
+/**
+ * Types only, on purpose — the values arrive in `start()`.
+ *
+ * This row injects `rlmLive`, so in an unwatched run its fiber never leaves
+ * PENDING. That parks its *effects*, not its *imports*: cordis's loader has to
+ * `import()` the module to get a plugin object out of it before it can decide
+ * the fiber must wait, so every static import in this file was paid in full by
+ * every `--print` child — 366 KB of `interactive-mode.ts` plus eighty-odd
+ * components and the whole of pi-tui, parsed and compiled for a renderer that
+ * was never going to render. Measured in the loaded-module set of a real
+ * headless child, not inferred.
+ *
+ * A `import type` is erased before the loader ever sees it, so the cost now
+ * follows the activation instead of the file.
+ */
+import type {
 	InteractiveMode,
-	type InteractiveModeOptions,
-	type InteractiveModeRunResult,
+	InteractiveModeOptions,
+	InteractiveModeRunResult,
 } from "../../coding-agent/src/modes/interactive/interactive-mode.js";
-import {
-	createInteractiveModeLocalSessionHost,
-} from "../../coding-agent/src/modes/interactive/interactive-mode-services.js";
-import {
-	InProcessAgentConnection,
-	ClientPromptStashStore,
-} from "../../coding-agent/src/modes/index.js";
 import { initTheme, preloadCodeHighlighter } from "../../coding-agent/src/modes/interactive/theme/theme.js";
 import type { AgentSessionRuntime } from "../../coding-agent/src/core/agent-session-runtime.js";
 
@@ -290,6 +298,14 @@ export class RlmRendererService extends Service {
 		initTheme(settingsManager.getTheme(), true);
 		await preloadCodeHighlighter();
 
+		// The interactive graph, fetched at the moment it is actually wanted.
+		const [{ InteractiveMode: InteractiveModeImpl }, { createInteractiveModeLocalSessionHost }, { InProcessAgentConnection, ClientPromptStashStore }] =
+			await Promise.all([
+				import("../../coding-agent/src/modes/interactive/interactive-mode.js"),
+				import("../../coding-agent/src/modes/interactive/interactive-mode-services.js"),
+				import("../../coding-agent/src/modes/index.js"),
+			]);
+
 		// Wire up the in-process agent connection + local session host.
 		const connection = new InProcessAgentConnection(this.runtime);
 		const localSessionHost = createInteractiveModeLocalSessionHost(this.runtime);
@@ -306,7 +322,7 @@ export class RlmRendererService extends Service {
 			verbose: opts.verbose,
 		};
 
-		this.instance = new InteractiveMode(interactiveOptions);
+		this.instance = new InteractiveModeImpl(interactiveOptions);
 		const result = await this.instance.run();
 
 		// Cleanup forwarding after InteractiveMode exits

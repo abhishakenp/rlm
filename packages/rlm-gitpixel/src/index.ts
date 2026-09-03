@@ -30,7 +30,7 @@ import { Service } from "@deepseek-ai/cordis";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 
 const require_ = createRequire(import.meta.url);
@@ -271,11 +271,85 @@ export class RlmGitpixelService extends Service {
 		});
 	}
 
+	/**
+	 * Delete graph-rebuild scratch DBs left behind by dead gitpixel processes.
+	 *
+	 * `gitpixel ready` rebuilds the graph into a sibling scratch file named
+	 * `.graph-rebuild-<pid>.db` (gitpixel-serve's api.rs) and renames it over
+	 * `graph.db` once it lands. A rebuild that dies before that rename leaves
+	 * the scratch file behind, and nothing ever collects it: this repository
+	 * was holding 55 of them, 686 MB, every one owned by a pid long gone.
+	 *
+	 * This row is what invokes `ready`, so this row owns the debris `ready`
+	 * leaves. Nothing here touches the `gitpixel sniper mcp` servers, which are
+	 * stdio children of whichever editor spawned them and are not ours to reap.
+	 *
+	 * Liveness is the only thing that authorises a delete, checked with
+	 * `kill(pid, 0)`: ESRCH means gone, EPERM means alive under another user.
+	 * A recycled pid therefore reads as alive and its file is kept — the
+	 * conservative direction, because leaking a scratch file costs disk while
+	 * deleting a live rebuild's file costs a corrupted index.
+	 */
+	private reapStaleRebuildDbs(): void {
+		const dir = join(this.cwd, ".gitpixel");
+		let names: string[];
+		try {
+			names = readdirSync(dir);
+		} catch {
+			return;
+		}
+
+		let freed = 0;
+		let count = 0;
+		for (const name of names) {
+			const match = /^\.graph-rebuild-(\d+)\.db$/.exec(name);
+			if (!match) continue;
+
+			// `kill(0, sig)` signals this whole process group and `kill(-n, sig)`
+			// signals group n. Neither can ever be a scratch file's owner, so both
+			// are refused here rather than at process.kill.
+			const pid = Number(match[1]);
+			if (!Number.isSafeInteger(pid) || pid <= 0) continue;
+
+			try {
+				process.kill(pid, 0);
+				continue; // alive, or alive but not ours — leave it alone
+			} catch (err) {
+				if ((err as NodeJS.ErrnoException).code !== "ESRCH") continue;
+			}
+
+			const file = join(dir, name);
+			try {
+				const size = statSync(file).size;
+				unlinkSync(file);
+				freed += size;
+				count += 1;
+			} catch {
+				// Raced with another session's reaper, or not ours to remove. The
+				// next session tries again; a missed file costs only disk.
+			}
+		}
+
+		if (count > 0) {
+			const mb = (freed / 1024 / 1024).toFixed(1);
+			const line = `rlm-gitpixel: reaped ${count} stale graph-rebuild db(s), ${mb} MB`;
+			this.diag(line);
+			this.ctx.logger?.info(line);
+		}
+	}
+
 	/** Wire the handlers onto one AgentSession's extension API. */
 	private register(pi: any) {
 		this.diag("rlm-gitpixel: attaching handlers to a session");
 		pi.on("session_start", () => {
 			this.seeded = false;
+
+			// Deliberately above both the warmOnStart check and the headless gate.
+			// What those two guard against is the cost of re-indexing a repository;
+			// this is a readdir plus one liveness check per match, and the directory
+			// it cleans only grows because nothing else ever looks at it.
+			this.reapStaleRebuildDbs();
+
 			if (this.config.warmOnStart === false) return;
 
 			// Not in a run nobody is watching.

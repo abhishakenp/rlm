@@ -59,6 +59,17 @@ export interface AgentOptions {
 	 */
 	launcher?: boolean;
 	/**
+	 * Extra Node flags for the child, in front of the entry point.
+	 *
+	 * Supplied by `@rlm/headless`, which is where the question "what should an
+	 * unwatched one-shot child cost" belongs. They are V8 sizing flags, so they
+	 * only take effect when we are handing Node its own command line — that is,
+	 * on the direct path. On the fallback path `cordis-shell.mjs` re-execs
+	 * itself and chooses its own flags, and quietly passing these where they
+	 * cannot land would be worse than not passing them.
+	 */
+	nodeFlags?: string[];
+	/**
 	 * Give up on one attempt after this long, and kill the group.
 	 *
 	 * Forty-five minutes by default. The fifteen that was here before killed
@@ -153,7 +164,7 @@ export const rlmAgent = (options: AgentOptions): Runner => {
 		// slower by one process and correct.
 		const tsxLoader = join(dirname(options.entry), "node_modules", "tsx", "dist", "loader.mjs");
 		const direct = options.launcher !== true && existsSync(tsxLoader);
-		const nodeFlags = direct ? ["--expose-internals", "--import", tsxLoader] : [];
+		const nodeFlags = direct ? [...(options.nodeFlags ?? []), "--expose-internals", "--import", tsxLoader] : [];
 
 		const args = [
 			...nodeFlags,

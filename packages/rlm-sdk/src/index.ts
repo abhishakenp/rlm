@@ -213,24 +213,44 @@ export class RlmSdkService extends Service {
 		// Load createAgentSession from the coding-agent package.
 		// In dev mode (tsx): imports from TS source.
 		// In installed mode: imports from compiled dist.
-		try {
-			const mod = await import("@earendil-works/pi-coding-agent");
-			this.createAgentSessionFn = mod.createAgentSession;
-		} catch {
+		//
+		// The narrow module first, and the barrel only if it is not reachable.
+		// `@earendil-works/pi-coding-agent` re-exports `./modes/index.js`, which
+		// reaches `InteractiveMode` — 366 KB of source plus eighty-odd terminal
+		// components — so asking the barrel for one function was how a `--print`
+		// child with no terminal came to compile the whole interactive UI. This
+		// row is the last importer of it in an unwatched run; measured in the
+		// child's loaded-module set before and after, not reasoned about.
+		//
+		// The order is preference, not correctness: every entry defines the same
+		// `createAgentSession`, so an installed layout that cannot serve the
+		// subpath still lands on a working one, exactly as before.
+		const sources: Array<() => Promise<{ createAgentSession?: unknown }>> = [
+			() => import("@earendil-works/pi-coding-agent/core/sdk.js"),
+			() =>
+				import(
+					/* @vite-ignore */ new URL("../../coding-agent/dist/core/sdk.js", import.meta.url).href
+				),
+			() => import("@earendil-works/pi-coding-agent"),
+			() =>
+				import(/* @vite-ignore */ new URL("../../coding-agent/dist/index.js", import.meta.url).href),
+		];
+		let lastError: unknown;
+		for (const open of sources) {
 			try {
-				// Fallback: direct path to dist
-				const mod = await import(
-					/* @vite-ignore */ new URL(
-						"../../coding-agent/dist/index.js",
-						import.meta.url,
-					).href
-				);
-				this.createAgentSessionFn = mod.createAgentSession;
+				const mod = (await open()) as { createAgentSession?: typeof this.createAgentSessionFn };
+				if (mod?.createAgentSession) {
+					this.createAgentSessionFn = mod.createAgentSession;
+					break;
+				}
 			} catch (error) {
-				this.ctx.logger?.warn(
-					`rlm-sdk: createAgentSession unavailable: ${error instanceof Error ? error.message : String(error)}`,
-				);
+				lastError = error;
 			}
+		}
+		if (!this.createAgentSessionFn) {
+			this.ctx.logger?.warn(
+				`rlm-sdk: createAgentSession unavailable: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+			);
 		}
 		this.ctx.logger?.info(
 			`rlm-sdk: TS SDK ready (maxDepth=${this.config.maxDepth ?? 10})`,

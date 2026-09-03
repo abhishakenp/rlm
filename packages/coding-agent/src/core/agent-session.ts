@@ -112,8 +112,11 @@ import {
 import type { AgentCronJob, AgentRlmHeartbeatController, AgentRlmHeartbeatStatusUpdate } from "./cron-jobs.js";
 import { normalizeHeartbeatDeliveryMode } from "./cron-jobs.js";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.js";
-import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.js";
-import { createToolHtmlRenderer } from "./export-html/tool-renderer.js";
+// Type-only: the HTML exporter — a 67 KB template script, `marked`, and the
+// ansi-to-html converter — is reached from exactly one method on this class,
+// and a `--print` child never calls it. Imported eagerly it was compiled into
+// every child that only ever wanted an answer on stdout.
+import type { ToolHtmlRenderer } from "./export-html/index.js";
 import {
 	type ContextUsage,
 	type ExtensionCommandContextActions,
@@ -12161,6 +12164,11 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 	 */
 	async exportToHtml(outputPath?: string): Promise<string> {
 		const themeName = this.settingsManager.getTheme();
+
+		const [{ exportSessionToHtml }, { createToolHtmlRenderer }] = await Promise.all([
+			import("./export-html/index.js"),
+			import("./export-html/tool-renderer.js"),
+		]);
 
 		const toolRenderer: ToolHtmlRenderer = createToolHtmlRenderer({
 			getToolDefinition: (name) => this.getToolDefinition(name),

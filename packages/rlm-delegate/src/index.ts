@@ -891,6 +891,14 @@ export class RlmDelegateService extends Service {
 	async drive(options: Partial<DriveOptions> = {}): Promise<DriveReport> {
 		if (this.config.enabled === false) throw new Error("rlm-delegate is switched off");
 		const stop = options.stop ?? this.stopper();
+
+		// What an unwatched child costs, asked of the row that owns that
+		// question. Probed with `ctx.get` and not `inject`: cordis 4 has no
+		// optional inject, and a composition without `@rlm/headless` must still
+		// be able to spawn a child — it would simply spawn a more expensive one.
+		const childFlags =
+			(this.ctx.get("rlmHeadless") as { childNodeFlags?: () => string[] } | undefined)?.childNodeFlags?.() ?? [];
+
 		const makeRunner =
 			options.makeRunner ??
 			((signal: AbortSignal) =>
@@ -898,6 +906,7 @@ export class RlmDelegateService extends Service {
 					entry: this.config.entry ?? process.argv[1],
 					cwd: this.config.cwd ?? process.cwd(),
 					timeoutMs: this.config.attemptTimeoutMs ?? 2_700_000,
+					nodeFlags: childFlags,
 					signal,
 				}));
 
@@ -926,6 +935,7 @@ export class RlmDelegateService extends Service {
 					entry: this.config.entry ?? process.argv[1],
 					cwd: this.config.cwd ?? process.cwd(),
 					timeoutMs: Math.min(this.config.attemptTimeoutMs ?? 2_700_000, 600_000),
+					nodeFlags: childFlags,
 					signal,
 					...(bound ? { confine: bound } : {}),
 				});
