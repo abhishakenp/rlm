@@ -296,7 +296,14 @@ export class RlmDelegateService extends Service {
 				this.mode = null;
 				const pool = this.pool;
 				this.pool = null;
-				void pool?.close().catch(() => {});
+				// Not `close()`. This teardown fires on every hot reload, and a
+				// sweep already running is not torn down with the row that
+				// started it — `driveGraphs` is an async call already in the air.
+				// Closing outright took the pool out from under a live drive and
+				// every task it submitted afterwards was refused "the pool is
+				// closed". `closeWhenIdle()` gives the memory back the moment the
+				// work in flight is done and not a task sooner.
+				pool?.closeWhenIdle();
 				for (const off of this.teardowns) {
 					try {
 						off();
@@ -1005,32 +1012,69 @@ export class RlmDelegateService extends Service {
 		// without `@rlm/headless` spawns one process per task exactly as before —
 		// that is the whole of the switch, and it is the one he asked for.
 		const slots = headless?.childPoolSlots?.() ?? 0;
-		const pool = slots > 1 ? this.workers(slots, childFlags, runtime) : null;
+		/**
+		 * The pool, resolved at the moment work is handed over rather than once
+		 * per sweep.
+		 *
+		 * A sweep used to capture the pool object in a closure. The row's
+		 * teardown then closed that object on the next hot reload — and a sweep
+		 * is not torn down with the row that started it, because `driveGraphs`
+		 * is an async call already in the air. So the sweep went on submitting
+		 * tasks to a corpse, and every one came back "the pool is closed": 883
+		 * of them across 42 graphs in the store when this was found, which is
+		 * also why the fleet was nothing but planners — a runner path that
+		 * refuses every task leaves the drive with nothing to do except ask the
+		 * planner to rewrite the criteria it keeps failing.
+		 *
+		 * Resolving per call fixes it at the root: a closed pool is dropped and
+		 * a live one is built, so no caller can be left holding a dead one.
+		 */
+		const poolNow = (): AgentPool | null => {
+			if (slots <= 1) return null;
+			if (this.pool?.isClosed()) this.pool = null;
+			return this.workers(slots, childFlags, runtime);
+		};
+		const pool = poolNow();
 		// Said out loud on the way in, beside the me-2 line, for the same reason:
 		// "children are pooled" is exactly the kind of claim that is invisible
 		// when it is false, and the whole point of the pool is a number he can
 		// see. `console.log` and not the logger — the logger does not reach the
 		// drive's own log, which is where somebody looks.
+		//
+		// Per path, and never as one blanket sentence. The blanket sentence is
+		// what made this defect survive: the log read "children are pooled" for
+		// hours while `ps` showed twenty-five one-shot planners and zero pool
+		// workers, because the runner path was pooled and the planner path —
+		// which was doing all of the actual spawning — was not, and one claim
+		// covering both paths reported the half that was true. A line that can
+		// be checked against `ps` has to name the path it is talking about.
+		const ceiling = Math.max(1, Math.ceil(this.capacity().limit / slots));
 		console.log(
 			pool
-				? `  children are pooled on ${runtime.kind} — ${slots} task(s) per worker, at most ${Math.max(1, Math.ceil(this.capacity().limit / slots))} worker(s)`
-				: `  children are one ${runtime.kind} process each — no headless row asked for a pool`,
+				? `  runners are pooled on ${runtime.kind} — ${slots} task(s) per worker, at most ${ceiling} worker(s)`
+				: `  runners are one ${runtime.kind} process each — no headless row asked for a pool`,
 		);
 
 		const makeRunner =
 			options.makeRunner ??
-			(pool
-				? (signal: AbortSignal) => pool.runner({ signal })
-				: (signal: AbortSignal) =>
-						rlmAgent({
-							entry: this.config.entry ?? process.argv[1],
-							cwd: this.config.cwd ?? process.cwd(),
-							timeoutMs: this.config.attemptTimeoutMs ?? 2_700_000,
-							node: runtime.command,
-							runtime: runtime.kind,
-							nodeFlags: childFlags,
-							signal,
-						}));
+			((signal: AbortSignal) => {
+				// Built once and used only if there is no pool to use, so the
+				// fallback costs nothing while pooling is on.
+				const alone = () =>
+					rlmAgent({
+						entry: this.config.entry ?? process.argv[1],
+						cwd: this.config.cwd ?? process.cwd(),
+						timeoutMs: this.config.attemptTimeoutMs ?? 2_700_000,
+						node: runtime.command,
+						runtime: runtime.kind,
+						nodeFlags: childFlags,
+						signal,
+					});
+				return (task: any, graph: any) => {
+					const live = poolNow();
+					return (live ? live.runner({ signal }) : alone())(task, graph);
+				};
+			});
 
 		// The planner is the same agent, asked a different question. Cheap to
 		// build here and worth having by default: without one, a request that is
@@ -1050,20 +1094,103 @@ export class RlmDelegateService extends Service {
 		// says so once. A bound nobody can see failing is worse than none.
 		const bound = confineTo(plannerScope());
 		if (!bound) this.ctx.logger?.warn?.("rlm-delegate: no sandbox-exec here, so the planner runs with the same reach as the runner");
+		// The planner's own line, because the planner's own answer is different
+		// from the runner's: it gets a separate pool when it is confined, and
+		// separate workers are a separate number in `ps`.
+		console.log(
+			!pool
+				? `  planners are one ${runtime.kind} process each — no headless row asked for a pool`
+				: bound
+					? `  planners are pooled on ${runtime.kind} in their own sandbox-exec workers — ${slots} plan(s) per worker, at most ${ceiling} worker(s), writes bound to ~/.plans`
+					: `  planners are pooled on ${runtime.kind} and UNCONFINED — sandbox-exec is not on this machine, so they share the runners' workers and the runners' reach`,
+		);
+		// The planner is pooled too, and this is where the whole cost was.
+		//
+		// It was not. `makePlanner` built a `rlmAgent` directly and never touched
+		// the pool, so every planning call was its own 138 MB process — while the
+		// log said "children are pooled", because the runner path was and this
+		// one was not. Measured on the live fleet the moment this was found:
+		// twenty-five one-shot children, 3005 MB, and every single one of them a
+		// planner. Zero pool workers. The refine phase runs planner calls up to
+		// `capacity().limit` at once by design (drive.ts), so the unpooled path
+		// was the one doing essentially all of the spawning in the fleet.
+		//
+		// Going through the pool changes nothing about what the planner is asked
+		// or where it resumes from: `pool.run()` builds its prompt with the same
+		// `withCriterion(task)` and its session with the same `sessionFor(graph,
+		// task)` that `rlmAgent` uses, so the prompt and the session id are
+		// identical on both paths. What changes is that the boot is paid once per
+		// worker instead of once per plan.
+		//
+		// The bound still holds, and it holds *more* tightly than a comment: a
+		// confined runner does not share these workers. `pool.runner({confine})`
+		// routes to a sibling pool of its own whose workers are themselves
+		// started inside `sandbox-exec` (pool.ts `hire()` wraps the worker argv,
+		// not each task), so every task in that pool is under one profile — which
+		// is the condition that makes sharing a process sound at all. A planner
+		// still cannot write outside `~/.plans`.
+		const plannerTimeoutMs = Math.min(this.config.attemptTimeoutMs ?? 2_700_000, 600_000);
 		const makePlanner =
 			options.makePlanner ??
 			((signal: AbortSignal) => {
-				const ask = rlmAgent({
-					entry: this.config.entry ?? process.argv[1],
-					cwd: this.config.cwd ?? process.cwd(),
-					timeoutMs: Math.min(this.config.attemptTimeoutMs ?? 2_700_000, 600_000),
-					node: runtime.command,
-					runtime: runtime.kind,
-					nodeFlags: childFlags,
-					signal,
-					...(bound ? { confine: bound } : {}),
-				});
-				return (prompt: string, task: any, graph: any) => ask({ ...task, prompt }, graph);
+				const alone = () =>
+					rlmAgent({
+						entry: this.config.entry ?? process.argv[1],
+						cwd: this.config.cwd ?? process.cwd(),
+						timeoutMs: plannerTimeoutMs,
+						node: runtime.command,
+						runtime: runtime.kind,
+						nodeFlags: childFlags,
+						signal,
+						...(bound ? { confine: bound } : {}),
+					});
+				return (prompt: string, task: any, graph: any) => {
+					const live = poolNow();
+					const ask = live
+						? live.runner({ signal, timeoutMs: plannerTimeoutMs, ...(bound ? { confine: bound } : {}) })
+						: alone();
+					// A planning turn is not a doing turn, and it must not resume
+					// one.
+					//
+					// `sessionFor` is `rlm-delegate-${graph.id}-${task.id}` and the
+					// planner is handed the *same task*, so planner and runner
+					// derive a byte-identical session id. On the one-shot path
+					// that was harmless because the id went down the command line
+					// and was read by nobody. A pooled worker reads it: it turns
+					// the id into a `SessionManager` pointed at
+					// `~/.rlm/agent/sessions/<id>.jsonl` and resumes the file if
+					// it exists. So pooling the planner — and only pooling it —
+					// would have made the two share a transcript.
+					//
+					// It is reachable, not theoretical: a failed task has its
+					// criterion written back to `unstated` and is handed to the
+					// planner (drive.ts), whose session file is then full of the
+					// runner's failed attempts; and a thrice-refused plan goes
+					// back to the runner carrying the planner's transcript.
+					//
+					// Namespacing the id at the one place both paths derive it
+					// from — the task id — fixes pooled and one-shot together and
+					// needs no new seam. Nothing downstream reads this id: it is
+					// used for `sessionFor` and nothing else on this call.
+					//
+					// The proof is dropped for the same reason, and it is the
+					// other half of the same seam. `withCriterion(task)` — which
+					// both paths use to build the prompt — appends the runner's
+					// judging boilerplate ("Make that true. If it names a file,
+					// write that file") to anything whose proof is not `unstated`.
+					// A planning prompt ends by demanding a JSON array, so that
+					// text landing on it produces unparseable output and reads as
+					// a bad planner rather than a corrupted prompt. Today it
+					// cannot happen, because everything reaching the planner is
+					// written back to `unstated` first — but that is an invariant
+					// of a call graph three files away, unstated and unenforced.
+					// Saying so here costs one field and makes the planning prompt
+					// verbatim by construction.
+					return ask(
+						{ ...task, id: `${task.id}::plan`, proof: { kind: "unstated", note: "a planning turn" }, prompt },
+						graph,
+					);
+				};
 			});
 
 		// me-2, built here for the same reason the planner is: a default that
@@ -1103,6 +1230,31 @@ export class RlmDelegateService extends Service {
 			makePlanner: options.planner ? undefined : makePlanner,
 			stop,
 		});
+		// What actually happened, as opposed to what was announced on the way in.
+		//
+		// The line at the top of a sweep is a statement of intent — it says what
+		// the drive means to do. This one is a count of what it did, and the two
+		// disagreeing is the whole defect this was written for: "children are
+		// pooled" printed for hours over a fleet of twenty-five one-shot
+		// planners. Worker pids are named so the claim can be checked against
+		// `ps` by somebody who does not trust the log, which is the correct
+		// attitude to a log.
+		const ran = this.pool?.stats();
+		if (ran) {
+			const say = (what: string, st: { served: number; workers: { pid?: number }[] }) =>
+				`${what}: ${st.served} task(s) through ${st.workers.length} live worker(s)` +
+				(st.workers.length ? ` [pid ${st.workers.map((w) => w.pid ?? "?").join(", ")}]` : "");
+			type Ran = { served: number; workers: { pid?: number }[] };
+			const parts = [say("runners", ran), ...ran.confined.map((c: Ran) => say("planners (confined)", c))];
+			const total = ran.served + ran.confined.reduce((n: number, c: Ran) => n + c.served, 0);
+			console.log(
+				total
+					? `  pooled this sweep — ${parts.join("; ")}`
+					: `  pooled this sweep — nothing went through the pool (no task reached a worker)`,
+			);
+		} else if (slots > 1) {
+			console.log("  pooled this sweep — no pool was ever built, so every child was its own process");
+		}
 		this.ctx.logger?.info?.(renderReport(report));
 		return report;
 	}
@@ -1116,6 +1268,23 @@ export class RlmDelegateService extends Service {
 	 * divided by how many tasks fit in one process. Inventing a second limit
 	 * beside `capacity()` is exactly what the guard row exists to stop.
 	 */
+	/**
+	 * How many worker processes the pool may hold, re-read as the machine moves.
+	 *
+	 * Held for three seconds because `capacity()` shells out to `ps` and the
+	 * pool asks on every hiring decision.
+	 */
+	private workerCeiling(slots: number): () => number {
+		let held: { at: number; n: number } | null = null;
+		return () => {
+			const now = Date.now();
+			if (held && now - held.at < 3000) return held.n;
+			const n = Math.max(1, Math.ceil(this.capacity().limit / Math.max(1, slots)));
+			held = { at: now, n };
+			return n;
+		};
+	}
+
 	private workers(slots: number, childFlags: string[], runtime: { command: string; kind: "node" | "bun" }): AgentPool {
 		if (this.pool) return this.pool;
 		this.pool = new AgentPool({
@@ -1126,7 +1295,11 @@ export class RlmDelegateService extends Service {
 			runtime: runtime.kind,
 			nodeFlags: childFlags,
 			slots,
-			maxWorkers: Math.max(1, Math.ceil(this.capacity().limit / slots)),
+			// Read on every hiring decision, not once here. `capacity()` shells
+			// out to `ps`, and `pump()` is hot, so it is held for three seconds —
+			// long enough that a burst of tasks does not run `ps` twenty times,
+			// short enough that the pool follows the machine.
+			maxWorkers: this.workerCeiling(slots),
 			log: (line) => this.ctx.logger?.info?.(line),
 		});
 		this.ctx.logger?.info?.(

@@ -116,8 +116,15 @@ export interface PoolOptions extends AgentOptions {
 	 * Not a new number: the caller passes what the `capacity()` verdict already
 	 * computes, divided by the slots. Inventing a second limit beside that one
 	 * is how a machine that reads healthy starts swapping.
+	 *
+	 * A function, if the caller has one, and it is read on every hiring
+	 * decision. As a fixed number it was a snapshot taken when the pool was
+	 * built: a pool that happened to be created while the laptop was tight got
+	 * `maxWorkers` 1 and stayed pinned there for the rest of the drive, long
+	 * after the gate had reopened — every other consumer of `capacity()`
+	 * re-reads it between tasks, and this was the one that did not.
 	 */
-	maxWorkers?: number;
+	maxWorkers?: number | (() => number);
 	/** A worker with nothing to do for this long is shut down. */
 	idleMs?: number;
 	/** A worker is retired after this many tasks, whatever their outcome. */
@@ -186,6 +193,10 @@ export class AgentPool {
 	private readonly queue: Pending[] = [];
 	private readonly inFlight = new Map<string, Pending>();
 	private closed = false;
+	/** Set when the row that made this pool went away while it was still busy. */
+	private draining = false;
+	/** Tasks that have settled here, ever. What "the pool did the work" means. */
+	private served = 0;
 	/** One sibling pool per distinct write scope. Usually exactly one: the planner's. */
 	private readonly scoped = new Map<NonNullable<AgentOptions["confine"]>, AgentPool>();
 	/** The one session being watched, as far as this pool knows. */
@@ -200,11 +211,18 @@ export class AgentPool {
 	}
 
 	private get maxWorkers(): number {
-		return Math.max(1, this.options.maxWorkers ?? 4);
+		const asked = this.options.maxWorkers;
+		const now = typeof asked === "function" ? asked() : asked;
+		return Math.max(1, Number.isFinite(now as number) ? (now as number) : 4);
 	}
 
 	private say(line: string) {
 		this.options.log?.(`rlm-delegate pool: ${line}`);
+	}
+
+	/** Whether this pool is a corpse — a caller holding one must get a new one. */
+	isClosed(): boolean {
+		return this.closed;
 	}
 
 	/**
@@ -255,6 +273,9 @@ export class AgentPool {
 		const onOutput = overrides.onOutput ?? this.options.onOutput;
 		return new Promise<string>((resolve, reject) => {
 			if (this.closed) return reject(new Error("the pool is closed"));
+			// Work arriving is the answer to "is anyone still using this": a pool
+			// that was draining towards a close is wanted again, so it stops.
+			this.draining = false;
 			if (signal?.aborted) return reject(new Error("stopped before this attempt started"));
 			const pending: Pending = {
 				id: `t${nextTaskId++}`,
@@ -322,9 +343,38 @@ export class AgentPool {
 			})),
 			queued: this.queue.length,
 			inFlight: this.inFlight.size,
+			served: this.served,
+			closed: this.closed,
 			watching: this.attention,
 			confined: [...this.scoped.values()].map((p) => p.stats()),
 		};
+	}
+
+	/**
+	 * Stop — but not out from under work that is still running.
+	 *
+	 * `close()` is the right answer when nothing is in flight and the wrong one
+	 * when something is. The row's teardown fires on every hot reload, and a
+	 * sweep already in progress is *not* torn down with the row that started it:
+	 * `driveGraphs` is an async call already in the air. So the teardown was
+	 * taking the pool away from a drive that was still using it, and every task
+	 * that drive submitted afterwards was refused with "the pool is closed" —
+	 * 883 of them across 42 graphs in the store at the time this was found, each
+	 * one a task that had a warm worker available and was told there was none.
+	 *
+	 * So: close now if there is nothing to lose, and otherwise close when the
+	 * last task settles. A `run()` arriving in the meantime cancels the drain,
+	 * because work arriving is the answer to "is anybody still using this".
+	 */
+	closeWhenIdle(): void {
+		if (this.closed) return;
+		if (!this.inFlight.size && !this.queue.length) {
+			void this.close().catch(() => {});
+			return;
+		}
+		this.draining = true;
+		this.say(`asked to stop with ${this.inFlight.size} in flight and ${this.queue.length} queued — finishing those first`);
+		for (const sibling of this.scoped.values()) sibling.closeWhenIdle();
 	}
 
 	/** Let go of every worker. Anything still queued is failed, not forgotten. */
@@ -430,12 +480,18 @@ export class AgentPool {
 		pending.detach?.();
 		this.inFlight.delete(pending.id);
 		if (pending.worker) {
+			this.served += 1;
 			pending.worker.holding.delete(pending.id);
 			this.maybeReap(pending.worker);
 		}
 		if (error) pending.reject(error);
 		else pending.resolve(text ?? "");
 		this.pump();
+		// The row asked to stop while this was still running. Now it is not.
+		if (this.draining && !this.inFlight.size && !this.queue.length) {
+			this.draining = false;
+			void this.close().catch(() => {});
+		}
 	}
 
 	// ─── Workers ─────────────────────────────────────────────────────────────
