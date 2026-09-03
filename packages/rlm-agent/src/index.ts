@@ -95,9 +95,20 @@ export class RlmAgentService extends Service {
 
 	private services: AgentSessionServices | undefined;
 
-	constructor(ctx: any, config: RlmAgentConfig = {}) {
+	/**
+	 * A default parameter does not catch `null`, and the composition hands one.
+	 *
+	 * `cordis.yml` writes this row as `config:` with nothing under it, which
+	 * YAML reads as `null` rather than as an absent key — so `config = {}` never
+	 * fires, `this.config` becomes null, and `[Service.init]` dies on
+	 * `this.config.cwd`. The row is the one that spawns every delegated child,
+	 * so the drive correctly refuses to sweep into a composition without it and
+	 * the whole fleet stops. An empty config block must mean "no options", not
+	 * "no object".
+	 */
+	constructor(ctx: any, config?: RlmAgentConfig | null) {
 		super(ctx, undefined as any);
-		this.config = config;
+		this.config = config ?? {};
 	}
 
 	async [Service.init]() {
@@ -111,7 +122,6 @@ export class RlmAgentService extends Service {
 		};
 
 		const settingsManager = rlmConfig?.getSettingsManager?.();
-    const cwd = this.config.cwd ?? (settingsManager?.getCwd?.() ?? process.cwd());
     const cwd = this.config.cwd ?? (settingsManager?.getCwd?.() ?? process.cwd());
 		const agentDir = this.config.agentDir ?? getAgentDir();
 
