@@ -26,6 +26,8 @@
  *     stopping may be that the child is wedged.
  */
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { describeProof, type Graph, type Task } from "./graph.ts";
 import type { Runner } from "./scheduler.ts";
 
@@ -35,6 +37,27 @@ export interface AgentOptions {
 	/** Node to run it with. Defaults to the one running this. */
 	node?: string;
 	cwd?: string;
+	/**
+	 * Tell the child nobody is watching. On by default, because nobody is.
+	 *
+	 * `@rlm/headless` reads argv for this flag and, when it finds it, withholds
+	 * `rlmLive` — so every row that exists for a person sitting in front of the
+	 * thing (hmr, tui, renderer) stays PENDING instead of mounting. Measured on
+	 * a live child before this was wired: 1,319 open descriptors, 1,283 of them
+	 * a chokidar watch on source files a `--print` child will never reload.
+	 */
+	headless?: boolean;
+	/**
+	 * Spawn the worker directly instead of through rlm's own re-exec.
+	 *
+	 * `cordis-shell.mjs` re-execs itself when `--expose-internals` is missing,
+	 * so a plain spawn costs two processes: a launcher that does nothing but
+	 * exec and wait, measured at 28 MB, and the one doing the work. Passing the
+	 * flags up front skips the first. On by default; falls back to the re-exec
+	 * on its own if the tsx loader is not where it should be, because a wrong
+	 * path here is a child that dies at boot rather than one that runs slower.
+	 */
+	launcher?: boolean;
 	/**
 	 * Give up on one attempt after this long, and kill the group.
 	 *
@@ -117,7 +140,31 @@ export const rlmAgent = (options: AgentOptions): Runner => {
 		// Describing it costs a sentence and removes an entire class of failure —
 		// and it cannot be gamed, because the criterion is still checked
 		// independently afterwards by something that did not do the work.
-		const args = [options.entry, "--print", "--session-id", sessionFor(graph, task), "--", withCriterion(task)];
+		// `--headless` sits *before* `--print`, deliberately. The prompt is read
+		// as whatever follows the end-of-options marker, but a reader that once
+		// took `argv[indexOf("--print") + 1]` as the prompt asked every child in
+		// the fleet to do the word "--session-id" for eight hours. Nothing new
+		// goes between `--print` and `--` again.
+		const headless = options.headless !== false ? ["--headless"] : [];
+
+		// Skip rlm's re-exec when we can hand Node the two flags it only takes on
+		// the command line. `existsSync` rather than trust: if the loader is not
+		// there, fall through and let cordis-shell re-exec itself, which is
+		// slower by one process and correct.
+		const tsxLoader = join(dirname(options.entry), "node_modules", "tsx", "dist", "loader.mjs");
+		const direct = options.launcher !== true && existsSync(tsxLoader);
+		const nodeFlags = direct ? ["--expose-internals", "--import", tsxLoader] : [];
+
+		const args = [
+			...nodeFlags,
+			options.entry,
+			...headless,
+			"--print",
+			"--session-id",
+			sessionFor(graph, task),
+			"--",
+			withCriterion(task),
+		];
 		const [bin, ...rest] = options.confine ? options.confine(command, args) : [command, ...args];
 
 		return await new Promise<string>((resolve, reject) => {
