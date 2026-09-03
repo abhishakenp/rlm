@@ -42,9 +42,7 @@ export class IrisNotify extends Service {
       argumentHint: "<title> [--body <text>] [--sound] [--timeout <ms>]",
       handler: async (args: string, ctx: any) => {
         const result = this.parseArgs(args);
-        ctx.showMessage?.("```json
-" + JSON.stringify(result, null, 2) + "
-```");
+        ctx.showMessage?.("```json\n" + JSON.stringify(result, null, 2) + "\n```");
         return result;
       },
     });

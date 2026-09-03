@@ -21,5 +21,24 @@
 		}
 	},
 	"include": ["packages/*/src/**/*", "packages/*/test/**/*", "packages/coding-agent/examples/**/*"],
-	"exclude": ["**/dist/**"]
+	// Two packages have never parsed. Neither is in `cordis.yml`, so nothing has
+	// ever loaded them — but tsc aborts on a syntax error before it does any
+	// semantic analysis at all, so their presence silently turned typechecking
+	// off for the entire repository. Proven, not inferred: a planted
+	// `const x: number = "string"` in packages/ai produced ZERO errors, while
+	// every "tsc --noEmit is clean" claim made today was reported against this.
+	//
+	// `rlm-iris-tab-nav` has six multi-line AppleScript strings written with `"`
+	// where they needed backticks; `iris-voice` is the two lines
+	// `export class IrisVoice` with no body. Both arrived in one commit,
+	// 05d3e56 "[rlm] Various workspace changes: iris family package".
+	//
+	// Excluded rather than deleted: they are somebody's unfinished work and
+	// removing them is not this change's call. Fix them and delete these two
+	// lines — nothing else has to change.
+	"exclude": [
+		"**/dist/**",
+		"packages/rlm-iris-tab-nav/**",
+		"packages/iris-voice/**"
+	]
 }
