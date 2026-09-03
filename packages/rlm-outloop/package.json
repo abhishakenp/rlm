@@ -1,0 +1,14 @@
+{
+  "name": "@rlm/outloop",
+  "version": "0.1.0",
+  "description": "The me-2 reviewer loop — types only",
+  "type": "module",
+  "main": "src/contract.ts",
+  "types": "src/contract.ts",
+  "exports": {
+    ".": "./src/contract.ts"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "*"
+  }
+}

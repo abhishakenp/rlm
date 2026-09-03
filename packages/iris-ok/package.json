@@ -1,0 +1,11 @@
+{
+  "name": "iris-ok",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  }
+}

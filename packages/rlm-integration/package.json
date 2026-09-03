@@ -1,0 +1,29 @@
+{
+  "name": "@rlm/integration",
+  "version": "0.1.0",
+  "description": "RLM integration plugin for external applications like Iris",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./client": "./src/client.ts"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "scripts": {
+    "dev": "node --loader ts-node/esm src/server.ts",
+    "test": "node test/client.test.js"
+  },
+  "keywords": [
+    "rlm",
+    "integration",
+    "ai",
+    "bridge"
+  ],
+  "license": "MIT"
+}

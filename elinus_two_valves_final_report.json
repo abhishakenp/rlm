@@ -1,0 +1,46 @@
+{
+  "search_results": {
+    "original_query": "Elinus Two Valves",
+    "found_direct_match": false,
+    "related_entities": [
+      {
+        "type": "company",
+        "name": "Elinus, UAB",
+        "country": "Lithuania",
+        "description": "Lithuanian business entity found in registries"
+      },
+      {
+        "type": "industry",
+        "category": "valve_manufacturing",
+        "description": "Multiple valve manufacturers found"
+      }
+    ],
+    "search_engine_results": "Multiple search engines returned results but no direct match for 'Elinus Two Valves'"
+  },
+  "credibility_assessment": {
+    "sources_verified": 1,
+    "sources_attempted": 7,
+    "verified_sources": [
+      "ValveIndustry.com"
+    ],
+    "questionable_sources": [
+      "Elinus, UAB",
+      "Rekvizitai.lt",
+      "Lursoft IT",
+      "XHVAL",
+      "ANIX Valve USA",
+      "Reynold Valves"
+    ],
+    "overall_credibility": "Low to moderate - limited direct access to primary sources"
+  },
+  "findings_summary": {
+    "primary_discovery": "Elinus, UAB is a real Lithuanian company, suggesting 'Elinus' is a valid company name",
+    "secondary_findings": "Multiple valve manufacturers exist globally, but no direct connection found between Elinus and valve manufacturing",
+    "likely_explanation": "'Elinus Two Valves' may be a specific product line, regional brand, or the search term may be too specific/niche"
+  },
+  "recommendations": [
+    "Contact Lithuanian business registries directly for Elinus, UAB verification",
+    "Search for 'Elinus' products or services in specific industries",
+    "Check if 'Two Valves' refers to a specific product line or model number"
+  ]
+}

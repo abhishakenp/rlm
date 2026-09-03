@@ -1,0 +1,48 @@
+{
+  "task": "Verify credibility of Elinus Two Valves sources",
+  "query": "Elinus Two Valves",
+  "timestamp": "2026-09-02T05:58:51.939Z",
+  "sources_checked": [
+    {
+      "name": "Bing",
+      "results": 0,
+      "has_data": false
+    },
+    {
+      "name": "DuckDuckGo",
+      "results": 0,
+      "has_data": false
+    },
+    {
+      "name": "Google",
+      "results": 0,
+      "has_data": false
+    },
+    {
+      "name": "Wikipedia",
+      "results": 0,
+      "has_data": false
+    }
+  ],
+  "related_entities_found": [
+    {
+      "name": "Elinus, UAB",
+      "type": "Lithuanian company",
+      "jurisdiction": "Lithuania",
+      "verified": false
+    }
+  ],
+  "credibility_assessment": {
+    "overall_credibility": "Very Low",
+    "reason": "No online presence detected for \"Elinus Two Valves\"",
+    "online_sources": 0,
+    "verified_sources": 0
+  },
+  "recommendations": [
+    "Verify spelling - try \"Elinus Valves\", \"Elinus Two Valve\"",
+    "Search Lithuanian business registries for \"Elinus, UAB\"",
+    "Check regional valve industry associations",
+    "Search trade publications and manufacturer directories",
+    "Consider this may be a fictional entity or misspelling"
+  ]
+}

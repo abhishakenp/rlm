@@ -1,0 +1,221 @@
+{
+  "metadata": {
+    "package": "packages/agent",
+    "packageName": "prime-agent-core",
+    "version": "0.1.0",
+    "description": "Stateful agent runtime for Prime Intellect",
+    "sourceFiles": [
+      "agent.ts",
+      "agent-loop.ts",
+      "proxy.ts",
+      "types.ts",
+      "index.ts"
+    ]
+  },
+  "runtime": {
+    "description": "Core agent execution engine built on async/await EventStream",
+    "features": [
+      "EventStream-based streaming response handling with Symbol.asyncIterator",
+      "Async iterator consumer pattern for event consumption",
+      "Parallel tool execution mode (default): preflight sequentially, execute concurrently, emit tool_execution_end in completion order",
+      "Sequential tool execution mode: execute one tool at a time, blocking",
+      "Per-tool executionMode override: sequential forces entire batch to run one at a time",
+      "Abort signal propagation throughout all async operations",
+      "raceWithAbort utility for cancelling operations on abort signal",
+      "maybePromiseWithAbort for wrapping sync/async ops with abort tracking",
+      "Retry with backoff via maxRetryDelayMs option",
+      "Tool streaming via onUpdate callback (AgentToolUpdateCallback)",
+      "Early termination hint via terminate flag on tool results",
+      "Mixed terminate results: loop only stops when ALL tool results in batch set terminate=true",
+      "Steering queue: PendingMessageQueue with 'all' and 'one-at-a-time' modes",
+      "Follow-up queue: PendingMessageQueue with 'all' and 'one-at-a-time' modes",
+      "shouldStopBeforeTurn hook (sync, checked before each turn's LLM call)",
+      "shouldStopAfterTurn hook (async, checked after turn_end, before polling queues)",
+      "getSteeringMessages: poll steering messages after each turn completes",
+      "getFollowUpMessages: poll follow-up messages after tool calls finish and steering is empty",
+      "getContinuationMessages: host-owned continuation policy (e.g., long-running goals)",
+      "lastTurn context capture passed to getContinuationMessages",
+      "Full run lifecycle: agent_start -> turn_start -> message_start/update/end -> turn_end -> agent_end",
+      "Low-level agentLoop() and agentLoopContinue() functions for direct control",
+      "Stream wrapper (createAgentStream) using EventStream with agent_end as terminal event",
+      "Partial message reconstruction client-side during streaming",
+      "Graceful abort: finishAbortedMessage creates final assistant message with stopReason=aborted",
+      "Error message tracking: agent stores most recent errorMessage in state",
+      "isStreaming state tracking: true during any run including awaited agent_end listeners",
+      "pendingToolCalls tracking via Set<string>"
+    ]
+  },
+  "model_support": {
+    "description": "Delegates to @earendil-works/pi-ai for model abstraction. Generic Model<any> type used throughout.",
+    "features": [
+      "Generic Model<any> from @earendil-works/pi-ai (no hardcoded model families)",
+      "DefaultModel fallback: {id:'unknown', name:'unknown', api:'unknown', provider:'unknown'}",
+      "Transport abstraction (Transport type from pi-ai) for switching HTTP backends",
+      "ThinkingLevel enum: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'",
+      "xhigh and max levels noted as model-family-specific (checked via model metadata)",
+      "ServiceTier support (ServiceTier type from pi-ai): 'default' tier by default",
+      "ThinkingBudgets map for token-based providers: { minimal, low, medium, high } token counts",
+      "streamSimple as default stream function (from pi-ai)",
+      "Custom streamFn override for proxy or alternative backends",
+      "Session ID passed through for provider-side caching",
+      "Provider-specific cacheRetention option"
+    ]
+  },
+  "tools": {
+    "description": "Full tool lifecycle: prepare -> validate -> before hook -> execute -> after hook -> result",
+    "features": [
+      "AgentTool interface extending Tool<TParameters> from pi-ai with label, execute, prepareArguments, executionMode",
+      "Typebox TSchema for parameter validation via validateToolArguments",
+      "prepareArguments shim: allows tools to normalize raw arguments before schema validation",
+      "execute signature: (toolCallId, params, signal?, onUpdate?) => Promise<AgentToolResult<TDetails>>",
+      "onUpdate callback: (partialResult) => void for streaming progress from tools",
+      "AgentToolResult: { content: (TextContent|ImageContent)[], details: T, terminate?: boolean }",
+      "AgentToolUpdateCallback<T>: callback type for partial tool result updates",
+      "beforeToolCall hook: runs after args validated, before execute. Can block with {block: true, reason?}",
+      "afterToolCall hook: runs after execute, before tool_execution_end. Can override content, details, isError, terminate",
+      "Per-tool executionMode: 'sequential' | 'parallel' (overrides global toolExecution)",
+      "Parallel execution: Promise.all over finalized call entries after concurrent execution",
+      "Sequential execution: for-of loop with await between each tool call",
+      "Immediate tool result: when blocked or tool not found, return result without execution",
+      "Tool not found: returns error tool result with message 'Tool {name} not found'",
+      "Argument validation error: caught and returned as immediate error tool result",
+      "Error-thrown by tool execute: caught, reported as isError=true tool result",
+      "Abort during tool: caught, returns 'Tool execution aborted' error result",
+      "terminate hint: only respected when every tool in batch returns it",
+      "tool_execution_start event: emitted with toolCallId, toolName, args",
+      "tool_execution_update event: emitted for each partial result from onUpdate callback",
+      "tool_execution_end event: emitted with toolCallId, toolName, result, isError (in completion order for parallel)",
+      "toolResult message: role='toolResult', includes toolCallId, toolName, content, details, isError, timestamp"
+    ]
+  },
+  "session": {
+    "description": "Basic session support for provider caching. No built-in state persistence to disk.",
+    "features": [
+      "sessionId option on Agent (string, passed to provider for caching)",
+      "Session ID propagated to stream options via AgentLoopConfig.sessionId",
+      "No built-in session persistence (stateless between runs)",
+      "waitForIdle(): Promise<void> — resolves when activeRun completes and agent_end listeners settle",
+      "reset(): clears messages, streaming state, pending tool calls, error, and all queues",
+      "activeRun tracking: { promise, resolve, abortController } for run lifecycle",
+      "busy check: continue() throws AgentContinueError{code:'busy'} if activeRun exists",
+      "nothing-to-continue error when last message role is assistant or no messages exist"
+    ]
+  },
+  "context": {
+    "description": "AgentMessage as first-class type with transformContext and convertToLlm bridging to LLM Message",
+    "features": [
+      "AgentMessage: union of Message (from pi-ai) + CustomAgentMessages (extensible via declaration merging)",
+      "Default convertToLlm: filters to role=user|assistant|toolResult only",
+      "Custom convertToLlm: required when using custom message types",
+      "transformContext: optional async transform before convertToLlm (for pruning, injection)",
+      "AgentContext snapshot: { systemPrompt, messages: AgentMessage[], tools }",
+      "createContextSnapshot(): returns deep copy of current state",
+      "Context messages array copied at each loop iteration (immutable pattern)",
+      "System prompt resolution via getSystemPrompt callback (called per LLM call)",
+      "getApiKey callback: dynamic API key resolution per provider per LLM call",
+      "PendingMessageQueue for steering and follow-up batches",
+      "Queue drain modes: 'all' (flat and clear) vs 'one-at-a-time' (FIFO batch)",
+      "Queue removeWhere: remove messages matching predicate, return removed messages",
+      "hasQueuedMessages(): check if steering or follow-up queue has items",
+      "Custom message extension via declaration merging (CustomAgentMessages interface)",
+      "Example in docs: notification message type added via module augmentation"
+    ]
+  },
+  "subagent": {
+    "description": "No built-in subagent spawning or parallel agent instances. Single-agent execution model.",
+    "features": [
+      "NO built-in subagent spawning or agent tree management",
+      "Single-agent execution: one agent loop per Agent instance",
+      "getContinuationMessages hook: allows host to inject continuation messages (external subagent coordination point)",
+      "getSteeringMessages hook: allows host to inject steering messages (external agent coordination point)",
+      "getFollowUpMessages hook: allows host to queue follow-up (external coordination point)",
+      "No native parallel prompt handling — must manage multiple Agent instances externally"
+    ]
+  },
+  "event": {
+    "description": "Rich event system covering run, turn, message, and tool execution lifecycle",
+    "features": [
+      "AgentEvent union type with all event variants",
+      "agent_start: emitted once at start of run (no payload)",
+      "agent_end: emitted once at end of run, carries messages: AgentMessage[] — terminal event for EventStream",
+      "turn_start: emitted before each LLM call",
+      "turn_end: emitted after LLM call and tool execution, carries message and toolResults[]",
+      "message_start: emitted for any message beginning (user, assistant, toolResult)",
+      "message_update: emitted only for assistant messages during streaming, carries assistantMessageEvent",
+      "message_update assistantMessageEvent types: text_start, text_delta, text_end, thinking_start, thinking_delta, thinking_end, toolcall_start, toolcall_delta, toolcall_end",
+      "message_end: emitted for any message completion",
+      "tool_execution_start: emitted with toolCallId, toolName, args",
+      "tool_execution_update: emitted with toolCallId, toolName, args, partialResult",
+      "tool_execution_end: emitted with toolCallId, toolName, result, isError (in completion order for parallel)",
+      "Agent.subscribe(listener): registers event handler, returns unsubscribe function",
+      "Listeners awaited in subscription order, included in run settlement",
+      "Listeners receive AbortSignal for current run",
+      "agent_end listeners: must settle before agent becomes idle",
+      "abort signal passed to every listener callback",
+      "No event batching or throttling — immediate sequential emission"
+    ]
+  },
+  "persistence": {
+    "description": "In-memory state only. No built-in persistence. State access via accessor pattern.",
+    "features": [
+      "AgentState: in-memory only, no automatic persistence",
+      "state.tools getter/setter with array copy on assignment (defensive copy)",
+      "state.messages getter/setter with array copy on assignment",
+      "streamFn, getApiKey, convertToLlm, transformContext, beforeToolCall, afterToolCall, shouldStopAfterTurn, shouldStopBeforeTurn, getContinuationMessages: all public properties on Agent class",
+      "isStreaming: readonly, true during any run including awaited agent_end listeners",
+      "streamingMessage: partial assistant message during streaming",
+      "pendingToolCalls: ReadonlySet<string> of executing tool call IDs",
+      "errorMessage: most recent error or aborted reason from assistant turn",
+      "reset(): clears in-memory state only, no file/disk operations",
+      "No session save/load — caller must implement persistence externally"
+    ]
+  },
+  "config": {
+    "description": "Two-level config: AgentOptions (public API) and AgentLoopConfig (internal loop interface)",
+    "features": [
+      "AgentOptions: initialState, convertToLlm, transformContext, streamFn, getApiKey, onPayload, onResponse, beforeToolCall, afterToolCall, shouldStopAfterTurn, shouldStopBeforeTurn, getContinuationMessages, steeringMode, followUpMode, sessionId, thinkingBudgets, transport, maxRetryDelayMs, toolExecution",
+      "AgentLoopConfig extends SimpleStreamOptions from pi-ai",
+      "ThinkingLevel: 'off'|'minimal'|'low'|'medium'|'high'|'xhigh'|'max' (xhigh/max model-family-dependent)",
+      "ToolExecutionMode: 'sequential' | 'parallel' (default: parallel)",
+      "QueueMode: 'all' | 'one-at-a-time' (default for steering and follow-up: one-at-a-time)",
+      "Transport: from pi-ai, 'auto' by default on Agent",
+      "ThinkingBudgets: { minimal: number, low: number, medium: number, high: number }",
+      "maxRetryDelayMs: number for retry backoff cap",
+      "onPayload: SimpleStreamOptions['onPayload'] — called with raw request payload",
+      "onResponse: SimpleStreamOptions['onResponse'] — called with raw response",
+      "Agent state mutability: systemPrompt, model, thinkingLevel, serviceTier mutable via state setters",
+      "Agent public properties mutable after construction: convertToLlm, transformContext, streamFn, getApiKey, onPayload, onResponse, beforeToolCall, afterToolCall, shouldStopAfterTurn, shouldStopBeforeTurn, getContinuationMessages, sessionId, thinkingBudgets, transport, maxRetryDelayMs, toolExecution",
+      "AgentLoopConfig.getSystemPrompt: () => string — called per LLM call for dynamic system prompt",
+      "AgentLoopConfig.getApiKey: (provider) => string|undefined — called per LLM call",
+      "AgentLoopConfig.getSteeringMessages: () => AgentMessage[] — called after each turn",
+      "AgentLoopConfig.getFollowUpMessages: () => AgentMessage[] — called when no more tool calls",
+      "AgentLoopConfig.getContinuationMessages: (context, signal) => AgentMessage[] — called when no follow-ups"
+    ]
+  },
+  "auth": {
+    "description": "Dynamic API key resolution per provider, plus proxy authentication token",
+    "features": [
+      "getApiKey callback: (provider: string) => string|undefined|Promise — resolved per LLM call",
+      "Useful for short-lived OAuth tokens (e.g., GitHub Copilot) that expire during execution",
+      "getApiKey must not throw — returns undefined when no key available",
+      "apiKey on AgentLoopConfig: fallback static key if getApiKey not provided",
+      "Proxy auth: streamProxy takes explicit authToken (Bearer token) separate from model apiKey",
+      "Proxy auth sent as Authorization: Bearer {authToken} header",
+      "No built-in credential storage or env var reading",
+      "No automatic provider detection — caller must provide getApiKey or config.apiKey"
+    ]
+  },
+  "plugin": {
+    "description": "No explicit plugin system. Extensibility via options, hooks, and custom message types.",
+    "features": [
+      "No plugin/extension architecture — no hooks into core lifecycle",
+      "Extensibility via options: all hooks are public Agent properties set at construction or anytime after",
+      "Extensible AgentMessage via declaration merging: CustomAgentMessages interface",
+      "No registry or plugin discovery mechanism",
+      "Proxy stream function (streamProxy) as optional backend alternative via streamFn option",
+      "Low-level agentLoop() and agentLoopContinue() for callers who want full control without Agent class",
+      "Custom message types: caller extends CustomAgentMessages via module augmentation",
+      "No built-in tool registry — tools are passed as AgentTool[] array to state"
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+[eval]:1
+require('@deepseek-ai/cordis').loadConfig().then(c=>c.rows()).then(r=>{const row=r.find(x=>x.id==='agent');console.log(JSON.stringify(row,null,2));process.exit(row?.state==='ACTIVE'?0:1);})
+                               ^
+
+TypeError: require(...).loadConfig is not a function
+    at [eval]:1:32
+    at runScriptInThisContext (node:internal/vm:219:10)
+    at node:internal/process/execution:483:12
+    at [eval]-wrapper:6:24
+    at runScriptInContext (node:internal/process/execution:481:60)
+    at evalFunction (node:internal/process/execution:315:30)
+    at evalTypeScript (node:internal/process/execution:327:3)
+    at node:internal/main/eval_string:71:3
+
+Node.js v26.7.0

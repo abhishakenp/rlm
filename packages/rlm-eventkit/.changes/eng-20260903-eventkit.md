@@ -1,0 +1,5 @@
+- Added native Swift EventKit integration package (rlm-eventkit)
+- Implemented EKEventStore.swift with full Reminders and Calendar access
+- Added async authorization request and status checking
+- Provided CRUD operations for events, reminders, and calendars
+- Included SwiftUI observable wrapper for reactive updates

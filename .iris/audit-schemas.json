@@ -1,0 +1,142 @@
+{
+  "log": {
+    "state": "ACTIVE",
+    "schemaCount": 0,
+    "hasSchema": false
+  },
+  "boot": {
+    "state": "ACTIVE",
+    "schemaCount": 7,
+    "hasSchema": true
+  },
+  "headless": {
+    "state": "ACTIVE",
+    "schemaCount": 4,
+    "hasSchema": true
+  },
+  "timer": {
+    "state": "ACTIVE",
+    "schemaCount": 0,
+    "hasSchema": false
+  },
+  "hmr": {
+    "state": "PENDING",
+    "schemaCount": 0,
+    "hasSchema": false
+  },
+  "rlm-hmr": {
+    "state": "PENDING",
+    "schemaCount": 0,
+    "hasSchema": false
+  },
+  "config": {
+    "state": "ACTIVE",
+    "schemaCount": 0,
+    "hasSchema": false
+  },
+  "context": {
+    "state": "ACTIVE",
+    "schemaCount": 0,
+    "hasSchema": false
+  },
+  "tui": {
+    "state": "PENDING",
+    "schemaCount": 0,
+    "hasSchema": false
+  },
+  "prompt": {
+    "state": "ACTIVE",
+    "schemaCount": 0,
+    "hasSchema": false
+  },
+  "compose": {
+    "state": "ACTIVE",
+    "schemaCount": 1,
+    "hasSchema": true
+  },
+  "plugins": {
+    "state": "ACTIVE",
+    "schemaCount": 7,
+    "hasSchema": true
+  },
+  "self": {
+    "state": "ACTIVE",
+    "schemaCount": 3,
+    "hasSchema": true
+  },
+  "session": {
+    "state": "ACTIVE",
+    "schemaCount": 0,
+    "hasSchema": false
+  },
+  "tools": {
+    "state": "ACTIVE",
+    "schemaCount": 0,
+    "hasSchema": false
+  },
+  "refine": {
+    "state": "ACTIVE",
+    "schemaCount": 0,
+    "hasSchema": false
+  },
+  "code": {
+    "state": "ACTIVE",
+    "schemaCount": 0,
+    "hasSchema": false
+  },
+  "workflow": {
+    "state": "ACTIVE",
+    "schemaCount": 0,
+    "hasSchema": false
+  },
+  "delegate": {
+    "state": "ACTIVE",
+    "schemaCount": 17,
+    "hasSchema": true
+  },
+  "guard": {
+    "state": "ACTIVE",
+    "schemaCount": 0,
+    "hasSchema": false
+  },
+  "learn": {
+    "state": "ACTIVE",
+    "schemaCount": 0,
+    "hasSchema": false
+  },
+  "gitpixel": {
+    "state": "ACTIVE",
+    "schemaCount": 0,
+    "hasSchema": false
+  },
+  "agent": {
+    "state": "ACTIVE",
+    "schemaCount": 0,
+    "hasSchema": false
+  },
+  "renderer": {
+    "state": "PENDING",
+    "schemaCount": 0,
+    "hasSchema": false
+  },
+  "print": {
+    "state": "ACTIVE",
+    "schemaCount": 0,
+    "hasSchema": false
+  },
+  "sdk": {
+    "state": "ACTIVE",
+    "schemaCount": 0,
+    "hasSchema": false
+  },
+  "modes": {
+    "state": "ACTIVE",
+    "schemaCount": 2,
+    "hasSchema": true
+  },
+  "rlm-iris": {
+    "state": "ERROR",
+    "schemaCount": 0,
+    "hasSchema": false
+  }
+}

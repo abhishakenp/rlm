@@ -1,0 +1,17 @@
+{
+  "total_sources": 7,
+  "verified": 1,
+  "questionable": 6,
+  "verified_sources": [
+    "ValveIndustry.com"
+  ],
+  "questionable_sources": [
+    "Elinus, UAB",
+    "Rekvizitai.lt",
+    "Lursoft IT",
+    "XHVAL",
+    "ANIX Valve USA",
+    "Reynold Valves"
+  ],
+  "credibility_assessment": "Low credibility"
+}

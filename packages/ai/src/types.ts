@@ -12,7 +12,8 @@ export type KnownApi =
 	| "anthropic-messages"
 	| "bedrock-converse-stream"
 	| "google-generative-ai"
-	| "google-vertex";
+	| "google-vertex"
+	| "google-image-generation";
 
 export type Api = KnownApi | (string & {});
 
@@ -20,6 +21,7 @@ export type KnownProvider =
 	| "amazon-bedrock"
 	| "anthropic"
 	| "google"
+	| "google-image"
 	| "google-vertex"
 	| "openai"
 	| "azure-openai-responses"

@@ -1,0 +1,1 @@
+Error: unable to open database "/Library/Application Support/com.apple.TCC/TCC.db": authorization denied

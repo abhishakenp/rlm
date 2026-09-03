@@ -1,0 +1,44 @@
+[
+  {
+    "id": "read-agents-md",
+    "title": "Extract ctx.effect binding rule from AGENTS.md",
+    "prompt": "Read AGENTS.md and extract the exact rule about ctx.effect binding to Service.init vs public methods",
+    "needs": [],
+    "proof": {"kind": "file", "path": "/Users/abhi/AGENTS.md", "contains": "ctx.effect"}
+  },
+  {
+    "id": "find-all-effects",
+    "title": "Find every ctx.effect, ctx.interval, ctx.timeout, ctx.inject usage",
+    "prompt": "Search all packages for ctx.effect, ctx.interval, ctx.timeout, ctx.inject usages and list file:line matches",
+    "needs": ["read-agents-md"],
+    "proof": {"kind": "shell", "run": "grep -R \"ctx\\.effect\" packages/ | wc -l | grep -v '^0$'"}
+  },
+  {
+    "id": "analyze-rlm-packages",
+    "title": "Analyze rlm-* packages for ctx.effect binding violations",
+    "prompt": "For each ctx.effect in rlm-* packages, check if registered only in Service.init or also in public methods",
+    "needs": ["find-all-effects"],
+    "proof": {"kind": "file", "path": "./packages/rlm-self/src/index.ts", "contains": "ctx.effect"}
+  },
+  {
+    "id": "analyze-desktop-packages",
+    "title": "Analyze iris-desktop through iris-notify packages for violations",
+    "prompt": "Check 18 iris packages for ctx.effect binding issues, focus on public method registrations",
+    "needs": ["find-all-effects"],
+    "proof": {"kind": "shell", "run": "find packages/iris- | -name \"*.ts\" -exec grep -l \"ctx\\.effect\" {} \\; | wc -l | grep -v '^0$'"}
+  },
+  {
+    "id": "fix-public-method-effects",
+    "title": "Fix ctx.effect registrations in public methods using this.ctx capture",
+    "prompt": "For each public method ctx.effect registration, add const own = this.ctx at Service.init or use Set-of-teardowns pattern",
+    "needs": ["analyze-rlm-packages", "analyze-desktop-packages"],
+    "proof": {"kind": "file", "path": "./packages/rlm-self/src/service.ts", "contains": "const own = this.ctx"}
+  },
+  {
+    "id": "verify-fixes",
+    "title": "Verify all ctx.effect usages now bind to Service.init only",
+    "prompt": "Re-run search and confirm no ctx.effect remains in public methods",
+    "needs": ["fix-public-method-effects"],
+    "proof": {"kind": "shell", "run": "grep -R \"ctx\\.effect\" packages/ | grep -v \"Service\\.init\" | wc -l | grep -v '^0$'"}
+  }
+]

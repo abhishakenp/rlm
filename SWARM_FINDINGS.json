@@ -1,0 +1,6 @@
+{
+  "rootCause": "Delegation loop accepts 'reported done' without running mechanical proof criteria. The scheduler calls check() but delegator's close() bypasses verification by marking tasks as 'unproven' when they return. No actual criterion execution occurs for complex tasks that should trigger swarm research.",
+  "missingCriterion": "No detection logic exists for 'complex' or 'unanswerable' tasks. The required swarm/benchmark detection module does not exist, so grep returns nothing. The planner produces tasks with file-based proof that points to non-existent files.",
+  "currentBehavior": "For each of the 3 attempts, the delegator recorded the request as a task with an unstated criterion, marked it 'ready', ran a subagent that returned success, then in close() marked it 'unproven' because no mechanical check was performed. The loop never runs shell/file criteria.",
+  "proposedFix": "Implement swarm detection. Add detection for heavy research, benchmarking, complex task patterns. Update proof validation to require actual execution before marking done. Add swarm proof kind that verifies event emission and benchmarked results."
+}

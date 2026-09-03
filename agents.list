@@ -1,0 +1,13 @@
+claude
+anthropic/claude-3-5-sonnet
+auto/best-free
+auto/best-coding
+auto/best-reasoning
+auto/best-fast
+auto/best-vision
+auto/best-chat
+auto/best-coding-fast
+auto/cheap
+openai/gpt-4
+google/gemini-pro
+azure/openai

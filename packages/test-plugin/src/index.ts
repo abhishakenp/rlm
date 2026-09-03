@@ -1,0 +1,1 @@
+import { Service } from "@deepseek-ai/cordis"; export class TestService extends Service { static readonly id = "test-service"; static readonly provide = "testService" as const; async test() { return "hello"; } } export default TestService;

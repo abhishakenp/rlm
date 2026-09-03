@@ -1,0 +1,1 @@
+const s=require('./packages/iris-dirsize/dist/index.js'); s.of({path:'.'}).then(r=>{if(typeof r==='object'&&r.size!==undefined)process.exit(0);else{console.error('got',r);process.exit(1)}}).catch(e=>{console.error(e.message);process.exit(1)})

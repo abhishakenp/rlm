@@ -1,0 +1,86 @@
+[
+  {
+    "file": "packages/rlm-boot/src/index.ts",
+    "line": 38,
+    "directive": "import",
+    "reason": "Static ESM import of Node.js builtins (node:fs, node:module, node:os, node:path, node:url) at lines 38-51. These are evaluated once at module load time and cached by Node's ESM module system. When rlm-boot's source file is edited and hot-reloaded, the static imports are NOT re-evaluated — Node's module loader returns the cached module namespace. The apply() function's ability to react to config changes depends on these imports already being resolved.",
+    "fixStrategy": "Replace static imports used inside apply() with dynamic import() calls inside the apply() function body. Clear the module cache before re-importing using delete patterns or import.meta.resolve(). Alternatively, ensure the module cache eviction mechanism (rlm-hmr) covers node_modules packages by explicitly clearing relevant require.cache entries."
+  },
+  {
+    "file": "packages/rlm-boot/src/index.ts",
+    "line": 50,
+    "directive": "import",
+    "reason": "Static ESM import of @deepseek-ai/cordis (the Fiber class) and @deepseek-ai/yaml (the parse function). These are cached by Node's ESM loader. Even if the apply() function uses dynamic logic, the initial resolution of these packages is locked at module load time. A hot-reload of rlm-boot does not re-run these imports.",
+    "fixStrategy": "Replace with dynamic import() inside apply() or use createRequire() with require.cache eviction for CJS interop. Move the Fiber import to dynamic loading inside the apply() body so it re-evaluates on each module hot-reload."
+  },
+  {
+    "file": "node_modules/@deepseek-ai/cordis-plugin-loader/lib/index.js",
+    "line": 275,
+    "directive": "import",
+    "reason": "EntryTree.import() uses Node's dynamic import() for relative-path plugin specifiers (lines 275-278). The @vite-ignore comment prevents vite from seeing it, but Node's ESM loader still caches the result. When a plugin's source is edited (e.g., rlm-boot), the cache is NOT cleared, so the next call to import() returns the stale cached module. This is the primary blocker for hot-reloading plugin source files.",
+    "fixStrategy": "Add ESM module cache eviction before each import() call in EntryTree.import(): collect the module namespace URL and call a cache-clear mechanism. Node.js v22+ supports import.meta.resolve() which can be used with delete import.meta.cache[url]. Alternatively, use the experimental-loader hook to intercept module loading and bypass the cache."
+  },
+  {
+    "file": "node_modules/@deepseek-ai/cordis-plugin-loader/lib/index.js",
+    "line": 279,
+    "directive": "import",
+    "reason": "Same issue as line 275 but for bare specifiers (e.g., @deepseek-ai/cordis-plugin-hmr). Bare specifier imports are cached by Node's module resolver. When a plugin's package is edited, the import() returns the cached ESM module namespace from the first import call. This blocks hot-reloading of external packages that are imported via name (e.g., the hmr plugin).",
+    "fixStrategy": "Use import.meta.resolve(name) to get the resolved URL, then clear import.meta.cache for that URL before calling import(). This is the recommended Node.js ESM cache eviction pattern for hot module replacement."
+  },
+  {
+    "file": "node_modules/@deepseek-ai/cordis-plugin-loader/lib/index.js",
+    "line": 522,
+    "directive": "import",
+    "reason": "Entry._init() calls tree.import(this.options.name) to import the plugin module. This triggers the Node ESM import() caching described at line 279. The cached module is used for the plugin callback, and on hot-reload the old cached module is used until the import cache is cleared. This is the same issue as the EntryTree.import() calls but at a different call site (initial entry activation vs entry update).",
+    "fixStrategy": "Same as line 279: clear import.meta.cache for the resolved module URL before calling import() inside EntryTree.import(). The fix propagates to all callers including Entry._init() and Entry.update()."
+  },
+  {
+    "file": "packages/rlm-boot/src/index.ts",
+    "line": 244,
+    "directive": "config",
+    "reason": "apply() captures config.debounce once at line 244: `const debounceMs = config.debounce ?? 80`. This value is used to construct the debounce() function (line 290) and never re-read. If the boot row's config is changed via overlay or direct update, the apply() function does not re-run — the closure still holds the original debounceMs value. The debounce timing therefore does not update on config change without a full row restart.",
+    "fixStrategy": "Move config.debounce access inside the debounce() function body as a closure over config, or expose it as a reactive signal that debounce() reads on each call. Currently the value is captured once and becomes static."
+  },
+  {
+    "file": "packages/rlm-boot/src/index.ts",
+    "line": 245,
+    "directive": "config",
+    "reason": "apply() captures config.poll once at line 245: `const pollMs = config.poll ?? 400`. This value is passed to watchConfigFile() for the fs.watch polling interval (line 332-333). The poll interval is captured in the watcher setup closure and never re-evaluated. If the poll config changes, the watcher continues using the old interval.",
+    "fixStrategy": "Store pollMs as a reactive context value, and read it inside the watchConfigFile function or pass a getter function instead of a static number. Alternatively, re-create the watcher when the poll config changes."
+  },
+  {
+    "file": "packages/rlm-boot/src/index.ts",
+    "line": 246,
+    "directive": "config",
+    "reason": "apply() captures config.root once at line 246. This value is used to construct the require() shim and the RlmHost root path. If the root config changes, apply() would need to re-run for the change to take effect, since the value is captured in a closure used for providing the rlmHost service.",
+    "fixStrategy": "Provide root as a reactive getter rather than a static value, or use ctx.provide with a getter function that reads from the current config."
+  },
+  {
+    "file": "packages/rlm-boot/src/index.ts",
+    "line": 247,
+    "directive": "config",
+    "reason": "apply() captures config.home and the RLM_HOME fallback once at line 247. This is used to determine the overlay path and home directory. Changes to home config require apply() re-execution to take effect.",
+    "fixStrategy": "Same as line 246: expose home as a reactive context value or getter."
+  },
+  {
+    "file": "packages/rlm-boot/src/index.ts",
+    "line": 247,
+    "directive": "config",
+    "reason": "apply() captures config.overlay once at line 248: `const overlayPath = config.overlay ?? join(home, 'cordis.patch.yml')`. The overlay path is captured in a closure and used for watchConfigFile() setup. If the overlay path changes, the watcher is not re-created.",
+    "fixStrategy": "Re-read config.overlay inside the effect() that sets up the overlay watcher, so changing config.overlay triggers watcher teardown and recreation."
+  },
+  {
+    "file": "packages/rlm-boot/src/index.ts",
+    "line": 209,
+    "directive": "poll",
+    "reason": "watchFile() is called with { interval } where interval comes from pollMs (config.poll). The interval value is captured once at watcher creation time. Node's fs.watchFile polling interval cannot be changed after the watcher is created without stopping and restarting the watcher. The current code captures pollMs in the closure at line 245, so a config.poll change is not reflected in the existing watcher.",
+    "fixStrategy": "Stop and restart the watchFile watcher when config.poll changes, by using an effect that depends on config.poll and recreates the watcher on change. Alternatively, document that poll changes require a full boot row restart."
+  },
+  {
+    "file": "node_modules/@deepseek-ai/cordis-plugin-include/lib/index.js",
+    "line": 183,
+    "directive": "import",
+    "reason": "Include.read() uses `await import(filename)` for .js composition files (not .yaml/.json). This is Node's dynamic import() with @vite-ignore, cached by Node's ESM loader. If the .js composition file is edited, the include's refresh() will call read() again, but import() returns the stale cached module unless the cache is cleared. This blocks hot-reload of .js composition files.",
+    "fixStrategy": "Clear import.meta.cache for the resolved module URL before calling import() in Include.read(). Use import.meta.resolve() to get the URL, then clear the cache entry."
+  }
+]

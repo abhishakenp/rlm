@@ -105,6 +105,7 @@ function getApiKeyEnvVars(provider: string): readonly string[] | undefined {
 		"prime-inference": "PRIME_API_KEY",
 		deepseek: "DEEPSEEK_API_KEY",
 		google: "GEMINI_API_KEY",
+		"google-image": "GEMINI_API_KEY",
 		"google-vertex": "GOOGLE_CLOUD_API_KEY",
 		groq: "GROQ_API_KEY",
 		cerebras: "CEREBRAS_API_KEY",
@@ -163,6 +164,9 @@ export function getEnvApiKey(provider: string): string | undefined {
 	if (envKeys?.[0]) {
 		return process.env[envKeys[0]] || getProcEnv(envKeys[0]);
 	}
+
+	if (provider === "google-image" || provider === "google")
+		return process.env.GEMINI_API_KEY || getProcEnv("GEMINI_API_KEY");
 
 	if (provider === "google-vertex") {
 		const hasCredentials = hasVertexAdcCredentials();

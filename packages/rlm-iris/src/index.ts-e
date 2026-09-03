@@ -1,0 +1,223 @@
+import { Service } from "@deepseek-ai/cordis"; 
+import { join } from "path"; 
+import { homedir } from "os"; 
+import { readFileSync, existsSync, readdirSync, statSync } from "fs"; 
+
+// Use environment variables for config paths, with defaults
+// IRIS_CONFIG_PATH: path to agents.json (default: ~/.iris/agents.json)
+// IRIS_SESSIONS_DIR: path to sessions directory (default: ~/.iris/mind/sessions)
+const getIrisConfigPath = (): string =>
+  process.env.IRIS_CONFIG_PATH || join(homedir(), ".iris", "agents.json"); 
+
+const getIrisSessionsDir = (): string =>
+  process.env.IRIS_SESSIONS_DIR || join(homedir(), ".iris", "mind", "sessions"); 
+
+interface IrisSessionEntry {
+  handle: string; 
+  at: string; 
+}
+
+interface IrisAgentsConfig {
+  version: number; 
+  sessions: Record<string, Record<string, IrisSessionEntry>>; 
+  defaultAgent?: string; 
+  defaultAt?: string; 
+}
+
+export class RlmIris extends Service {
+  static inject = ["rlmTui"] as const; 
+  static provide = "iris" as const; 
+
+  constructor(goog: any) {
+    super(goog, undefined as any); 
+  }
+
+  async [Service.init]() {
+    const tui = this.ctx.get("rlmTui") as any; 
+    if (!tui?.registerSlashCommand) return; 
+    tui.registerSlashCommand("rlm-iris", {
+      name: "iris",
+      description: "Open or manage Iris sessions",
+      takesArgument: true,
+      argumentHint: "open | list | current",
+      handler: async (args: string, ctx: any) => {
+        const parts = (args ?? "").trim().split(/\s+/); 
+        const sub = parts[0] ?? "open"; 
+        
+        if (sub === "open" || sub === "") {
+          const r = this.openCurrentSession(); 
+          ctx.showMessage?.("\`\`\`json\n" + JSON.stringify(r, null, 2) + "\n\`\`\`"); 
+          return; 
+        }
+        
+        if (sub === "list") {
+          const r = this.listSessions(); 
+          ctx.showMessage?.("\`\`\`json\n" + JSON.stringify(r, null, 2) + "\n\`\`\`"); 
+          return; 
+        }
+        
+        if (sub === "current") {
+          const r = this.getCurrentSession(); 
+          ctx.showMessage?.("\`\`\`json\n" + JSON.stringify(r, null, 2) + "\n\`\`\`"); 
+          return; 
+        }
+        
+        ctx.showMessage?.("usage: /iris open | list | current"); 
+      },
+    }); 
+  }
+
+  private readAgentsConfig(): { config: IrisAgentsConfig | null; error?: string } {
+    const configPath = getIrisConfigPath(); 
+    if (!existsSync(configPath)) {
+      return { config: null, error: "agents.json not found at " + configPath }; 
+    }
+    try {
+      const raw = readFileSync(configPath, "utf8"); 
+      const config = JSON.parse(raw) as IrisAgentsConfig; 
+      return { config }; 
+    } catch (e) {
+      return { config: null, error: "Failed to parse agents.json: " + String(e) }; 
+    }
+  }
+
+  getCurrentSession(): Record<string, unknown> {
+    const { config, error } = this.readAgentsConfig(); 
+    if (error || !config) {
+      return { error: error ?? "No config" }; 
+    }
+
+    const irisSessions: Array<{ agent: string; name: string; entry: IrisSessionEntry }> = []; 
+    
+    for (const [agentName, sessions] of Object.entries(config.sessions)) {
+      for (const [sessionName, entry] of Object.entries(sessions)) {
+        if (entry.handle === "iris") {
+          irisSessions.push({ agent: agentName, name: sessionName, entry }); 
+        }
+      }
+    }
+
+    if (irisSessions.length === 0) {
+      return { error: "No Iris sessions found in agents.json" }; 
+    }
+
+    irisSessions.sort((a, b) => b.entry.at.localeCompare(a.entry.at)); 
+    const current = irisSessions[0]; 
+    const sessionFile = this.findSessionFile(current.name); 
+
+    return {
+      agent: current.agent,
+      session: current.name,
+      handle: current.entry.handle,
+      at: current.entry.at,
+      sessionFile,
+      allSessions: irisSessions.map(s => ({
+        agent: s.agent,
+        session: s.name,
+        at: s.entry.at,
+      })),
+    }; 
+  }
+
+  private findSessionFile(sessionName: string): string | null {
+    const sessionsDir = getIrisSessionsDir(); 
+    if (!existsSync(sessionsDir)) {
+      return null; 
+    }
+
+    const normalizedName = sessionName.toLowerCase().replace(/[^a-z0-9]/g, "_"); 
+    const candidates = [
+      sessionName + ".jsonl",
+      normalizedName + ".jsonl",
+      "iris.jsonl",
+    ]; 
+
+    const files = readdirSync(sessionsDir)
+      .filter(f => f.endsWith(".jsonl") && !f.includes(".bak")); 
+
+    for (const candidate of candidates) {
+      if (files.includes(candidate)) {
+        return join(sessionsDir, candidate); 
+      }
+    }
+
+    const fileInfos = files.map(f => ({
+      file: f,
+      path: join(sessionsDir, f),
+      mtime: statSync(join(sessionsDir, f)).mtime.getTime(),
+    })); 
+    fileInfos.sort((a, b) => b.mtime - a.mtime); 
+    
+    return fileInfos.length > 0 ? fileInfos[0].path : null; 
+  }
+
+  listSessions(): Record<string, unknown> {
+    const { config, error } = this.readAgentsConfig(); 
+    if (error || !config) {
+      return { error: error ?? "No config" }; 
+    }
+
+    const sessions: Array<Record<string, unknown>> = []; 
+    
+    for (const [agentName, agentSessions] of Object.entries(config.sessions)) {
+      for (const [sessionName, entry] of Object.entries(agentSessions)) {
+        if (entry.handle === "iris") {
+          sessions.push({
+            agent: agentName,
+            session: sessionName,
+            handle: entry.handle,
+            at: entry.at,
+          }); 
+        }
+      }
+    }
+
+    sessions.sort((a, b) => String(b.at).localeCompare(String(a.at))); 
+
+    return {
+      configPath: getIrisConfigPath(),
+      defaultAgent: config.defaultAgent,
+      defaultAt: config.defaultAt,
+      sessionCount: sessions.length,
+      sessions,
+    }; 
+  }
+
+  openCurrentSession(): Record<string, unknown> {
+    const current = this.getCurrentSession(); 
+    if (current.error) {
+      return current; 
+    }
+
+    const sessionFile = current.sessionFile as string | null; 
+    if (!sessionFile || !existsSync(sessionFile)) {
+      return { ...current, sessionFile, error: sessionFile ? "Session file not found" : "No session file" }; 
+    }
+
+    const content = readFileSync(sessionFile, "utf8"); 
+    const lines = content.split("\n").filter(l => l.trim()); 
+    
+    const recentEntries = lines.slice(-10).map((line, i) => {
+      const index = lines.length - 10 + i; 
+      try {
+        const entry = JSON.parse(line); 
+        return {
+          index,
+          type: entry.type,
+          id: entry.id,
+          timestamp: entry.timestamp,
+          role: entry.message?.role,
+          preview: entry.message?.content ? String(entry.message.content).slice(0, 150) : undefined,
+        }; 
+      } catch {
+        return { index, parseError: true }; 
+      }
+    }); 
+
+    return { ...current, sessionFile, totalEntries: lines.length, recentEntries }; 
+  }
+}
+
+
+export const iris = RlmIris; 
+export default RlmIris; return 

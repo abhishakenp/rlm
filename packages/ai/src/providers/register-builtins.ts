@@ -15,6 +15,7 @@ import type { AnthropicOptions } from "./anthropic.js";
 import type { AzureOpenAIResponsesOptions } from "./azure-openai-responses.js";
 import type { GoogleOptions } from "./google.js";
 import type { GoogleVertexOptions } from "./google-vertex.js";
+import type { GoogleImageOptions } from "./google-image.js";
 import type { MistralOptions } from "./mistral.js";
 import type { OpenAICodexResponsesOptions } from "./openai-codex-responses.js";
 import type { OpenAICompletionsOptions } from "./openai-completions.js";
@@ -46,6 +47,11 @@ interface AzureOpenAIResponsesProviderModule {
 interface GoogleProviderModule {
 	streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>;
 	streamSimpleGoogle: StreamFunction<"google-generative-ai", SimpleStreamOptions>;
+}
+
+interface GoogleImageProviderModule {
+	streamGoogleImage: StreamFunction<"google-image-generation", GoogleImageOptions>;
+	streamSimpleGoogleImage: StreamFunction<"google-image-generation", SimpleStreamOptions>;
 }
 
 interface GoogleVertexProviderModule {
@@ -96,6 +102,9 @@ let azureOpenAIResponsesProviderModulePromise:
 	| undefined;
 let googleProviderModulePromise:
 	| Promise<LazyProviderModule<"google-generative-ai", GoogleOptions, SimpleStreamOptions>>
+	| undefined;
+let googleImageProviderModulePromise:
+	| Promise<LazyProviderModule<"google-image-generation", GoogleImageOptions, SimpleStreamOptions>>
 	| undefined;
 let googleVertexProviderModulePromise:
 	| Promise<LazyProviderModule<"google-vertex", GoogleVertexOptions, SimpleStreamOptions>>
@@ -239,6 +248,19 @@ function loadGoogleProviderModule(): Promise<
 	return googleProviderModulePromise;
 }
 
+function loadGoogleImageProviderModule(): Promise<
+	LazyProviderModule<"google-image-generation", GoogleImageOptions, SimpleStreamOptions>
+> {
+	googleImageProviderModulePromise ||= import("./google-image.js").then((module) => {
+		const provider = module as GoogleImageProviderModule;
+		return {
+			stream: provider.streamGoogleImage,
+			streamSimple: provider.streamSimpleGoogleImage,
+		};
+	});
+	return googleImageProviderModulePromise;
+}
+
 function loadGoogleVertexProviderModule(): Promise<
 	LazyProviderModule<"google-vertex", GoogleVertexOptions, SimpleStreamOptions>
 > {
@@ -326,6 +348,8 @@ export const streamAzureOpenAIResponses = createLazyStream(loadAzureOpenAIRespon
 export const streamSimpleAzureOpenAIResponses = createLazySimpleStream(loadAzureOpenAIResponsesProviderModule);
 export const streamGoogle = createLazyStream(loadGoogleProviderModule);
 export const streamSimpleGoogle = createLazySimpleStream(loadGoogleProviderModule);
+export const streamGoogleImage = createLazyStream(loadGoogleImageProviderModule);
+export const streamSimpleGoogleImage = createLazySimpleStream(loadGoogleImageProviderModule);
 export const streamGoogleVertex = createLazyStream(loadGoogleVertexProviderModule);
 export const streamSimpleGoogleVertex = createLazySimpleStream(loadGoogleVertexProviderModule);
 export const streamMistral = createLazyStream(loadMistralProviderModule);
@@ -380,6 +404,12 @@ export function registerBuiltInApiProviders(): void {
 		api: "google-generative-ai",
 		stream: streamGoogle,
 		streamSimple: streamSimpleGoogle,
+	});
+
+	registerApiProvider({
+		api: "google-image-generation",
+		stream: streamGoogleImage,
+		streamSimple: streamSimpleGoogleImage,
 	});
 
 	registerApiProvider({

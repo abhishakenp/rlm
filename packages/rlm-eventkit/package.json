@@ -1,0 +1,8 @@
+{
+  "name": "@rlm/eventkit",
+  "version": "0.1.0",
+  "description": "Native Swift EventKit integration for Reminders and Calendar access",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "swift": "src/EKEventStore.swift"
+}

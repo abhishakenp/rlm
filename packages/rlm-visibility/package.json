@@ -1,0 +1,14 @@
+{
+  "name": "@rlm/visibility",
+  "version": "0.1.0",
+  "description": "Visibility surface for monitoring task execution and outer loop activity. Subscribes to delegate events, maintains an in-memory snapshot, and contributes prompt fragments.",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "*"
+  }
+}

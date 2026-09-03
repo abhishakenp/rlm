@@ -1,0 +1,1 @@
+- Added `terminal.status` and `desktop.find` commands to the iris-commands plugin.

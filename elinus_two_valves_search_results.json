@@ -1,0 +1,32 @@
+{
+  "query": "Elinus Two Valves",
+  "search_date": "2026-09-02T05:55:32.593Z",
+  "search_engines_tried": [
+    "DuckDuckGo API (instant answer + JSON)",
+    "Wikipedia API",
+    "Stack Exchange API",
+    "Bing Search",
+    "GitHub Code Search"
+  ],
+  "results": {
+    "found": false,
+    "sources": [],
+    "summary": "No credible sources found"
+  },
+  "search_terms_tried": [
+    "Elinus Two Valves",
+    "Elinus Valves",
+    "Elinus Industrial Valves",
+    "E-Linus Valves",
+    "Two Valves company",
+    "Two Valves industrial",
+    "\"Elinus\" valves",
+    "Elinus valve manufacturer",
+    "Elinus industrial",
+    "Elinus company",
+    "Elinus pump",
+    "\"Two Valves\""
+  ],
+  "status": "COMPLETE - NO RESULTS",
+  "conclusion": "The search term 'Elinus Two Valves' returned no results from any search engine tried. This entity may be: (1) very obscure or niche, (2) spelled differently, (3) too new to be indexed, or (4) require more context to identify correctly."
+}
