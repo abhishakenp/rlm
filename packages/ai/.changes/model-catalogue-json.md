@@ -1,0 +1,1 @@
+- Changed the generated model catalogue to a parsed JSON payload instead of a TypeScript object literal, cutting the memory cost of importing it by roughly half with no change to the catalogue contents or to the types callers see.
