@@ -22,6 +22,7 @@
  * runtime on purpose — a pasted copy teaches a flow that no longer exists.
  */
 import { Service } from "@deepseek-ai/cordis";
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -218,6 +219,47 @@ const DEFAULT_SKELETON = join(
 	"workflows",
 	"delegator.ts",
 );
+
+/**
+ * Another drive already sweeping this store, by pid, or nothing.
+ *
+ * There is no cross-process lock on the store, so two drives both claim the
+ * same `ready` tasks, both spawn children for them, and both write that task's
+ * state into one journal. `scripts/drive-supervisor.sh` has held this line with
+ * a `pgrep` since a supervisor died and left its sweep running with ppid 1 —
+ * but it can only guard the loop it runs, and a drive started by hand, by an
+ * agent, or by anything that is not that loop walks straight past it. It
+ * happened while this file was being written.
+ *
+ * So the guard belongs here too, where every drive goes through it whoever
+ * started it. Ancestors are excluded rather than just `process.pid`: rlm
+ * re-execs itself under tsx and the supervisor wraps it in `timeout`, so a
+ * single drive shows up as three processes all carrying the same command line,
+ * and a guard that only knew its own pid would refuse to start on the strength
+ * of its own parent.
+ *
+ * A guard that cannot look does not refuse. No `ps`, no opinion — an
+ * unavailable check must not be able to stop the fleet.
+ */
+const anotherDriveSweeping = (): number | null => {
+	try {
+		const out = execFileSync("ps", ["-eo", "pid=,ppid=,command="], { encoding: "utf8", maxBuffer: 16e6, timeout: 4000 });
+		const parents = new Map<number, number>();
+		const drives: number[] = [];
+		for (const raw of out.split("\n")) {
+			const row = raw.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
+			if (!row) continue;
+			const pid = Number(row[1]);
+			parents.set(pid, Number(row[2]));
+			if (/cordis-shell\.mjs\s+drive(\s|$)/.test(row[3])) drives.push(pid);
+		}
+		const mine = new Set<number>();
+		for (let pid = process.pid; pid > 1 && !mine.has(pid); pid = parents.get(pid) ?? 0) mine.add(pid);
+		return drives.find((pid) => !mine.has(pid)) ?? null;
+	} catch {
+		return null;
+	}
+};
 
 export class RlmDelegateService extends Service {
 	static inject = [] as const;
@@ -491,6 +533,12 @@ export class RlmDelegateService extends Service {
 					console.log(this.status());
 					const asking = this.impasses();
 					if (asking.length) console.log(renderImpasses(asking));
+					return 0;
+				}
+				// One sweep at a time across processes, whoever started it.
+				const already = anotherDriveSweeping();
+				if (already !== null) {
+					console.log(`  a drive is already sweeping this store (pid ${already}) — standing down`);
 					return 0;
 				}
 				// Said out loud before the sweep, because "me-2 is wired in" is
