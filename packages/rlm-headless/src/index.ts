@@ -225,37 +225,44 @@ const DEFAULT_POOL_SLOTS = 8;
 /**
  * What an unwatched child is run by.
  *
- * **`node`, and the interpreter floor is why that is a surprise.** The case for
- * bun was `bun -e ''` at 21 MB against `node -e ''` at 39 MB, plus the tsx
- * loader a node child carries and the `esbuild --service` process tsx starts
- * beside it at 16-17 MB. Bun runs TypeScript natively, so both of those really
- * do go away — and the whole worker still costs more, because an empty
- * interpreter is not the thing being paid for. Eight concurrent tasks through
- * one warm pool, three runs each, sampled from outside with `ps` and
- * `footprint`:
+ * **`bun`, and it is the more expensive of the two.** He asked for the swap
+ * twice, the second time after being shown the measurement, so this constant
+ * records the trade rather than arguing it.
  *
- *              whole-tree RSS      footprint dirty     boot to ready
- *     node     148-154 MB          101-109 MB          1.00-1.26 s
- *     bun      250-266 MB          121-144 MB          0.50-0.75 s
+ * The case for bun was `bun -e ''` at 21 MB against `node -e ''` at 39 MB, plus
+ * the tsx loader a node child carries and the `esbuild --service` process tsx
+ * starts beside it. Bun runs TypeScript natively, so both of those really do go
+ * away — and the whole worker still costs more, because an empty interpreter is
+ * not the thing being paid for. Re-measured after the swap, eight concurrent
+ * tasks through one warm pool, three runs each, sampled from outside with `ps`
+ * and `footprint` while the machine also had a live sweep on it:
  *
- * Bun also holds 70-94 MB the system lists as reclaimable, against node's
- * 2.5-13 MB, which is most of the gap in the RSS column and is memory the OS
- * can take back under pressure — so the honest number is the dirty one, and on
- * that bun is 20-35 MB per worker worse, not better. It boots roughly twice as
- * fast, and its throughput was better in two runs of three, on a workload whose
- * wall clock is mostly a model call and therefore too noisy to bank.
+ *                        node          bun
+ *     dirty, warm idle   85-96 MB      123-130 MB
+ *     dirty, under 8     90-99 MB      122-124 MB
+ *     tree RSS, idle     127-136 MB    214-230 MB
+ *     tree RSS, peak     146-147 MB    264-289 MB
+ *     reclaimable        3-5 MB        51-60 MB
+ *     boot to ready      912-973 ms    340-521 ms
+ *     answered           8/8, 8/8, 8/8 8/8, 8/8, 8/8
  *
- * So the swap is built and it is one value away, and the default is the runtime
- * that costs less, because reducing what a delegated agent costs is the whole
- * point of the row this constant lives in. Set it to "bun" to trade ~30 MB a
- * worker for half the boot latency.
+ * Removing the tsx loader did not change the picture: **bun is 25-35 MB per
+ * worker worse on the dirty number and boots two to two-and-a-half times
+ * faster.** The RSS column exaggerates the gap because bun holds 51-60 MB the
+ * system lists as reclaimable against node's 3-5 MB, and that is memory the OS
+ * can take back under pressure — so the honest number is the dirty one, and it
+ * says the same thing the first measurement did.
+ *
+ * Set this to `"node"` to trade half the boot latency back for ~30 MB a worker.
+ * Nothing about a child's state is written in a runtime's dialect, so going
+ * back is one value and no migration.
  *
  * Everything else about bun checked out: it boots the whole composition and
  * answers real tasks, IPC and detached process groups behave identically,
  * `sandbox-exec` still refuses a write outside the scope, and a session written
  * by a bun worker resumes in a node one from the same store.
  *
- * **The interactive host stays on node either way, and that part is permanent.**
+ * **The interactive host stays on node, and that part is permanent.**
  * The flag bun cannot have is `--expose-internals`: `cordis-plugin-loader`
  * reaches Node's internal ESM loader through it, `require("internal/modules/
  * esm/loader")` throws outright under bun, and both `cordis-plugin-hmr` and
@@ -263,11 +270,8 @@ const DEFAULT_POOL_SLOTS = 8;
  * and a `--print` child never reload a module, so they lose nothing; a person
  * editing a row in front of a live rlm does, and that is the whole of the
  * split.
- *
- * It is a setting rather than a constant so going back is one value and no
- * migration: nothing about a child's state is written in a runtime's dialect.
  */
-const DEFAULT_CHILD_RUNTIME = "node";
+const DEFAULT_CHILD_RUNTIME = "bun";
 
 /**
  * What bun is handed instead of node's sizing flags.
@@ -340,7 +344,7 @@ export const configFields = [
 		type: "string",
 		default: DEFAULT_CHILD_RUNTIME,
 		description:
-			"What to run an unwatched one-shot child or a pooled worker with. 'bun' needs neither the tsx loader nor the esbuild service tsx starts beside it, and boots about twice as fast; measured on eight concurrent tasks in one warm pool it also costs 20-35 MB more dirty memory per worker than 'node', which is why node is the default. Both are fully working — a session written by one resumes in the other from the same store — so this is a one-value trade between boot latency and resident memory. The interactive host is not affected either way: it stays on node because module hot reload needs Node's internal ESM loader, which bun does not have. A name is looked up on PATH; a path is used as given; a binary that is not there falls back to whatever is running this, with a line in the log.",
+			"What to run an unwatched one-shot child or a pooled worker with. 'bun' is the default: it needs neither the tsx loader nor the esbuild service tsx starts beside it, and boots two to two-and-a-half times faster. It is not the cheaper one — re-measured on eight concurrent tasks through one warm pool, three runs each, it costs 25-35 MB more dirty memory per worker than 'node', and removing tsx did not close that. Both are fully working — a session written by one resumes in the other from the same store — so this is a one-value trade between boot latency and resident memory, and 'node' takes it back. The interactive host is not affected either way: it stays on node because module hot reload needs Node's internal ESM loader, which bun does not have. A name is looked up on PATH; a path is used as given; a binary that is not there falls back to whatever is running this, with a line in the log.",
 	},
 	{
 		key: "childBunFlags",
