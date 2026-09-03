@@ -41,7 +41,8 @@ import { check, type Probe } from "./proof.ts";
 import { run as runGraph, type Runner, type RunOptions } from "./scheduler.ts";
 import { drive as driveGraphs, renderReport, type DriveOptions, type DriveReport } from "./drive.ts";
 import { impasses, renderImpasses, type Impasse } from "./impasse.ts";
-import { rlmAgent } from "./agent.ts";
+import { rlmAgent, sessionFor } from "./agent.ts";
+import { AgentPool } from "./pool.ts";
 import { askModel, route as modelRoute } from "./ask.ts";
 import { confineTo, plannerScope } from "./confine.ts";
 import { me2 } from "./me2.ts";
@@ -226,6 +227,15 @@ export class RlmDelegateService extends Service {
 
 	private store!: Store;
 	private mode: { dispose(): void } | null = null;
+	/**
+	 * The warm workers, made on the first sweep that wants them.
+	 *
+	 * One per row rather than one per sweep: the whole saving is in not paying
+	 * the composition boot again, and a pool rebuilt for every sweep pays it
+	 * every time. It is closed by the row's own teardown, because a pool that
+	 * outlives the row that made it is 143 MB of nothing.
+	 */
+	private pool: AgentPool | null = null;
 	private teardowns = new Set<() => void>();
 
 	constructor(ctx: any, config: RlmDelegateConfig = {}) {
@@ -242,6 +252,9 @@ export class RlmDelegateService extends Service {
 		this.ctx.effect(() => {
 			return () => {
 				this.mode = null;
+				const pool = this.pool;
+				this.pool = null;
+				void pool?.close().catch(() => {});
 				for (const off of this.teardowns) {
 					try {
 						off();
@@ -430,6 +443,31 @@ export class RlmDelegateService extends Service {
 				// Nothing is ever dropped, so this total is the answer to "did we
 				// lose anything": it only ever goes up.
 				return 0;
+			},
+		});
+
+		// The other end of the pool. Not a surface for a person — it is what a
+		// worker process runs instead of `print`, and it only means anything with
+		// an IPC channel to a parent, which is exactly what it checks.
+		//
+		// A mode rather than a second entry point because `cordis-shell.mjs` is
+		// the only thing that can boot the composition and its own header asks to
+		// be left alone. `pool-worker.ts` is imported here rather than at the top
+		// of this file on purpose: it reaches into coding-agent internals, and
+		// this package's tests run under bare `node --experimental-strip-types`
+		// with none of that on the path.
+		modes.register({
+			id: "pool-worker",
+			priority: 70,
+			claims: (argv: string[]) => argv.includes("--pool-worker"),
+			run: async (argv: string[]) => {
+				const at = argv.indexOf("--slots");
+				const asked = at === -1 ? Number.NaN : Number(argv[at + 1]);
+				const { runPoolWorker } = await import("./pool-worker.ts");
+				return await runPoolWorker(this.ctx, {
+					...(Number.isFinite(asked) && asked > 0 ? { slots: asked } : {}),
+					cwd: this.config.cwd ?? process.cwd(),
+				});
 			},
 		});
 
@@ -899,16 +937,37 @@ export class RlmDelegateService extends Service {
 		const childFlags =
 			(this.ctx.get("rlmHeadless") as { childNodeFlags?: () => string[] } | undefined)?.childNodeFlags?.() ?? [];
 
+		// Whether children are pooled is the headless row's answer too, for the
+		// same reason the flags are: what an unwatched child costs is a fact
+		// about unwatched children. Probed with `ctx.get`, so a composition
+		// without `@rlm/headless` spawns one process per task exactly as before —
+		// that is the whole of the switch, and it is the one he asked for.
+		const slots =
+			(this.ctx.get("rlmHeadless") as { childPoolSlots?: () => number } | undefined)?.childPoolSlots?.() ?? 0;
+		const pool = slots > 1 ? this.workers(slots, childFlags) : null;
+		// Said out loud on the way in, beside the me-2 line, for the same reason:
+		// "children are pooled" is exactly the kind of claim that is invisible
+		// when it is false, and the whole point of the pool is a number he can
+		// see. `console.log` and not the logger — the logger does not reach the
+		// drive's own log, which is where somebody looks.
+		console.log(
+			pool
+				? `  children are pooled — ${slots} task(s) per worker, at most ${Math.max(1, Math.ceil(this.capacity().limit / slots))} worker(s)`
+				: "  children are one process each — no headless row asked for a pool",
+		);
+
 		const makeRunner =
 			options.makeRunner ??
-			((signal: AbortSignal) =>
-				rlmAgent({
-					entry: this.config.entry ?? process.argv[1],
-					cwd: this.config.cwd ?? process.cwd(),
-					timeoutMs: this.config.attemptTimeoutMs ?? 2_700_000,
-					nodeFlags: childFlags,
-					signal,
-				}));
+			(pool
+				? (signal: AbortSignal) => pool.runner({ signal })
+				: (signal: AbortSignal) =>
+						rlmAgent({
+							entry: this.config.entry ?? process.argv[1],
+							cwd: this.config.cwd ?? process.cwd(),
+							timeoutMs: this.config.attemptTimeoutMs ?? 2_700_000,
+							nodeFlags: childFlags,
+							signal,
+						}));
 
 		// The planner is the same agent, asked a different question. Cheap to
 		// build here and worth having by default: without one, a request that is
@@ -983,6 +1042,65 @@ export class RlmDelegateService extends Service {
 		return report;
 	}
 
+	/**
+	 * The warm workers, made once.
+	 *
+	 * `maxWorkers` is not a new number. `capacity()` already decides how many
+	 * tasks may be in flight at once, off the machine rather than off a setting,
+	 * and the scheduler already holds the fleet to it; this is that same ceiling
+	 * divided by how many tasks fit in one process. Inventing a second limit
+	 * beside `capacity()` is exactly what the guard row exists to stop.
+	 */
+	private workers(slots: number, childFlags: string[]): AgentPool {
+		if (this.pool) return this.pool;
+		this.pool = new AgentPool({
+			entry: this.config.entry ?? process.argv[1],
+			cwd: this.config.cwd ?? process.cwd(),
+			timeoutMs: this.config.attemptTimeoutMs ?? 2_700_000,
+			nodeFlags: childFlags,
+			slots,
+			maxWorkers: Math.max(1, Math.ceil(this.capacity().limit / slots)),
+			log: (line) => this.ctx.logger?.info?.(line),
+		});
+		this.ctx.logger?.info?.(
+			`rlm-delegate: pooling children — ${slots} task(s) per worker, at most ${Math.max(1, Math.ceil(this.capacity().limit / slots))} worker(s)`,
+		);
+		return this.pool;
+	}
+
+	/**
+	 * Open one agent, and by the same act close every other one.
+	 *
+	 * *"when i open 1 delegator agent, the other 900 subagents are still
+	 * headless, and when i open one of the subagents, all other 900-1 subagents
+	 * and the main delegator agents are headless?"* — yes, and this is where it
+	 * is said. One session in the whole fleet is watched at a time; the worker
+	 * holding it hands out `rlmLive` and the rows that exist for a person mount
+	 * inside it, and every other worker, including the one that was watched a
+	 * moment ago, does not. Nothing restarts.
+	 *
+	 * With no pool there is nothing to route to, so it moves this process's own
+	 * attention instead — which is the same fact, in the one process there is.
+	 */
+	attend(sessionId: string | null): string | null {
+		if (this.pool) return this.pool.attend(sessionId);
+		const headless = this.ctx.get?.("rlmHeadless") as { attend?: (id: string | null) => unknown } | undefined;
+		headless?.attend?.(sessionId);
+		return sessionId;
+	}
+
+	/** The session a given task runs as, so `attend` can be given a task. */
+	sessionOf(graphId: string, taskId: string): string | null {
+		const graph = this.store.load(graphId);
+		const task = graph?.tasks.find((t) => t.id === taskId);
+		return graph && task ? sessionFor(graph, task) : null;
+	}
+
+	/** What the pool is doing, for anyone asking why the fleet costs what it does. */
+	poolStats() {
+		return this.pool?.stats() ?? null;
+	}
+
 	// ─── The reviewer's seam ─────────────────────────────────────────────────
 
 	/**
@@ -1044,7 +1162,8 @@ export { capacity, readings, explain as explainCapacity, type CapacityVerdict, t
 export { drive, renderReport, type DriveOptions, type DriveReport } from "./drive.ts";
 export { impasses, renderImpasses, type Impasse, type ImpasseKind } from "./impasse.ts";
 export { Stop, Gate, DESKTOP_STOP, IRIS_STOP } from "./stop.ts";
-export { rlmAgent, type AgentOptions } from "./agent.ts";
+export { rlmAgent, sessionFor, withCriterion, type AgentOptions } from "./agent.ts";
+export { AgentPool, pooledAgent, type PoolOptions } from "./pool.ts";
 export { refineOne, needsRefining, parsePlan, reopenForged, PLAN_INSTRUCTIONS, type Planner } from "./refine.ts";
 export { confineTo, plannerScope, bootPaths, profileFor, available as canConfine, type Scope } from "./confine.ts";
 export { forgeable, forgeryIn, reachOf, gripOn, whichIs, type Forgery, type Grip, type Reach } from "./forgeable.ts";

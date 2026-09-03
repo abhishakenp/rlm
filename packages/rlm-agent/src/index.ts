@@ -208,11 +208,30 @@ export class RlmAgentService extends Service {
 	async createRuntime(options: {
 		sessionConfig?: Record<string, unknown>;
 		sessionOptions?: Record<string, unknown>;
+		/**
+		 * The session this runtime is for, when the caller has one of its own.
+		 *
+		 * `rlmSession` holds exactly one `SessionManager`. That is right for a
+		 * process that is one agent and wrong for one that is eight: a worker in
+		 * the delegate's pool runs several tasks at once and each of them is its
+		 * own conversation with its own transcript on disk. Sharing one manager
+		 * between them would put every task's messages in one file and hand each
+		 * of them the others' history, which is the state leak pooling has to not
+		 * have.
+		 *
+		 * It is also how a stable session id means anything. `sessionFor(graph,
+		 * task)` derives `rlm-delegate-<graph>-<task>` so attempt two can resume
+		 * attempt one; the caller turns that id into a manager pointed at that
+		 * file and hands it here.
+		 *
+		 * Absent, everything is exactly as it was: the row's single manager.
+		 */
+		sessionManager?: SessionManager;
 	}): Promise<AgentSessionRuntime> {
 		const rlmSession = this.ctx.get("rlmSession") as {
 			getSessionManager: () => SessionManager;
 		};
-		const sessionManager = rlmSession?.getSessionManager?.();
+		const sessionManager = options.sessionManager ?? rlmSession?.getSessionManager?.();
 		if (!sessionManager) {
 			throw new Error("rlm-agent: no SessionManager available");
 		}

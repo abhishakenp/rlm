@@ -114,7 +114,7 @@ export const sessionFor = (graph: Graph, task: Task): string =>
  * and it is what the graph shows him — so the doer gets exactly the same words
  * the reviewer will use, rather than a paraphrase that could drift from it.
  */
-const withCriterion = (task: Task): string => {
+export const withCriterion = (task: Task): string => {
 	const prompt = task.prompt ?? task.title;
 	if (!task.proof || task.proof.kind === "unstated" || task.proof.kind === "rollup") return prompt;
 	return (
