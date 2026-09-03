@@ -73,6 +73,31 @@ export interface DriveOptions {
 	/** How often the stop file is re-read while work is in the air. */
 	pollMs?: number;
 	/**
+	 * How often the sweep says it is alive, in milliseconds.
+	 *
+	 * Every line it prints goes to the drive's own log, because that log is the
+	 * only thing anybody reads and an hour of silence in it is indistinguishable
+	 * from an hour of work.
+	 */
+	heartbeatMs?: number;
+	/**
+	 * Nothing running, and nothing journalled for this long: the sweep is over
+	 * whether or not it thinks so. Zero switches the deadline off.
+	 */
+	stallMs?: number;
+	/**
+	 * Whether a stalled sweep may take the process down when unwinding does not
+	 * work.
+	 *
+	 * On by default, and it is not belt-and-braces. Aborting only reaches code
+	 * that is looking at the signal, and the whole failure mode this exists for
+	 * is work that is not looking at anything — so the last resort has to be
+	 * able to end the process. A supervisor restarts it in forty-five seconds
+	 * and `store.recover()` puts every `running` task back to `ready`, so an
+	 * interrupted sweep is retried and not lost.
+	 */
+	exitOnStall?: boolean;
+	/**
 	 * The hard bound on the whole run. A sweep is one pass over everything owed;
 	 * a second sweep only happens because the first one changed something.
 	 */
@@ -113,7 +138,9 @@ export interface DriveOptions {
 export interface DriveReport {
 	sweeps: number;
 	/** Why it came back: the backlog settled, it was stopped, or it hit its bound. */
-	ended: "settled" | "stopped" | "bound";
+	ended: "settled" | "stopped" | "bound" | "stalled";
+	/** Set when `ended` is "stalled": what the sweep was doing when it stopped. */
+	stalledBy?: string;
 	stoppedBy?: string;
 	graphs: number;
 	proven: string[];
@@ -232,6 +259,92 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 	const read = (): Graph[] => store.open().filter((g) => !options.only?.length || options.only.includes(g.id));
 
 	/**
+	 * Say that this is alive, and end it when it is not.
+	 *
+	 * ## What this is for
+	 *
+	 * A sweep that has stopped doing anything looks exactly like a sweep that is
+	 * working: no output either way. Twenty-six sweeps in one day were killed at
+	 * `rc=124` by the external `timeout 3600` after doing ten useful minutes,
+	 * and nothing in the log distinguished them from the ones that worked —
+	 * which is why it went unnoticed for a day. The external timeout was the
+	 * only thing that ever recovered it, and an hour is not a recovery.
+	 *
+	 * The mechanism behind those is fixed in `stop.ts` — the gate could drop a
+	 * wakeup and leave a queue nobody would ever serve. This is here because the
+	 * next one will have a different mechanism and must not cost another day to
+	 * find.
+	 *
+	 * ## Why it reads the gate and not the clock
+	 *
+	 * "Nothing journalled for fifteen minutes" is not evidence of a stall: one
+	 * legitimate delegation runs for forty. What is evidence is **nothing
+	 * journalled while nothing is running** — `gate.inFlight === 0` means no
+	 * task is with an agent, so nothing is coming that could write anything.
+	 * Held above zero is a sweep that is busy, and it is left alone however long
+	 * it takes; the heartbeat still says so every minute, so the silence is over
+	 * either way.
+	 *
+	 * The two shapes it separates are worth separating in the log. Queued with
+	 * nothing running is the lost wakeup: work is waiting for a slot that
+	 * nothing will ever hand out. Neither queued nor running is a sweep that has
+	 * simply finished and not noticed.
+	 */
+	let movedAt = Date.now();
+	let lastMark: string | null = null;
+	let stalledBy: string | null = null;
+	const stallAfter = options.stallMs ?? 300_000;
+	const beat = () => {
+		let mark = lastMark;
+		try {
+			mark = fingerprint(read());
+		} catch {
+			// A store that cannot be read right now is the next pass's problem,
+			// and must not be able to make the thing that watches for stalls the
+			// thing that causes one.
+		}
+		if (mark !== lastMark) {
+			lastMark = mark;
+			movedAt = Date.now();
+		}
+		const still = Math.round((Date.now() - movedAt) / 1000);
+		const held = gate.inFlight;
+		const queued = gate.queued;
+		// `console.log` and not the logger, for the reason the pool lines use it:
+		// the logger does not reach the drive's log, and the drive's log is where
+		// somebody looks.
+		console.log(
+			`  [${new Date().toTimeString().slice(0, 8)}] sweep ${sweeps} alive — ${held} running, ${queued} queued, ` +
+				`nothing journalled for ${still}s`,
+		);
+		say("rlm/drive-heartbeat", { sweep: sweeps, held, queued, stillSeconds: still, limit: limit() });
+		if (!stallAfter || held > 0 || still * 1000 < stallAfter) return;
+		// Said once. A diagnosis repeated every minute is a log nobody reads,
+		// which is the fault this whole mechanism exists to fix.
+		if (stalledBy) return;
+		stalledBy =
+			queued > 0
+				? `${queued} task(s) have been queued for ${still}s with nothing running — nothing is going to finish and wake them`
+				: `nothing running, nothing queued and nothing journalled for ${still}s`;
+		console.log(`  the sweep has stopped doing anything: ${stalledBy}`);
+		say("rlm/drive-stalled", { sweep: sweeps, held, queued, stillSeconds: still, why: stalledBy });
+		if (!abort.signal.aborted) abort.abort();
+		if (options.exitOnStall === false) return;
+		// Unwinding only reaches code that is watching the signal. Anything that
+		// is not — and a wedge is precisely that — needs the process to end.
+		// EX_TEMPFAIL: distinct from 0, from the 1 that means "still owed", from
+		// the 78 a broken composition exits, and from the 124 the external
+		// timeout leaves, so the supervisor's log can tell them apart.
+		const hard = setTimeout(() => {
+			console.log("  it would not unwind, so the process is ending — the supervisor will start a fresh one");
+			process.exit(75);
+		}, 30_000);
+		hard.unref?.();
+	};
+	const pulse = setInterval(beat, options.heartbeatMs ?? 60_000);
+	pulse.unref?.();
+
+	/**
 	 * Refinement finished something, so there may be work now.
 	 *
 	 * The work loop below runs *beside* refinement rather than after it, so it
@@ -342,7 +455,7 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 					}
 					const item = queue[next++];
 					if (!item) return;
-					const release = await gate.take();
+					const release = await gate.take(abort.signal);
 					// Re-read after the wait: this may have queued behind a
 					// forty-minute delegation, and the stop file is never cached.
 					if (stop.reason() || abort.signal.aborted) {
@@ -725,7 +838,9 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 		}
 	} finally {
 		clearInterval(poll);
+		clearInterval(pulse);
 	}
+	if (stalledBy) ended = "stalled";
 
 	const all = store
 		.ids()
@@ -750,6 +865,7 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 		sweeps,
 		ended,
 		stoppedBy: stoppedBy ?? undefined,
+		stalledBy: stalledBy ?? undefined,
 		graphs: all.length,
 		proven: all.flatMap((g) => g.tasks.filter((t) => t.state === "done").map((t) => `${g.id}/${t.id}`)),
 		owed: all.flatMap((g) => outstanding(g.tasks).map((t) => `${g.id}/${t.id}`)),
@@ -774,7 +890,15 @@ export const renderReport = (report: DriveReport): string =>
 		// one nobody checks.
 		report.ended === "settled" && report.graphs === 0
 			? "the drive looked at no graphs at all — that is a fault, not an empty backlog: check what is restricting it"
-			: `the drive ${report.ended === "settled" ? "worked everything it could" : report.ended === "stopped" ? `was stopped — ${report.stoppedBy}` : `hit its bound of sweeps`}`,
+			: `the drive ${
+					report.ended === "settled"
+						? "worked everything it could"
+						: report.ended === "stopped"
+							? `was stopped — ${report.stoppedBy}`
+							: report.ended === "stalled"
+								? `stopped doing anything and ended itself — ${report.stalledBy}`
+								: `hit its bound of sweeps`
+				}`,
 		`  ${report.proven.length} proven done, ${report.owed.length} still owed, across ${report.graphs} graph(s), in ${report.sweeps} sweep(s)`,
 		...(report.questions.length
 			? [

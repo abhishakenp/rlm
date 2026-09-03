@@ -85,7 +85,7 @@ export interface RunOptions {
 	 * agents on a laptop that measured room for two. The drive passes one gate
 	 * to every graph it works; on its own, a graph does not need one.
 	 */
-	gate?: { take(): Promise<() => void> };
+	gate?: { take(signal?: AbortSignal): Promise<() => void> };
 	/**
 	 * Refuse a task before it is handed to anybody. Return a sentence and the
 	 * task is left alone, still owed, with that sentence on it — never quietly
@@ -216,7 +216,13 @@ export const run = async (
 		// `ready` rather than `running` until a slot frees, which is also the
 		// truth, and which the in-process `inFlight` map — not the journalled
 		// state — has always been what actually stops it being picked up twice.
-		const release = options.gate ? await options.gate.take() : () => {};
+		// The signal goes in, so a stop reaches a task that is *queued* and not
+		// only one that is running. Without it, a drive that has decided to end
+		// cannot end: everything behind the gate keeps waiting for a slot nobody
+		// is going to hand out, and the process has to be killed instead. An
+		// abandoned wait comes back with a release that does nothing, and the
+		// aborted check immediately below is what then leaves the task alone.
+		const release = options.gate ? await options.gate.take(options.signal) : () => {};
 		const at = new Date().toISOString();
 		// Checked before anything is written down: an attempt abandoned while it
 		// waited never started, and should not leave a `began` behind claiming

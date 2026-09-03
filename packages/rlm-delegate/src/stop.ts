@@ -90,75 +90,198 @@ export class Stop {
  * `concurrency` in the scheduler caps a single graph. Six owed graphs of two
  * tasks each, each capped at two, is twelve agents on a laptop that measured
  * room for two — the cap has to be across all of them or it is not a cap. The
- * size is re-read on every release, because the machine changes while somebody
- * is using it, and it is never allowed below one.
+ * size is re-read live, because the machine changes while somebody is using it.
+ *
+ * ## The wedge this shape used to produce
+ *
+ * The previous version woke waiters from exactly two places, and between them
+ * they did not cover the queue:
+ *
+ *   - `give()` woke **one** waiter, and only if `held < size()` was true at
+ *     that instant.
+ *   - each waiter polled on its own, and only for `held === 0`.
+ *
+ * Neither fires in the one state the drive reaches constantly. `capacity()`
+ * returns 0 whenever any signal is under its 30% floor, which is routine while
+ * the fleet is working. So: a long delegation holds a slot, capacity dips to
+ * zero, a short task finishes *during the dip* — `give()` computes
+ * `held(1) < size(0)`, which is false, and wakes nobody — and then capacity
+ * recovers. Now there is obviously room (`held` 1, `size` 2) and a queue of
+ * tasks that will never be woken: `give()` is not called again because the long
+ * task is still running, and the self-poll is looking for `held === 0`, which
+ * never comes.
+ *
+ * Nothing is in flight anywhere and every event loop is idle, so from outside
+ * it is indistinguishable from work. Measured on the live fleet: 26 sweeps
+ * killed at `rc=124` by the external `timeout 3600`, the drive at 0.0% CPU,
+ * the journal unwritten for 21 minutes, and the pool's own per-task bound never
+ * armed — because the task never got past this gate to reach the pool at all.
+ * `/tmp/wedge/gate-lostwake.ts` reproduces it in eight seconds.
+ *
+ * ## Why this version cannot do that
+ *
+ * There is one admission test, `room()`, and every path that could make it
+ * true re-runs `drain()`, which admits as many waiters as there is room for
+ * rather than one. A release drains. A newly queued waiter drains. And while
+ * anybody is waiting, a single shared timer drains, testing the same `room()`
+ * that `take()` tests rather than a narrower proxy for it — so "capacity came
+ * back" needs nothing to have happened at the same moment to be noticed.
+ *
+ * Two smaller repairs come with it, both of which were live defects:
+ *
+ *   - The slot is charged in `drain()`, at the moment of admission, instead of
+ *     in the woken waiter's continuation. In between those two points `held`
+ *     read low, so a second waker could admit against room that was already
+ *     spoken for.
+ *   - A woken waiter is taken out of the queue when it is woken. It used to
+ *     stay in, so a later `give()` could `shift()` a waiter that had already
+ *     been resolved by its own poll and hand the slot to nobody — a lost
+ *     wakeup with the queue still full behind it.
+ *
+ * The fast path also yields to the queue rather than barging past it, which is
+ * the first-in-first-executed order the capacity rule says it keeps.
  */
 export class Gate {
 	private held = 0;
-	private readonly waiting: Array<() => void> = [];
-
+	private readonly waiting: Array<{ wake: () => void; settled: boolean }> = [];
 	private readonly size: () => number;
+	/** Runs only while somebody is waiting. See `watch`. */
+	private pump?: ReturnType<typeof setInterval>;
 
 	constructor(size: () => number) {
 		this.size = size;
 	}
 
-	async take(): Promise<() => void> {
-		// `Math.max(1, …)` used to be here and in `give`, which meant a limit of
-		// zero could never mean zero — the gate always let one through. That is
-		// the same hardcoded "one at a time" the capacity rule was written to
-		// remove, sitting one layer below it, quietly overruling the measurement.
-		//
-		// Zero now means zero: nothing new starts, whatever is in flight
-		// finishes, and the queue keeps its arrival order. The waiter is woken by
-		// `give`, and because the limit is read fresh on every wake, capacity
-		// rising is enough to release the queue without anyone polling.
-		if (this.held < Math.max(0, this.size())) {
-			this.held += 1;
-			return () => this.give();
-		}
-		// A waiter is normally woken by `give`, when something finishes. At a
-		// limit of zero nothing is in flight, so nothing ever finishes, so
-		// nothing ever wakes anybody — the queue would sit there forever the
-		// moment the machine dipped under the floor. Observed as a hard hang the
-		// first time the limit could really reach zero.
-		//
-		// So while the gate is shut, it also re-checks on its own. Only while
-		// there are waiters and nothing running: a poll that costs nothing when
-		// the system is busy, and is the only thing that can restart it when the
-		// system is idle-but-full.
-		await new Promise<void>((resolve) => {
-			let settled = false;
-			const wake = () => {
-				if (settled) return;
-				settled = true;
-				clearInterval(timer);
-				resolve();
-			};
-			const timer = setInterval(() => {
-				if (this.held === 0 && Math.max(0, this.size()) > 0) wake();
-			}, 1_000);
-			timer.unref?.();
-			this.waiting.push(wake);
-		});
-		this.held += 1;
-		return () => this.give();
+	/**
+	 * The one admission test.
+	 *
+	 * `Math.max(0, …)` and not `Math.max(1, …)`: zero means zero. That used to
+	 * be clamped to one here, which let a machine with nothing spare keep one
+	 * child running for ever — the same hardcoded "one at a time" the capacity
+	 * rule was written to remove, sitting one layer below it and quietly
+	 * overruling the measurement.
+	 */
+	private room(): boolean {
+		return this.held < Math.max(0, this.size());
 	}
 
-	private give(): void {
-		this.held = Math.max(0, this.held - 1);
-		if (this.waiting.length && this.held < Math.max(0, this.size())) {
-			// Woken one at a time, and each wakes holding nothing — `take` is what
-			// increments, so a woken waiter cannot overshoot the limit it re-reads.
-			this.waiting.shift()!();
+	/**
+	 * Admit everyone there is room for, right now.
+	 *
+	 * Called from every place that can change the answer to `room()`. The slot
+	 * is charged here rather than in the woken waiter, so a second pass through
+	 * this loop cannot hand out room the first pass already promised.
+	 */
+	private drain(): void {
+		// Anyone who gave up waiting is dropped before room is counted out, so a
+		// queue of abandoned waiters cannot hold the pump open or be mistaken
+		// for work.
+		if (this.waiting.some((w) => w.settled)) {
+			const live = this.waiting.filter((w) => !w.settled);
+			this.waiting.length = 0;
+			this.waiting.push(...live);
 		}
+		while (this.waiting.length && this.room()) {
+			const waiter = this.waiting.shift();
+			if (!waiter || waiter.settled) continue; // a corpse costs no room
+			waiter.settled = true;
+			this.held += 1;
+			waiter.wake();
+		}
+		this.watch();
+	}
+
+	/**
+	 * Keep re-testing `room()` while anybody is waiting, and not otherwise.
+	 *
+	 * `size()` is a live measurement of the machine: it can start saying yes
+	 * without anything happening in this process, so something has to look. One
+	 * timer for the whole gate rather than one per waiter, stopped the moment
+	 * the queue empties, and `unref`'d so it can never be the reason a process
+	 * stays up.
+	 */
+	private watch(): void {
+		if (!this.waiting.length) {
+			if (this.pump) {
+				clearInterval(this.pump);
+				this.pump = undefined;
+			}
+			return;
+		}
+		if (this.pump) return;
+		this.pump = setInterval(() => this.drain(), 250);
+		this.pump.unref?.();
+	}
+
+	/** A release that counts once, however many times it is called. */
+	private releaser(): () => void {
+		let given = false;
+		return () => {
+			if (given) return;
+			given = true;
+			this.held = Math.max(0, this.held - 1);
+			this.drain();
+		};
+	}
+
+	/**
+	 * A slot, and the function that gives it back.
+	 *
+	 * The signal is what makes a stop able to reach a task that is *queued*
+	 * rather than running. Without it, aborting the drive unwinds everything
+	 * that is watching the signal and leaves everything waiting here exactly
+	 * where it was — so a sweep that had decided to end could not, and the only
+	 * thing left that could end it was killing the process.
+	 *
+	 * An abandoned wait resolves with a release that does nothing, rather than
+	 * throwing, because the caller's very next line already asks whether it was
+	 * stopped and does the right thing. A rejection here would instead travel
+	 * out through the scheduler as a task failure and charge an attempt for work
+	 * that was never handed to anybody.
+	 */
+	async take(signal?: AbortSignal): Promise<() => void> {
+		if (signal?.aborted) return () => {};
+		// Yield to anybody already queued: a newcomer taking the slot a waiter
+		// has been waiting for is how the queue stops keeping its order.
+		if (!this.waiting.length && this.room()) {
+			this.held += 1;
+			return this.releaser();
+		}
+		const waiter = { wake: () => {}, settled: false };
+		let admitted = false;
+		let unlisten = () => {};
+		await new Promise<void>((resolve) => {
+			waiter.wake = () => {
+				admitted = true;
+				resolve();
+			};
+			const abandon = () => {
+				// `settled` is what stops `drain` charging a slot to somebody who
+				// is no longer going to use it.
+				if (waiter.settled) return;
+				waiter.settled = true;
+				resolve();
+			};
+			if (signal) {
+				signal.addEventListener("abort", abandon, { once: true });
+				unlisten = () => signal.removeEventListener("abort", abandon);
+			}
+			this.waiting.push(waiter);
+			// The queue may be stale — every entry ahead of this one already
+			// woken — in which case there is room for this one immediately.
+			this.drain();
+		});
+		unlisten();
+		// `drain` charged the slot on this waiter's behalf, if it got one.
+		return admitted ? this.releaser() : () => {};
 	}
 
 	get inFlight(): number {
 		return this.held;
 	}
 
+	/** Waiters that still want a slot. Anyone who gave up is not one. */
 	get queued(): number {
-		return this.waiting.length;
+		return this.waiting.reduce((n, w) => n + (w.settled ? 0 : 1), 0);
 	}
 }
