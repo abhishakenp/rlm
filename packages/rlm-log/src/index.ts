@@ -26,8 +26,9 @@
  * no logger.
  */
 import { Service } from "@deepseek-ai/cordis";
-import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, renameSync, rmSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { appendLine, appendedSize, closeAppend, HOT_APPEND_BYTES } from "../../rlm-persist/src/durable.ts";
 import { homedir } from "node:os";
 
 const PLUGIN_ID = "rlm-log";
@@ -189,17 +190,34 @@ export class RlmLogService extends Service {
 			};
 			const line = JSON.stringify(entry);
 			this.rotateIfNeeded();
-			mkdirSync(dirname(this.file), { recursive: true });
-			appendFileSync(this.file, `${line}\n`);
+			// One held descriptor, one `writeSync`. What this replaces was an
+			// open/write/close plus an `existsSync`, a `statSync` and a
+			// `mkdirSync` on **every log line** — six syscalls of ceremony
+			// around one line of flight recorder.
+			// 64 KB of scratch: this is the flight recorder, it writes on every
+			// event, and it is the hottest append in the process.
+			appendLine(this.file, line, HOT_APPEND_BYTES);
 			if (this.config.console) console.error(`[rlm] ${level} ${scope} ${event}`);
 		} catch {
 			// A logger that throws is worse than a logger that misses a line.
 		}
 	}
 
+	/**
+	 * Rotate, and let go of the descriptor before doing it.
+	 *
+	 * Both halves matter. The size comes from the seam's own byte count rather
+	 * than a `statSync`, so the common case — not rotating — costs nothing at
+	 * all. And the `closeAppend` is not tidiness: a held fd follows the inode
+	 * through a rename, so without it every line written after a rotation would
+	 * land in `rlm.jsonl.old` while `rlm.jsonl` sat empty, and the next rotation
+	 * would delete them.
+	 */
 	private rotateIfNeeded() {
 		try {
+			if (appendedSize(this.file) <= this.maxBytes) return;
 			if (!existsSync(this.file) || statSync(this.file).size <= this.maxBytes) return;
+			closeAppend(this.file);
 			rmSync(`${this.file}.old`, { force: true });
 			renameSync(this.file, `${this.file}.old`);
 		} catch {

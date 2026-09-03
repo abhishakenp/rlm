@@ -1,0 +1,10 @@
+{
+	"name": "@rlm/persist",
+	"version": "0.0.1",
+	"private": true,
+	"type": "module",
+	"description": "The persistence seam: append-a-change instead of restating a document.",
+	"main": "src/durable.ts",
+	"types": "src/durable.ts",
+	"exports": { ".": "./src/durable.ts" }
+}

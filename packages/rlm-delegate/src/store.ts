@@ -14,9 +14,10 @@
  * kept next to the work would be deleted along with it, which is the same bug
  * wearing a different hat.
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { appendLine, closeAppend, HOT_APPEND_BYTES } from "../../rlm-persist/src/durable.ts";
 import {
 	declare,
 	findCycle,
@@ -64,32 +65,28 @@ export class Store {
 		return join(this.dir, `${graphId}.jsonl`);
 	}
 
-	/** Files this instance has already checked for a torn tail. */
-	private healed = new Set<string>();
-
 	/**
-	 * One line, appended.
+	 * One line, appended, through the persistence seam.
 	 *
-	 * A crash can leave a line without its newline. The next append would then
-	 * run onto the end of it and take a second entry down with the first, which
-	 * turns one lost attempt into two — so before this process writes to a
-	 * journal for the first time, it closes any half-written line it finds.
+	 * The seam holds one descriptor per journal instead of opening and closing
+	 * the file for every entry, and it is what heals a torn tail now: a crash
+	 * can leave a line without its newline, and the next append would run onto
+	 * the end of it and take a second entry down with the first, turning one
+	 * lost attempt into two. That check used to live here and was per-`Store`;
+	 * in the seam it is per-descriptor, so it happens once per file per process
+	 * however many `Store` instances point at it.
+	 *
+	 * Still `writeSync` underneath, and that is not an implementation detail:
+	 * this journal's whole contract is that a process which dies halfway
+	 * through a graph loses at most the line it was writing. A buffered stream
+	 * would lose everything still in the buffer, and `load()` re-reading a file
+	 * this process had just written would not see its own writes.
 	 */
 	private append(graphId: string, entry: Entry): void {
-		const file = this.path(graphId);
-		if (!this.healed.has(file)) {
-			this.healed.add(file);
-			try {
-				const size = statSync(file).size;
-				if (size > 0) {
-					const tail = readFileSync(file, "utf8").slice(-1);
-					if (tail !== "\n") appendFileSync(file, "\n", "utf8");
-				}
-			} catch {
-				/* the file does not exist yet, which is the normal case */
-			}
-		}
-		appendFileSync(file, `${JSON.stringify(entry)}\n`, "utf8");
+		// The 64 KB scratch buffer rather than the 4 KB default: this journal is
+		// written on every task transition of every graph, and at that rate the
+		// larger buffer halves the per-line cost for sixteen times a buffer.
+		appendLine(this.path(graphId), JSON.stringify(entry), HOT_APPEND_BYTES);
 	}
 
 	/** Every graph id on disk, newest first. */
@@ -430,6 +427,10 @@ export class Store {
 				graph.tasks.some((t) => Date.parse(t.updatedAt) >= cutoff);
 			if (keep) continue;
 			try {
+				// Let go of the descriptor first. A held fd follows the inode, so
+				// an append after the unlink would succeed, write into an orphan
+				// nothing can open, and report no error at all.
+				closeAppend(this.path(id));
 				rmSync(this.path(id));
 				removed.push(id);
 			} catch {
