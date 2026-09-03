@@ -296,8 +296,11 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 	const stallAfter = options.stallMs ?? 300_000;
 	const beat = () => {
 		let mark = lastMark;
+		let ready = 0;
 		try {
-			mark = fingerprint(read());
+			const open = read();
+			mark = fingerprint(open);
+			ready = open.reduce((n, g) => n + runnable(g.tasks, Boolean(planner)).length, 0);
 		} catch {
 			// A store that cannot be read right now is the next pass's problem,
 			// and must not be able to make the thing that watches for stalls the
@@ -310,22 +313,43 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 		const still = Math.round((Date.now() - movedAt) / 1000);
 		const held = gate.inFlight;
 		const queued = gate.queued;
+		const size = limit();
 		// `console.log` and not the logger, for the reason the pool lines use it:
 		// the logger does not reach the drive's log, and the drive's log is where
 		// somebody looks.
 		console.log(
-			`  [${new Date().toTimeString().slice(0, 8)}] sweep ${sweeps} alive — ${held} running, ${queued} queued, ` +
-				`nothing journalled for ${still}s`,
+			`  [${new Date().toTimeString().slice(0, 8)}] sweep ${sweeps} alive — ${held}/${size} slot(s) busy, ` +
+				`${queued} queued, ${ready} runnable, nothing journalled for ${still}s`,
 		);
-		say("rlm/drive-heartbeat", { sweep: sweeps, held, queued, stillSeconds: still, limit: limit() });
-		if (!stallAfter || held > 0 || still * 1000 < stallAfter) return;
-		// Said once. A diagnosis repeated every minute is a log nobody reads,
-		// which is the fault this whole mechanism exists to fix.
-		if (stalledBy) return;
+		say("rlm/drive-heartbeat", { sweep: sweeps, held, queued, ready, limit: size, stillSeconds: still });
+		if (!stallAfter || still * 1000 < stallAfter || stalledBy) return;
+		/**
+		 * Busy is not the same as working.
+		 *
+		 * The first version of this refused to call anything a stall while a
+		 * single slot was in use, on the theory that one legitimate delegation
+		 * runs for forty minutes. That theory let the fault straight through: a
+		 * live sweep spent ten consecutive minutes at one slot of twelve, with
+		 * seven tasks runnable and nothing being journalled, and was killed by
+		 * the external hour exactly as before — 6 `began` records in sixty
+		 * minutes. `held > 0` was true the whole time, so nothing fired.
+		 *
+		 * So the question is not "is anything running" but "is anything running
+		 * that could not be more". A fleet with no room left, or with nothing
+		 * else it could have started, is slow and is left alone however long it
+		 * takes. A fleet sitting on empty slots with runnable work in front of
+		 * it and a journal that has not moved is stuck, whatever its slot count
+		 * says.
+		 */
+		const starving = size > held && ready > held;
+		if (held > 0 && !starving) return;
 		stalledBy =
-			queued > 0
-				? `${queued} task(s) have been queued for ${still}s with nothing running — nothing is going to finish and wake them`
-				: `nothing running, nothing queued and nothing journalled for ${still}s`;
+			held > 0
+				? `only ${held} of ${size} slot(s) in use for ${still}s with ${ready} task(s) runnable and nothing ` +
+					`journalled — the fleet is not picking up work it has room for`
+				: queued > 0
+					? `${queued} task(s) have been queued for ${still}s with nothing running — nothing is going to finish and wake them`
+					: `nothing running, nothing queued and nothing journalled for ${still}s`;
 		console.log(`  the sweep has stopped doing anything: ${stalledBy}`);
 		say("rlm/drive-stalled", { sweep: sweeps, held, queued, stillSeconds: still, why: stalledBy });
 		if (!abort.signal.aborted) abort.abort();
@@ -539,18 +563,109 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 	 * never WHAT it may hand out.
 	 */
 	const work = async (refining: { done: boolean }): Promise<void> => {
-		// The store's fingerprint the last time a pass moved nothing. A graph
-		// whose tasks the fence refuses stays workable for ever; without this it
-		// would be handed to the scheduler in a tight loop.
-		let idleAt: string | null = null;
+		/**
+		 * The graphs being worked right now, by id. A rolling set, not a batch.
+		 *
+		 * This was `await Promise.all(...)` over every workable graph, which
+		 * meant the loop could not look at the store again until the **slowest**
+		 * graph in the batch had finished. One long delegation therefore pinned
+		 * the whole fleet to that one graph's parallelism, and everything
+		 * refinement produced while it ran waited for it — refinement runs
+		 * *beside* this loop precisely so that would not happen, and then this
+		 * line stopped the work it produced from being picked up.
+		 *
+		 * Measured on a live sweep, from the heartbeat: ten consecutive minutes
+		 * of one slot of twelve in use, zero queued, seven tasks runnable, and
+		 * six `began` records in the whole hour before the external timeout
+		 * killed it. The gate had room the entire time and nothing was asking
+		 * for it.
+		 *
+		 * Keyed by id, so a graph already being worked is never started twice,
+		 * and the gate is still the only thing that decides how much runs at
+		 * once — starting a graph is not the same as starting a task.
+		 */
+		const live = new Map<string, Promise<void>>();
+		/** Graphs that have just come back, to be judged against the next read. */
+		const returned = new Set<string>();
+		/**
+		 * A graph that came back without moving anything, and the store's
+		 * fingerprint at the moment it did. It is not handed out again until
+		 * something, anywhere, changes.
+		 *
+		 * This is the old global `idleAt` made per-graph, and it is load-bearing
+		 * rather than tidy. `runGraph` on a graph whose tasks the fence refuses
+		 * returns without awaiting anything but microtasks, so with a single slow
+		 * graph permanently in `live` the loop re-handed the refused ones as fast
+		 * as promises resolve — a race that always settles in the microtask queue,
+		 * which never lets the event loop reach its timer phase. The whole process
+		 * starved: no heartbeat, no timers, nothing. Measured while writing this,
+		 * on exactly the fence-plus-one-long-task shape the deadline exists for.
+		 *
+		 * Keeping it per-graph rather than global is what fixes the pinning and
+		 * keeps the throttle: a graph with nothing to do stops being asked, while
+		 * every other graph is still looked at on the next pass.
+		 */
+		const barren = new Map<string, string>();
 		for (;;) {
 			if (abort.signal.aborted || stoppedBy) return;
 			const open = read();
 			const mark = fingerprint(open);
-			const workable = mark === idleAt ? [] : open.filter((g) => runnable(g.tasks, Boolean(planner)).length);
+			// Judged now, against a read taken after they finished.
+			for (const id of returned) barren.set(id, mark);
+			returned.clear();
+			const workable = open.filter(
+				(g) => !live.has(g.id) && barren.get(g.id) !== mark && runnable(g.tasks, Boolean(planner)).length,
+			);
 
-			if (!workable.length) {
-				idleAt = mark;
+			for (const graph of workable) {
+				touched.add(graph.id);
+				const running: Promise<void> = runGraph(store, graph.id, runner, {
+					concurrency: () => Math.max(1, limit()),
+					gate,
+					fence,
+					signal: abort.signal,
+					probe: options.probe,
+					cwd: options.cwd,
+					maxAttempts: options.maxAttempts,
+					// A dead-end criterion is only worth handing back if there is
+					// somebody to write a better one.
+					replanCriterion: Boolean(planner),
+					reviewer,
+					executor: options.executor,
+					repeatFloor: options.repeatFloor,
+					similarity: options.similarity,
+					onEvent: say,
+				})
+					.then(
+						() => {},
+						(error: any) => {
+							// A graph that throws is a graph, not the drive. The others
+							// carry on and this one is still on disk saying what it owes.
+							// Unless the host is what threw, in which case it is the
+							// drive, and every other graph is about to find that out
+							// the expensive way.
+							if (isHostDown(error)) noteHostDown(error);
+							else say("rlm/drive-graph-error", { graph: graph.id, error: String(error?.message ?? error) });
+						},
+					)
+					.finally(() => {
+						live.delete(graph.id);
+						returned.add(graph.id);
+					});
+				live.set(graph.id, running);
+			}
+			if (workable.length) {
+				say("rlm/drive-working", {
+					graphs: workable.map((g) => g.id),
+					runnable: workable.reduce((n, g) => n + runnable(g.tasks, Boolean(planner)).length, 0),
+					limit: limit(),
+				});
+			}
+
+			if (!live.size) {
+				// Something came back in the last breath: read once more so it is
+				// judged before the sweep decides there is nothing left.
+				if (returned.size) continue;
 				// Nothing to run yet. If something is still turning requests into
 				// runnable work, wait for it rather than ending the sweep holding
 				// work that is one planner call away from being startable.
@@ -559,47 +674,15 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 				continue;
 			}
 
-			for (const graph of workable) touched.add(graph.id);
-			say("rlm/drive-working", {
-				graphs: workable.map((g) => g.id),
-				runnable: workable.reduce((n, g) => n + runnable(g.tasks, Boolean(planner)).length, 0),
-				limit: limit(),
+			// Whichever comes first: a graph finishing, or a moment to look at the
+			// store again. The tick is the whole point — it is what lets a task
+			// that became runnable while a long graph was still going be picked
+			// up without waiting for that graph.
+			const tick = new Promise<void>((resolve) => {
+				const timer = setTimeout(resolve, 2_000);
+				timer.unref?.();
 			});
-
-			// Every graph at once, one budget between them. Two graphs with no
-			// relationship are as independent as two tasks with no edge, and the
-			// gate is what makes that safe rather than optimistic.
-			await Promise.all(
-				workable.map((graph) =>
-					runGraph(store, graph.id, runner, {
-						concurrency: () => Math.max(1, limit()),
-						gate,
-						fence,
-						signal: abort.signal,
-						probe: options.probe,
-						cwd: options.cwd,
-						maxAttempts: options.maxAttempts,
-						// A dead-end criterion is only worth handing back if there is
-						// somebody to write a better one.
-						replanCriterion: Boolean(planner),
-						reviewer,
-						executor: options.executor,
-						repeatFloor: options.repeatFloor,
-						similarity: options.similarity,
-						onEvent: say,
-					}).catch((error: any) => {
-						// A graph that throws is a graph, not the drive. The others
-						// carry on and this one is still on disk saying what it owes.
-						// Unless the host is what threw, in which case it is the
-						// drive, and every other graph is about to find that out
-						// the expensive way.
-						if (isHostDown(error)) noteHostDown(error);
-						else say("rlm/drive-graph-error", { graph: graph.id, error: String(error?.message ?? error) });
-					}),
-				),
-			);
-
-			idleAt = fingerprint(read()) === mark ? mark : null;
+			await Promise.race([...live.values(), tick]);
 		}
 	};
 
