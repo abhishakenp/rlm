@@ -277,6 +277,29 @@ export class RlmGitpixelService extends Service {
 		pi.on("session_start", () => {
 			this.seeded = false;
 			if (this.config.warmOnStart === false) return;
+
+			// Not in a run nobody is watching.
+			//
+			// `gitpixel ready` re-indexes the whole repository. That is the right
+			// thing to pay for once, at the start of a session somebody will keep
+			// asking questions of. It is the single most expensive thing a
+			// fifteen-second `--print` child does: measured at **149 MB**, against
+			// a worker process of 185 MB — 45% of the entire child, spent building
+			// an index of a repository it will never be asked about twice.
+			//
+			// Skipped rather than parked, because the rest of this row is the
+			// shell gate — the thing that refuses a destructive `git reset --hard`
+			// hidden in a code cell — and a delegated child is exactly where that
+			// has to keep working.
+			//
+			// Probed with `ctx.get` rather than injected: an rlm composed without
+			// the headless row is not headless, it simply has no opinion, and this
+			// row must stay useful in that composition.
+			if ((this.ctx.get("rlmHeadless") as { on?: boolean } | undefined)?.on) {
+				this.diag("rlm-gitpixel: headless — skipping the warm index");
+				return;
+			}
+
 			// Warm index + graph without holding up the first turn.
 			setTimeout(() => {
 				try {
