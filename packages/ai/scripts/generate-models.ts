@@ -1638,6 +1638,8 @@ async function generateModels() {
 		}
 		if (candidate.provider === "openrouter" && candidate.id === "moonshotai/kimi-k3") {
 			candidate.maxTokens = 1048576;
+			candidate.cost.input = 3.45;
+			candidate.cost.output = 17.25;
 		}
 		if (candidate.provider === "openrouter" && candidate.id === "z-ai/glm-5") {
 			candidate.cost.input = 0.6;
