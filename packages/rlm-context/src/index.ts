@@ -330,7 +330,18 @@ export class RlmContextService extends Service {
 		// service disposes this component automatically.
 		this.registerTuiExtensions();
 		this.registerPromptFragment();
+
+		// The code kernel reaches this registry through `globalThis`. That used
+		// to be set by cordis-shell.mjs and was lost when the shell was split
+		// into rows (3f2fa02) — every `context.set` since has failed with "the
+		// rlm-context row is not mounted" while the row was mounted. The row
+		// publishes it itself now, and takes it back on dispose, so a hot swap
+		// hands the kernel the new instance.
+		this.contextProxy = createContextProxy(this);
+		(globalThis as any).__rlmContextProxy = this.contextProxy;
 	}
+
+	private contextProxy: any = null;
 
 	/** TUI extension handles — disposed on hot-swap. */
 	private tuiHandles: any[] = [];
@@ -1838,6 +1849,8 @@ export class RlmContextService extends Service {
 	}
 
 	async [Symbol.dispose]() {
+		if ((globalThis as any).__rlmContextProxy === this.contextProxy) delete (globalThis as any).__rlmContextProxy;
+		this.contextProxy = null;
 		// Dispose prompt fragment (triggers rlm/prompt-changed via service).
 		this.disposePromptFragment();
 		// Dispose TUI extensions — roll back the TUI to its core state.
