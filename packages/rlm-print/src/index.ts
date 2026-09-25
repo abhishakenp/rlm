@@ -11,8 +11,10 @@
  * Hot-swappable: editing this file triggers fiber.restart() → fresh import.
  */
 import { Service } from "@deepseek-ai/cordis";
+import { rowState } from "../../rlm-host/src/surface.ts";
 import { runPrintMode, type PrintModeOptions } from "../../coding-agent/src/modes/print-mode.js";
 import type { AgentSessionRuntime } from "../../coding-agent/src/core/agent-session-runtime.js";
+import type { SessionManager } from "../../coding-agent/src/core/session-manager.js";
 
 export interface RlmPrintConfig {
 	cwd?: string;
@@ -24,7 +26,17 @@ export class RlmPrintService extends Service {
 
 	declare config: RlmPrintConfig;
 
-	private runtime: AgentSessionRuntime | undefined;
+	/**
+	 * The run's runtime, on the host Surface rather than this instance: a hot
+	 * swap of this row mid-run plugs a new instance, and `stop()` on it must
+	 * still reach the runtime the old one started.
+	 */
+	private get runtime(): AgentSessionRuntime | undefined {
+		return rowState("print", () => ({ runtime: undefined as AgentSessionRuntime | undefined })).runtime;
+	}
+	private set runtime(runtime: AgentSessionRuntime | undefined) {
+		rowState("print", () => ({ runtime: undefined as AgentSessionRuntime | undefined })).runtime = runtime;
+	}
 
 	constructor(ctx: any, config: RlmPrintConfig = {}) {
 		super(ctx, undefined as any);
@@ -39,11 +51,15 @@ export class RlmPrintService extends Service {
 	 * Run print mode: create runtime, send prompt, output result, exit.
 	 * Returns the exit code.
 	 */
-	async run(options: PrintModeOptions): Promise<number> {
+	async run(
+		options: PrintModeOptions & { sessionManager?: SessionManager; sessionConfig?: Record<string, unknown> },
+	): Promise<number> {
 		const rlmAgent = this.ctx.get("rlmAgent") as {
 			createRuntime: (options: {
 				sessionConfig?: Record<string, unknown>;
 				sessionOptions?: Record<string, unknown>;
+				sessionManager?: SessionManager;
+				sessionConfig?: Record<string, unknown>;
 			}) => Promise<AgentSessionRuntime>;
 		};
 
@@ -51,8 +67,23 @@ export class RlmPrintService extends Service {
 			throw new Error("rlm-print: rlmAgent.createRuntime not available");
 		}
 
-		this.runtime = await rlmAgent.createRuntime({});
-		return runPrintMode(this.runtime, options);
+		// `--resume <id>` / `--continue` / `--fork` arrive as a session manager from
+		// the modes row; without one the session row's fresh session is used.
+		// `sessionConfig` is the rest of the command line (--model, --thinking, …).
+		const { sessionManager, sessionConfig, ...printOptions } = options;
+		this.runtime = await rlmAgent.createRuntime({
+			...(sessionManager ? { sessionManager } : {}),
+			...(sessionConfig ? { sessionConfig } : {}),
+		});
+		return runPrintMode(this.runtime, printOptions);
+	}
+
+	/** Before a swap: an instance from before the Surface kept `runtime` as an own field; move it over. */
+	[Symbol.for("rlm.hmr.handover")]() {
+		if (!Object.hasOwn(this, "runtime")) return;
+		const runtime = (this as any).runtime;
+		delete (this as any).runtime;
+		if (runtime && !this.runtime) this.runtime = runtime;
 	}
 
 	async stop(): Promise<void> {

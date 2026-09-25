@@ -12,6 +12,7 @@
  * with "boot, then ask what to do", which is the most it should ever know.
  */
 import { Service } from "@deepseek-ai/cordis";
+import { surface } from "../../rlm-host/src/surface.ts";
 
 export const name = "rlm-modes";
 
@@ -202,10 +203,17 @@ export class RlmModesService extends Service {
 						// model is unavailable, confused or lying. `refine()` turns
 						// it into real tasks afterwards; that part is allowed to fail.
 						const graphs = this.ctx.get("rlmDelegate") as any;
-						const recorded = graphs?.intake?.(prompt, { source: "--print" }) ?? null;
+						// Bare `-r` picks a session from the agents view; with no terminal there is
+						// no view to pick from. prime-agent refuses it the same way.
+						const { sessionManager, openAgentsView, sessionConfig, printOutputMode } = await this.sessionFromLine(argv);
+						if (openAgentsView) {
+							process.stderr.write("[rlm] --resume without a session selector requires an interactive terminal\n");
+							return 1;
+						}
+						const recorded = graphs?.intake?.(prompt, { source: "--print", headless: true }) ?? null;
 
 						try {
-							const code = (await service.run({ mode: "text", initialMessage: prompt })) ?? 0;
+							const code = (await service.run({ mode: printOutputMode, initialMessage: prompt, sessionManager, sessionConfig })) ?? 0;
 							recorded?.graph &&
 								graphs.close(recorded.graph.id, recorded.taskId, {
 									ok: code === 0,
@@ -226,10 +234,27 @@ export class RlmModesService extends Service {
 					id: "interactive",
 					priority: 10,
 					claims: () => true,
-					run: async () => {
+					run: async (argv) => {
 						const service = this.ctx.get("rlmRenderer");
 						if (!service) throw new Error("the renderer row is not mounted");
-						await service.start({ cwd: this.config.cwd ?? process.cwd() });
+						const { sessionManager, openAgentsView, sessionConfig, verbose } = await this.sessionFromLine(argv);
+						const chat = service.start({
+							cwd: this.config.cwd ?? process.cwd(),
+							sessionManager,
+							openAgentsView,
+							sessionConfig,
+							verbose,
+						});
+						// The process lives as long as the chat, not as long as this row:
+						// the shell awaits `surface.lifetime`, so a hot swap of `modes`,
+						// `renderer` or anything else can never end the process.
+						// Never rejects: a crash still throws through `dispatch` (awaited
+						// below); an unawaited rejection here would be an unhandled one.
+						surface().lifetime = chat.then(
+							() => 0,
+							() => 1,
+						);
+						await chat;
 						return 0;
 					},
 				}),
@@ -261,6 +286,32 @@ export class RlmModesService extends Service {
 	 * A single dash is left alone on purpose: `- fix the thing` is a Markdown
 	 * bullet, not an option, and prompts arrive looking like that.
 	 */
+	private async sessionFromLine(argv: string[]) {
+		// The session flags are read by the same parser and resolved by the same
+		// code `main()` uses. Nothing on this path used to read them, so `rlm -r`
+		// opened a fresh chat and `rlm --resume <id>` started a new session file.
+		const [{ parseArgs }, startup] = await Promise.all([
+			import("../../coding-agent/src/cli/args.js"),
+			import("../../coding-agent/src/cli/session-startup.js"),
+		]);
+		const parsed = parseArgs(argv);
+		const cwd = this.config.cwd ?? process.cwd();
+		const sessionManager = await startup.sessionManagerFromArgs(parsed, cwd);
+		// The rest of the command line — --model, --provider, --thinking,
+		// --models, --tools, --system-prompt, --skill, --no-extensions … — as the
+		// runtime config `main()` builds from it. Same gap as the session flags:
+		// `--model cliproxy/gpt-5.5` answered on the default model.
+		const { runtimeConfigFromLine } = await import("../../coding-agent/src/cli/runtime-args.js");
+		const appMode = parsed.mode === "json" ? "json" : parsed.print || !process.stdin.isTTY ? "print" : "interactive";
+		return {
+			sessionManager,
+			openAgentsView: startup.opensAgentsViewForResume(parsed),
+			sessionConfig: await runtimeConfigFromLine(parsed, cwd, appMode, sessionManager),
+			printOutputMode: (appMode === "json" ? "json" : "text") as "json" | "text",
+			verbose: parsed.verbose,
+		};
+	}
+
 	private printPrompt(argv: string[]): string | null {
 		const index = argv.indexOf("--print");
 		if (index === -1) return null;

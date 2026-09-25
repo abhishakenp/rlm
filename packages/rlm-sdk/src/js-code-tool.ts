@@ -27,9 +27,12 @@ export interface JsCodeToolDetails {
  * Create a JS code execution AgentTool that wraps the RlmCodeService.
  *
  * @param codeService - the @rlm/code service instance (ctx.get("rlmCode"))
+ * @param sessionId - optional session ID for per-task VM isolation.
+ *   When provided, each session gets its own VM context so concurrent
+ *   tasks cannot observe each other's variables.
  * @returns AgentTool compatible with prime-agent's baseToolsOverride
  */
-export function createJsCodeTool(codeService: any): any {
+export function createJsCodeTool(codeService: any, sessionId?: string): any {
 	return {
 		name: "code",
 		label: "code",
@@ -53,7 +56,7 @@ export function createJsCodeTool(codeService: any): any {
 			}
 
 			try {
-				const result = await codeService.execute(params.code);
+				const result = await codeService.execute(params.code, sessionId);
 
 				// Build the content — same as kernel tool's output format.
 				const parts: any[] = [];

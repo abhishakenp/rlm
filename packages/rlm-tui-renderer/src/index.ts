@@ -43,6 +43,18 @@ import type {
 } from "../../coding-agent/src/modes/interactive/interactive-mode.js";
 import { initTheme, preloadCodeHighlighter } from "../../coding-agent/src/modes/interactive/theme/theme.js";
 import type { AgentSessionRuntime } from "../../coding-agent/src/core/agent-session-runtime.js";
+import type { SessionManager } from "../../coding-agent/src/core/session-manager.js";
+// What must outlive a swap of this row — the chat on screen, its runtime, the
+// session subscription — lives on the host-owned Surface, not on the instance.
+// See packages/rlm-host/src/surface.ts.
+import {
+	attachRow,
+	captureAgentsViewState,
+	detachRow,
+	rowOwner,
+	surface,
+	takeAgentsViewSeed,
+} from "../../rlm-host/src/surface.ts";
 
 export interface RlmRendererConfig {
 	cwd?: string;
@@ -55,6 +67,15 @@ export interface RlmRendererStartOptions {
 	initialMessages?: string[];
 	/** Force verbose startup. */
 	verbose?: boolean;
+	/**
+	 * The session `--resume <id>`, `--continue` or `--fork` named. Absent, the
+	 * session row's fresh session is used.
+	 */
+	sessionManager?: SessionManager;
+	/** Bare `--resume`/`-r`: open on the agents view (saved sessions) instead of a chat. */
+	openAgentsView?: boolean;
+	/** The rest of the command line (--model, --thinking, --tools, …) as a runtime config. */
+	sessionConfig?: Record<string, unknown>;
 }
 
 export class RlmRendererService extends Service {
@@ -63,11 +84,39 @@ export class RlmRendererService extends Service {
 
 	declare config: RlmRendererConfig;
 
-	private instance: InteractiveMode | undefined;
-	private runtime: AgentSessionRuntime | undefined;
+	/**
+	 * The chat on screen, whether the interactive loop runs, and its runtime.
+	 * Accessors over the Surface rather than fields: a swap of this row plugs a
+	 * new instance while the chat keeps running, and the new instance must see
+	 * the same chat its predecessor started — which is what lets hot reload swap
+	 * this row instead of pinning it.
+	 */
+	private get instance(): InteractiveMode | undefined {
+		return surface().interactive.instance as InteractiveMode | undefined;
+	}
+	private set instance(mode: InteractiveMode | undefined) {
+		surface().interactive.instance = mode;
+	}
+	private get running(): boolean {
+		return surface().interactive.running;
+	}
+	private set running(value: boolean) {
+		surface().interactive.running = value;
+	}
+	private get runtime(): AgentSessionRuntime | undefined {
+		return surface().interactive.runtime as AgentSessionRuntime | undefined;
+	}
+	private set runtime(runtime: AgentSessionRuntime | undefined) {
+		surface().interactive.runtime = runtime;
+	}
 
-	/** Unsubscribe for session event forwarding */
-	private sessionEventUnsub: (() => void) | undefined;
+	/** Unsubscribe for session event forwarding — one per session, held on the Surface. */
+	private get sessionEventUnsub(): (() => void) | undefined {
+		return surface().interactive.sessionEventUnsub;
+	}
+	private set sessionEventUnsub(unsub: (() => void) | undefined) {
+		surface().interactive.sessionEventUnsub = unsub;
+	}
 	/** Unsubscribe for provider-changed listener */
 	private providerChangedUnsub: (() => void) | undefined;
 	/** Unsubscribe for tui config hot-reload */
@@ -108,6 +157,21 @@ export class RlmRendererService extends Service {
 	}
 
 	async [Service.init]() {
+		// Take over the Surface. When this is a hot swap, the chat is already
+		// running; this generation is now the one its callbacks reach, and the
+		// listeners below re-attach the panels to it. Nothing is redrawn from
+		// scratch and the terminal is never touched.
+		attachRow("renderer", this);
+		try {
+			this.ctx.effect?.(() => () => detachRow("renderer", this));
+		} catch {}
+		if (this.running && this.instance) {
+			this.ctx.logger?.info(`rlm-tui-renderer: attached to the running chat (hot swap)`);
+			try {
+				(this.instance as any).ui?.requestRender?.();
+			} catch {}
+		}
+
 		const cwd = this.config.cwd ?? process.cwd();
 		const tui = this.getTui();
 		const active = tui?.getActiveProvider?.();
@@ -232,7 +296,7 @@ export class RlmRendererService extends Service {
 	 * No fallbacks — if the runtime or UI fails, the error propagates.
 	 */
 	async start(opts: RlmRendererStartOptions = {}): Promise<InteractiveModeRunResult> {
-		if (this.instance) {
+		if (this.running) {
 			throw new Error("rlm-tui-renderer: InteractiveMode already running");
 		}
 
@@ -266,27 +330,30 @@ export class RlmRendererService extends Service {
 		}
 
 		// Create the full agent runtime via the rlmAgent service.
-		this.runtime = await rlmAgent.createRuntime({});
+		this.runtime = await rlmAgent.createRuntime({
+			...(opts.sessionManager ? { sessionManager: opts.sessionManager } : {}),
+			...(opts.sessionConfig ? { sessionConfig: opts.sessionConfig } : {}),
+		} as never);
 
 		// Wire up event forwarding: pipe AgentSession events to the active UI provider
 		// via rlmTui.emitEvent. This lets a hot-reloadable provider receive all events
 		// without modifying InteractiveMode.
 		try {
 			// The runtime's session is the AgentSession; its subscribe method forwards all AgentSessionEvents.
+			// One subscription for the session's life, held on the Surface, and it
+			// forwards through whichever renderer generation is current — so a hot
+			// swap of this row neither drops events nor sends them to a disposed fiber.
 			const maybeSession: any = (this.runtime as any).session;
-			if (maybeSession?.subscribe && tui?.emitEvent) {
+			if (maybeSession?.subscribe) {
+				try { this.sessionEventUnsub?.(); } catch {}
 				this.sessionEventUnsub = maybeSession.subscribe((event: any) => {
+					const current = rowOwner<RlmRendererService>("renderer") ?? this;
 					try {
-						tui.emitEvent(event.type, event);
+						current.forwardEvent(event.type, event);
 					} catch {}
-					// Also forward as generic ui-event for renderer listeners
 				});
+				surface().interactive.surfaceForwarding = true;
 				this.ctx.logger?.info(`rlm-tui-renderer: forwarding AgentSession events to UI provider via rlmTui.emitEvent`);
-			} else if (maybeSession?.subscribe) {
-				// No tui — still subscribe to avoid dropping, but just emit via ctx
-				this.sessionEventUnsub = maybeSession.subscribe((event: any) => {
-					try { (this.ctx as any).emit("rlm/ui-event", { type: event.type, payload: event, timestamp: Date.now() }); } catch {}
-				});
 			}
 		} catch (e) {
 			this.ctx.logger?.warn(`rlm-tui-renderer: session event forwarding setup failed: ${(e as any)?.message ?? e}`);
@@ -298,38 +365,77 @@ export class RlmRendererService extends Service {
 		initTheme(settingsManager.getTheme(), true);
 		await preloadCodeHighlighter();
 
-		// The interactive graph, fetched at the moment it is actually wanted.
-		const [{ InteractiveMode: InteractiveModeImpl }, { createInteractiveModeLocalSessionHost }, { InProcessAgentConnection, ClientPromptStashStore }] =
-			await Promise.all([
-				import("../../coding-agent/src/modes/interactive/interactive-mode.js"),
-				import("../../coding-agent/src/modes/interactive/interactive-mode-services.js"),
-				import("../../coding-agent/src/modes/index.js"),
-			]);
-
-		// Wire up the in-process agent connection + local session host.
-		const connection = new InProcessAgentConnection(this.runtime);
-		const localSessionHost = createInteractiveModeLocalSessionHost(this.runtime);
-		const promptStashStore = new ClientPromptStashStore();
-
-		const interactiveOptions: InteractiveModeOptions = {
-			agentConnection: connection,
-			localSessionHost,
-			promptStashStore,
-			promptStashSessionId: this.runtime.session.sessionId,
-			bindLocalSessionExtensions: true,
-			initialMessage: opts.initialMessage,
-			initialMessages: opts.initialMessages,
-			verbose: opts.verbose,
+		// prime-agent's interactive flow: the chat, and behind it the agents view
+		// (left arrow, or Enter on the subagent tray) over every session this
+		// process hosts — this runtime, agents started from the view, and all of
+		// their subagents, recursively.
+		const [{ runInProcessAgentsSession }, { SessionManager }] = await Promise.all([
+			import("../../coding-agent/src/modes/agents-view/in-process-agents-session.js"),
+			import("../../coding-agent/src/core/session-manager.js"),
+		]);
+		const rootRuntime = this.runtime;
+		const sessionDir = rootRuntime.session.sessionManager.getSessionDir() || undefined;
+		const cwd = rootRuntime.session.sessionManager.getCwd();
+		this.running = true;
+		// The host's last-resort execve (rlm-host shell.ts) asks the Surface what
+		// the next image needs to look identical. It already saves the view kind
+		// and the chat's editor text; this adds the agents view's own state.
+		surface().interactive.view ??= opts.openAgentsView ? "agents" : "chat";
+		surface().beforeExec = (plan) => {
+			const live = surface().interactive;
+			plan.resume.view = live.view;
+			if (live.view === "agents") {
+				const state = captureAgentsViewState();
+				if (state) plan.resume.agentsView = state;
+			}
 		};
-
-		this.instance = new InteractiveModeImpl(interactiveOptions);
-		const result = await this.instance.run();
+		let result: InteractiveModeRunResult | undefined;
+		try {
+			result = await runInProcessAgentsSession({
+				runtime: rootRuntime,
+				// A new agent from the view, or an inactive one resumed, is a runtime
+				// built exactly as this one was, on its own session file.
+				createTopLevelRuntime: async ({ sessionPath }) =>
+					rlmAgent.createRuntime({
+						sessionManager: sessionPath
+							? SessionManager.open(sessionPath, sessionDir)
+							: SessionManager.create(cwd, sessionDir),
+						...(opts.sessionConfig ? { sessionConfig: opts.sessionConfig } : {}),
+					} as never),
+				initialMessage: opts.initialMessage,
+				initialMessages: opts.initialMessages,
+				verbose: opts.verbose,
+				openAgentsView: opts.openAgentsView,
+				// After an execve in place, the agents view comes back with its
+				// selection, expansion, scope and filter (see the host's reexec).
+				initialAgentsViewState: takeAgentsViewSeed() as never,
+				onAgentsView: (view) => {
+					const live = surface().interactive;
+					live.view = "agents";
+					live.agentsView = view as never;
+				},
+				// A default model that couldn't be used is announced, never swapped silently.
+				modelFallbackMessage: rootRuntime.modelFallbackMessage,
+				// Whichever chat is open is the one panel updates repaint. Written to
+				// the Surface, so whichever renderer generation is current sees it.
+				onInteractiveMode: (mode) => {
+					surface().interactive.instance = mode;
+					surface().interactive.view = "chat";
+				},
+			});
+		} finally {
+			this.running = false;
+			this.instance = undefined;
+			// The session loop disposed every runtime it hosted, this one included.
+			this.runtime = undefined;
+		}
 
 		// Cleanup forwarding after InteractiveMode exits
 		try { this.sessionEventUnsub?.(); } catch {}
 		this.sessionEventUnsub = undefined;
+		surface().interactive.surfaceForwarding = false;
 
-		return result;
+		return result as InteractiveModeRunResult;
 	}
 
 	/**
@@ -338,6 +444,7 @@ export class RlmRendererService extends Service {
 	async stop(): Promise<void> {
 		try { this.sessionEventUnsub?.(); } catch {}
 		this.sessionEventUnsub = undefined;
+		surface().interactive.surfaceForwarding = false;
 		try { this.providerChangedUnsub?.(); } catch {}
 		this.providerChangedUnsub = undefined;
 		try { this.tuiConfigUnsub?.(); } catch {}
@@ -354,23 +461,48 @@ export class RlmRendererService extends Service {
 		}
 	}
 
+	/**
+	 * rlm-hmr calls this on the outgoing instance just before a swap, with this
+	 * class's methods already patched to the new code. A renderer started before
+	 * the Surface existed kept the chat in own fields (`instance`, `running`,
+	 * `runtime`, `sessionEventUnsub`), which shadow the accessors above; move
+	 * them onto the Surface so the next generation reaches the same chat.
+	 */
+	[Symbol.for("rlm.hmr.handover")]() {
+		const live = surface().interactive as any;
+		for (const key of ["instance", "running", "runtime", "sessionEventUnsub"] as const) {
+			if (!Object.hasOwn(this, key)) continue;
+			const value = (this as any)[key];
+			delete (this as any)[key];
+			if (live[key] === undefined || (key === "running" && !live.running)) live[key] = value;
+		}
+		// A pre-Surface subscription called the old `tui` directly; re-subscribe
+		// through the current owner so events follow every later swap.
+		const session = (live.runtime as any)?.session;
+		if (live.running && session?.subscribe && !live.surfaceForwarding) {
+			try { live.sessionEventUnsub?.(); } catch {}
+			live.sessionEventUnsub = session.subscribe((event: any) => {
+				const current = rowOwner<RlmRendererService>("renderer");
+				try { current?.forwardEvent(event.type, event); } catch {}
+			});
+			live.surfaceForwarding = true;
+		}
+	}
+
+	/**
+	 * Detach this generation. Cordis never calls this (it defines no dispose
+	 * symbol; fiber teardown runs `ctx.effect` disposers), but anything that does
+	 * must not end the chat: the chat, its runtime and the session subscription
+	 * belong to the Surface and outlive this instance. Ending them is `stop()`.
+	 */
 	async [Symbol.dispose]() {
-		try { this.sessionEventUnsub?.(); } catch {}
-		this.sessionEventUnsub = undefined;
 		try { this.providerChangedUnsub?.(); } catch {}
 		this.providerChangedUnsub = undefined;
 		try { this.tuiConfigUnsub?.(); } catch {}
 		this.tuiConfigUnsub = undefined;
 		try { this.followupSendUnsub?.(); } catch {}
 		this.followupSendUnsub = undefined;
-		if (this.instance) {
-			try { this.instance.stop(); } catch {}
-			this.instance = undefined;
-		}
-		if (this.runtime) {
-			try { await this.runtime.dispose?.(); } catch {}
-			this.runtime = undefined;
-		}
+		detachRow("renderer", this);
 	}
 }
 

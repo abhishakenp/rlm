@@ -14,22 +14,66 @@
  * Hot-swappable: editing this file triggers fiber.restart() → fresh import.
  */
 import { Service } from "@deepseek-ai/cordis";
-import {
-	createAgentSessionServices,
-	createAgentSessionFromServices,
-	type AgentSessionServices,
-	type CreateAgentSessionServicesOptions,
-	type CreateAgentSessionFromServicesOptions,
+import type {
+	AgentSessionServices,
+	CreateAgentSessionServicesOptions,
+	CreateAgentSessionFromServicesOptions,
 } from "../../coding-agent/src/core/agent-session-services.js";
-import {
-	createAgentSessionRuntime,
-	type AgentSessionRuntime,
-	type CreateAgentSessionRuntimeFactory,
+import type {
+	AgentSessionRuntime,
+	CreateAgentSessionRuntimeFactory,
 } from "../../coding-agent/src/core/agent-session-runtime.js";
 import type { AgentSession } from "../../coding-agent/src/core/agent-session.js";
 import type { SessionManager } from "../../coding-agent/src/core/session-manager.js";
 import type { CreateAgentSessionResult } from "../../coding-agent/src/core/sdk.js";
-import { getAgentDir } from "../../coding-agent/src/config.js";
+
+/**
+ * Lazy-load the coding-agent module.
+ *
+ * The coding-agent is a large module (~143 MB RSS when loaded). Deferring
+ * its import until the agent is actually needed means a composition that
+ * includes @rlm/agent but never runs a task pays nothing — the module is
+ * only loaded on the first call to createServices(), createSession(), or
+ * createRuntime().
+ *
+ * Cached after the first load so repeated calls don't re-import.
+ */
+interface CodingAgentModule {
+	createAgentSessionServices: (opts: CreateAgentSessionServicesOptions) => Promise<AgentSessionServices>;
+	createAgentSessionFromServices: (opts: CreateAgentSessionFromServicesOptions) => Promise<CreateAgentSessionResult>;
+}
+
+interface AgentRuntimeModule {
+	createAgentSessionRuntime: (factory: CreateAgentSessionRuntimeFactory, opts: any) => AgentSessionRuntime;
+}
+
+interface AgentConfigModule {
+	getAgentDir: () => string;
+}
+
+let codingAgentPromise: Promise<CodingAgentModule> | null = null;
+function loadCodingAgent(): Promise<CodingAgentModule> {
+	if (!codingAgentPromise) {
+		codingAgentPromise = import("../../coding-agent/src/core/agent-session-services.js") as Promise<CodingAgentModule>;
+	}
+	return codingAgentPromise;
+}
+
+let agentRuntimePromise: Promise<AgentRuntimeModule> | null = null;
+function loadAgentRuntime(): Promise<AgentRuntimeModule> {
+	if (!agentRuntimePromise) {
+		agentRuntimePromise = import("../../coding-agent/src/core/agent-session-runtime.js") as Promise<AgentRuntimeModule>;
+	}
+	return agentRuntimePromise;
+}
+
+let agentConfigPromise: Promise<AgentConfigModule> | null = null;
+function loadAgentConfig(): Promise<AgentConfigModule> {
+	if (!agentConfigPromise) {
+		agentConfigPromise = import("../../coding-agent/src/config.js") as Promise<AgentConfigModule>;
+	}
+	return agentConfigPromise;
+}
 
 /**
  * Extension factories published by other Cordis plugins.
@@ -94,6 +138,14 @@ export class RlmAgentService extends Service {
 	declare config: RlmAgentConfig;
 
 	private services: AgentSessionServices | undefined;
+	/** Config reference stored at init for lazy service creation. */
+	private rlmConfigRef: {
+		getSettingsManager: () => { getCwd?: () => string } | undefined;
+		getModelRegistry: () => unknown;
+		getAuthStorage: () => unknown;
+	} | undefined;
+	/** Session reference stored at init for lazy session creation. */
+	private rlmSessionRef: { getSessionManager: () => SessionManager } | undefined;
 
 	/**
 	 * A default parameter does not catch `null`, and the composition hands one.
@@ -121,60 +173,51 @@ export class RlmAgentService extends Service {
 			getSessionManager: () => SessionManager;
 		};
 
-		const settingsManager = rlmConfig?.getSettingsManager?.();
-    const cwd = this.config.cwd ?? (settingsManager?.getCwd?.() ?? process.cwd());
-		const agentDir = this.config.agentDir ?? getAgentDir();
-
-		this.services = await createAgentSessionServices({
-			cwd,
-			agentDir,
-			authStorage: rlmConfig?.getAuthStorage?.() as never,
-			settingsManager: settingsManager as never,
-			modelRegistry: rlmConfig?.getModelRegistry?.() as never,
-		});
+		// Store config references for lazy initialization.
+		// The actual coding-agent module is not loaded until createServices()
+		// is called — so a composition that includes @rlm/agent but never runs
+		// a task pays nothing for the ~143 MB coding-agent boot.
+		this.rlmConfigRef = rlmConfig;
+		this.rlmSessionRef = rlmSession;
 
 		void rlmSession?.getSessionManager?.();
 
-		this.ctx.logger?.info(`rlm-agent: ready (cwd=${cwd}, agentDir=${agentDir})`);
+		const settingsManager = rlmConfig?.getSettingsManager?.();
+		const cwd = this.config.cwd ?? (settingsManager?.getCwd?.() ?? process.cwd());
+		this.ctx.logger?.info(`rlm-agent: ready (lazy — coding-agent not loaded yet, cwd=${cwd})`);
 	}
 
 	async createServices(
 		opts: Omit<CreateAgentSessionServicesOptions, "cwd" | "agentDir"> &
 			Partial<Pick<CreateAgentSessionServicesOptions, "cwd" | "agentDir">>,
 	): Promise<AgentSessionServices> {
-		// Wire rlmPrompt's buildCompositePrompt() into the AgentSession's
-		// system prompt via appendSystemPromptOverride. This makes all
-		// registered prompt fragments (context registry, learnings, refine,
-		// SDK subagent guidance, etc.) visible to the AI on every turn.
-		const getPromptSvc = () => {
-			try {
-				const fromGlobal = (globalThis as any).__rlmPrompt;
-				if (fromGlobal?.buildCompositePrompt) return fromGlobal;
-			} catch {}
-			try {
-				const fromCtx = (this.ctx as any)?.get?.("rlmPrompt");
-				if (fromCtx?.buildCompositePrompt) return fromCtx;
-			} catch {}
-			return null;
-		};
+		// rlmPrompt's fragments reach the system prompt through AgentSession
+		// itself (`_getPromptFragments` → buildSystemPrompt's `promptFragments`),
+		// depth-aware and rebuilt live. They used to be appended here as well,
+		// through appendSystemPromptOverride, which put every fragment — ~41 KB
+		// of context/SDK/refine/pixel/plugin guidance — into the prompt twice.
 
+		// Lazy-load coding-agent on first use.
+		const { createAgentSessionServices } = await loadCodingAgent();
+		const { getAgentDir } = await loadAgentConfig();
+
+		const defaultResourceLoaderOptions: NonNullable<CreateAgentSessionServicesOptions["resourceLoaderOptions"]> = {
+			// In-process extension factories contributed by other plugins
+			// (see @rlm/pixel). Resolved lazily at session-creation time so
+			// a fiber.restart() on the contributing plugin is picked up by the
+			// next session without restarting the agent.
+			extensionFactories: getContributedExtensionFactories(),
+		};
 		const base: CreateAgentSessionServicesOptions = {
 			cwd: this.services?.cwd ?? this.config.cwd ?? process.cwd(),
 			agentDir: this.services?.agentDir ?? this.config.agentDir ?? getAgentDir(),
-			resourceLoaderOptions: {
-				// In-process extension factories contributed by other plugins
-				// (see @rlm/gitpixel). Resolved lazily at session-creation time so
-				// a fiber.restart() on the contributing plugin is picked up by the
-				// next session without restarting the agent.
-				extensionFactories: getContributedExtensionFactories(),
-				appendSystemPromptOverride: (baseAppend: string[]) => {
-					const svc = getPromptSvc();
-					const composite = svc?.buildCompositePrompt?.() ?? "";
-					return [...baseAppend, composite];
-				},
-			},
+			resourceLoaderOptions: defaultResourceLoaderOptions,
 			...opts,
 		};
+		// Merged, not replaced: a caller's resource options (the command line's
+		// --skill, --system-prompt, --no-extensions …) sit on top of the
+		// contributed extension factories, not instead.
+		base.resourceLoaderOptions = { ...defaultResourceLoaderOptions, ...opts.resourceLoaderOptions };
 		return createAgentSessionServices(base);
 	}
 
@@ -182,7 +225,7 @@ export class RlmAgentService extends Service {
 		opts: Omit<CreateAgentSessionFromServicesOptions, "services" | "sessionManager"> &
 			Partial<Pick<CreateAgentSessionFromServicesOptions, "services" | "sessionManager">>,
 	): Promise<CreateAgentSessionResult> {
-		const rlmSession = this.ctx.get("rlmSession") as {
+		const rlmSession = this.rlmSessionRef ?? this.ctx.get("rlmSession") as {
 			getSessionManager: () => SessionManager;
 		};
 		const services = opts.services ?? this.services;
@@ -193,6 +236,8 @@ export class RlmAgentService extends Service {
 		if (!sessionManager) {
 			throw new Error("rlm-agent: no SessionManager available");
 		}
+		// Lazy-load coding-agent on first use.
+		const { createAgentSessionFromServices } = await loadCodingAgent();
 		return createAgentSessionFromServices({
 			...opts,
 			services,
@@ -228,31 +273,75 @@ export class RlmAgentService extends Service {
 		 */
 		sessionManager?: SessionManager;
 	}): Promise<AgentSessionRuntime> {
-		const rlmSession = this.ctx.get("rlmSession") as {
+		const rlmSession = this.rlmSessionRef ?? this.ctx.get("rlmSession") as {
 			getSessionManager: () => SessionManager;
 		};
 		const sessionManager = options.sessionManager ?? rlmSession?.getSessionManager?.();
 		if (!sessionManager) {
 			throw new Error("rlm-agent: no SessionManager available");
 		}
+
+		// Lazy-load coding-agent on first use.
+		const { createAgentSessionRuntime } = await loadAgentRuntime();
+		const { getAgentDir } = await loadAgentConfig();
+
 		const cwd = this.services?.cwd ?? this.config.cwd ?? process.cwd();
 		const agentDir = this.services?.agentDir ?? this.config.agentDir ?? getAgentDir();
 
+		// The runtime calls this factory again for every in-process subagent,
+		// each time with that child's own SessionManager. Using the closed-over
+		// one instead built every child on the parent's manager: each spawn's
+		// setSessionName renamed the parent, all children reported the last
+		// name given, and child transcripts landed in the parent's session.
+		//
+		// `sessionConfig` is the command line (`--model`, `--thinking`, `--tools`,
+		// `--skill`, `--system-prompt` …), built by `runtimeConfigFromArgs` and
+		// applied here with the helpers `main()` uses. This factory used to drop
+		// it, so every such flag was silently ignored on the Cordis launch path.
 		const createRuntimeFn: CreateAgentSessionRuntimeFactory = async (runtimeOptions) => {
+			const config = runtimeOptions.sessionConfig;
+			const runtimeArgs = config ? await import("../../coding-agent/src/cli/runtime-args.js") : undefined;
+			const childSessionManager = runtimeOptions.sessionManager ?? sessionManager;
 			const prepared = await this.createServices({
-				cwd,
-				agentDir,
+				cwd: runtimeOptions.cwd ?? cwd,
+				agentDir: runtimeOptions.agentDir ?? agentDir,
+				...(config && runtimeArgs
+					? {
+							resourceLoaderOptions: runtimeArgs.resourceLoaderOptionsFromConfig(config),
+							extensionFlagValues: new Map(Object.entries(config.extensionFlagValues ?? {})),
+							telemetryDisabled: config.telemetryDisabled,
+						}
+					: {}),
+			});
+			if (!config || !runtimeArgs) {
+				const created = await this.createSession({
+					services: prepared,
+					sessionManager: childSessionManager,
+					...(runtimeOptions.sessionOptions ?? {}),
+				});
+				return { ...created, services: prepared, diagnostics: [] };
+			}
+			const fromConfig = await runtimeArgs.sessionOptionsFromConfig({
+				config,
+				services: prepared,
+				sessionManager: childSessionManager,
+				sessionOptionsOverride: runtimeOptions.sessionOptions,
 			});
 			const created = await this.createSession({
 				services: prepared,
-				sessionManager,
-				...(runtimeOptions.sessionOptions ?? {}),
-			});
-			return {
-				...created,
-				services: prepared,
-				diagnostics: [],
-			};
+				sessionManager: childSessionManager,
+				...runtimeArgs.resolveRuntimeSessionOptions(fromConfig.sessionOptions, runtimeOptions.sessionOptions),
+				serializedRefine: config.serializedRefine ?? false,
+				executionMode: config.executionMode,
+				telemetryDisabled: config.telemetryDisabled,
+				// Only seed initial goal for top-level sessions (rlmDepth 0).
+				initialGoal: (runtimeOptions.sessionOptions?.rlmDepth ?? 0) === 0 ? config.initialGoal : undefined,
+			} as never);
+			const cliThinkingOverride = config.thinking !== undefined || fromConfig.cliThinkingFromModel;
+			if (created.session.model && cliThinkingOverride) {
+				created.session.setThinkingLevel(created.session.thinkingLevel);
+			}
+			return { ...created, services: prepared, diagnostics: fromConfig.diagnostics };
 		};
 
 		return createAgentSessionRuntime(createRuntimeFn, {
@@ -273,4 +362,9 @@ export default RlmAgentService;
 export const name = "rlm-agent";
 export const inject = ["rlmConfig", "rlmSession", "rlmTools", "rlmRefine"] as const;
 export { RlmAgentService as RlmAgent };
-export type { AgentSession, AgentSessionServices, CreateAgentSessionResult, AgentSessionRuntime };
+// `SessionManager` is part of this row's public surface whether it was written
+// down or not: `createRuntime` takes one, and the delegate's pool worker builds
+// one per task so two tasks in one process cannot share a transcript. Re-exported
+// here so a caller types itself against @rlm/agent rather than reaching past it
+// into coding-agent internals and growing a second definition of the same thing.
+export type { AgentSession, AgentSessionServices, CreateAgentSessionResult, AgentSessionRuntime, SessionManager };

@@ -17,6 +17,7 @@
  * to the shared Cordis rlmCode service.
  */
 import { Service } from "@deepseek-ai/cordis";
+import { rowState } from "../../rlm-host/src/surface.ts";
 import { createJsCodeTool } from "./js-code-tool.js";
 
 // ─── Prompt Doctrine (MANDATORY) ────────────────────────────────────────────
@@ -29,7 +30,7 @@ import { createJsCodeTool } from "./js-code-tool.js";
 // live via rlm/prompt-changed.
 
 export const SDK_DOCTRINE = [
-	"# SDK — Use at every step (MANDATORY)",
+	"# SDK — Use whenever work decomposes (MANDATORY)",
 	"",
 	"You MUST use `rlm.*` SDK at EVERY step when the task decomposes into independent sub-tasks. This is MANDATORY, not optional — you think in parallel subagents by default without being asked.",
 	"",
@@ -130,14 +131,48 @@ export class RlmSdkService extends Service {
 	static provide = "rlmSdk" as const;
 
 	declare config: RlmSdkConfig;
-	private children: Map<string, SubagentHandle> = new Map();
-	private childSessions: Map<string, any> = new Map();
+
+	/**
+	 * Live subagent handles and goal state, held on the host Surface rather than
+	 * on this instance: a hot swap of this row plugs a new instance while the
+	 * subagents it spawned keep running, and the new one must still list,
+	 * steer and reap them. See packages/rlm-host/src/surface.ts.
+	 */
+	private get live(): {
+		children: Map<string, SubagentHandle>;
+		childSessions: Map<string, any>;
+		goalState: GoalInfo;
+		recentlyCompleted: Array<SubagentInfo & { completedAt: string }>;
+	} {
+		return rowState("sdk", () => ({
+			children: new Map<string, SubagentHandle>(),
+			childSessions: new Map<string, any>(),
+			goalState: { objective: "", status: "idle", tokensUsed: 0 } as GoalInfo,
+			recentlyCompleted: [] as Array<SubagentInfo & { completedAt: string }>,
+		}));
+	}
+	private get children(): Map<string, SubagentHandle> {
+		return this.live.children;
+	}
+	private get childSessions(): Map<string, any> {
+		return this.live.childSessions;
+	}
+	private get goalState(): GoalInfo {
+		return this.live.goalState;
+	}
+	private set goalState(state: GoalInfo) {
+		this.live.goalState = state;
+	}
 	private createAgentSessionFn: any = null;
-	private goalState: GoalInfo = { objective: "", status: "idle", tokensUsed: 0 };
 
 	private static readonly RECENT_COMPLETED_LIMIT = 20;
 	/** Recently completed subagents, most-recent-first, capped at RECENT_COMPLETED_LIMIT. */
-	private recentlyCompleted: Array<SubagentInfo & { completedAt: string }> = [];
+	private get recentlyCompleted(): Array<SubagentInfo & { completedAt: string }> {
+		return this.live.recentlyCompleted;
+	}
+	private set recentlyCompleted(list: Array<SubagentInfo & { completedAt: string }>) {
+		this.live.recentlyCompleted = list;
+	}
 
 	// ─── Prompt fragment (hot-reloadable) ─────────────────────────────────
 	private promptHandle: any = null;
@@ -256,6 +291,12 @@ export class RlmSdkService extends Service {
 			`rlm-sdk: TS SDK ready (maxDepth=${this.config.maxDepth ?? 10})`,
 		);
 		this.registerPromptFragment();
+		// The fragment is this generation's; the subagents are not. Cordis tears a
+		// fiber down through its effects (it never calls Symbol.dispose), so the
+		// fragment goes here — and a hot swap leaves every running child alone.
+		try {
+			this.ctx.effect?.(() => () => this.disposePromptFragment());
+		} catch {}
 	}
 
 	/**
@@ -297,14 +338,17 @@ export class RlmSdkService extends Service {
 
 		try {
 			// Connect the child's code tool to the shared Cordis rlmCode service.
+			// Pass the subagent's id as sessionId so each task gets its own VM
+			// context — concurrent tasks cannot observe each other's variables.
 			const codeService = this.ctx.get("rlmCode");
 			const baseToolsOverride: Record<string, any> = {};
 			if (codeService) {
-				baseToolsOverride.code = createJsCodeTool(codeService);
+				baseToolsOverride.code = createJsCodeTool(codeService, id);
 			}
 
 			// Pass context variables to the child's task scope — 1 or MANY, copy or move, atomically.
 			const contextService = this.ctx.get("rlmContext");
+			let snapshot: any = null;
 			if (contextService) {
 				const wantsCopy = !!(opts.context && opts.context.length > 0);
 				const wantsMove = !!(opts.contextMove && opts.contextMove.length > 0);
@@ -313,7 +357,6 @@ export class RlmSdkService extends Service {
 				if ((wantsCopy || wantsMove) && contextService.config && contextService.config.enableSubagentTransfer === false) {
 					throw new Error("rlm-sdk: subagent transfer disabled by rlm-context config (enableSubagentTransfer=false)");
 				}
-				let snapshot: any = null;
 				if (wantsMove) {
 					// Explicit move — destructive transfer (parent loses vars)
 					snapshot = contextService.move(opts.contextMove!);
@@ -327,11 +370,12 @@ export class RlmSdkService extends Service {
 						(this.ctx as any).emit("rlm/sdk-context-copy", { id, patterns: opts.context, count: Object.keys(snapshot).length });
 					}
 				}
-				if (snapshot !== null) {
-					// Even empty snapshot clears previous leak; non-empty carries 1..N vars.
-					(globalThis as any).__rlmTaskContextSnapshot = snapshot;
-				}
 			}
+			// Pass snapshot explicitly to createAgentSessionFn, replacing the
+			// globalThis.__rlmTaskContextSnapshot global — unsafe for concurrent
+			// in-process workers (concurrent tasks overwrite each other's snapshot).
+			// The snapshot flows: CreateAgentSessionOptions → AgentSessionConfig →
+			// AgentSession._rlmTaskContextSnapshot → _buildCodeRuntime loads it.
 
 			const resolvedModel = opts.model ?? this.config.defaultModel;
 			const { session } = await this.createAgentSessionFn({
@@ -340,6 +384,7 @@ export class RlmSdkService extends Service {
 				rlmMaxDepth: maxDepth,
 				...(Object.keys(baseToolsOverride).length > 0 ? { baseToolsOverride } : {}),
 				...(resolvedModel ? { model: resolvedModel } : {}),
+				rlmTaskContextSnapshot: snapshot,
 			});
 			this.childSessions.set(id, session);
 
@@ -390,6 +435,11 @@ export class RlmSdkService extends Service {
 			(this.ctx as any).emit("rlm/sdk-error", { id, depth, error: handle.error, completedAt: handle.completedAt });
 		} finally {
 			this.childSessions.delete(id);
+			// Dispose the task's VM context to free memory.
+			const codeService = this.ctx.get("rlmCode");
+			if (codeService?.disposeTaskContext) {
+				codeService.disposeTaskContext(id);
+			}
 		}
 
 		return handle;
@@ -490,9 +540,30 @@ export class RlmSdkService extends Service {
 		this.children.clear();
 	}
 
+	/**
+	 * rlm-hmr calls this on the outgoing instance just before a swap (methods
+	 * already patched to the new code). An instance from before the Surface held
+	 * its subagent handles and goal in own fields; move them onto the Surface so
+	 * the next generation still lists, steers and reaps the same children.
+	 */
+	[Symbol.for("rlm.hmr.handover")]() {
+		const live = this.live as any;
+		for (const key of ["children", "childSessions", "goalState", "recentlyCompleted"] as const) {
+			if (!Object.hasOwn(this, key)) continue;
+			const value = (this as any)[key];
+			delete (this as any)[key];
+			if (value instanceof Map) for (const [k, v] of value) live[key].set(k, v);
+			else if (Array.isArray(value)) live[key] = [...value, ...live[key]];
+			else if (value) live[key] = value;
+		}
+	}
+
+	/**
+	 * Detach this generation: its prompt fragment only. Running subagents belong
+	 * to the Surface and outlive the instance; ending them is `cancelAll()`.
+	 */
 	async [Symbol.dispose]() {
 		this.disposePromptFragment();
-		this.cancelAll();
 	}
 }
 

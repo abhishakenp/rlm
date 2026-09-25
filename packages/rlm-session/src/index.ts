@@ -7,6 +7,7 @@
  * Hot-swappable: editing this file triggers fiber.restart() → fresh import.
  */
 import { Service } from "@deepseek-ai/cordis";
+import { resolve } from "node:path";
 import { SessionManager, getDefaultSessionDir } from "../../coding-agent/src/core/session-manager.js";
 
 export interface RlmSessionConfig {
@@ -28,7 +29,10 @@ export class RlmSessionService extends Service {
 
 	async [Service.init]() {
 		const rlmConfig = this.ctx.get("rlmConfig") as { config?: { cwd?: string } };
-		const cwd = rlmConfig?.config?.cwd ?? process.cwd();
+		// Absolute, always. cordis.yml says `cwd: .`, and a header that records "."
+		// matches every directory: `rlm -c` then continued whichever session was
+		// newest anywhere, and the "current project" catalog listed all of them.
+		const cwd = resolve(rlmConfig?.config?.cwd ?? process.cwd());
 
 		const sessionDir = this.config.sessionDir ?? getDefaultSessionDir(cwd);
 		this.sessionManager = SessionManager.create(cwd, sessionDir);
