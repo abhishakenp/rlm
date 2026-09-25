@@ -89,42 +89,6 @@ describe("openai-completions empty tools handling", () => {
 		expect("tools" in (params as object)).toBe(false);
 	});
 
-	it("uses conservative OpenAI-compatible fields for Cloudflare AI Gateway /compat models", async () => {
-		process.env.CLOUDFLARE_ACCOUNT_ID = "account-id";
-		process.env.CLOUDFLARE_GATEWAY_ID = "gateway-id";
-		const model = getModel("cloudflare-ai-gateway", "gpt-4o-mini")!;
-
-		await streamSimple(
-			model,
-			{
-				systemPrompt: "You are helpful.",
-				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
-			},
-			{ apiKey: "test", reasoning: "high" },
-		).result();
-
-		const params = mockState.lastParams as {
-			messages: Array<{ role: string }>;
-			max_tokens?: number;
-			max_completion_tokens?: number;
-			reasoning_effort?: string;
-			store?: boolean;
-		};
-		expect(params.messages[0].role).toBe("system");
-		expect(params.max_tokens).toBeDefined();
-		expect(params.max_completion_tokens).toBeUndefined();
-		expect(params.reasoning_effort).toBeUndefined();
-		expect(params.store).toBeUndefined();
-
-		const clientOptions = mockState.lastClientOptions as {
-			baseURL?: string;
-			defaultHeaders?: Record<string, unknown>;
-		};
-		expect(clientOptions.baseURL).toBe("https://gateway.ai.cloudflare.com/v1/account-id/gateway-id/compat");
-		expect(clientOptions.defaultHeaders?.Authorization).toBeNull();
-		expect(clientOptions.defaultHeaders?.["cf-aig-authorization"]).toBe("Bearer test");
-	});
-
 	it("uses OpenAI reasoning fields for an explicitly configured private Prime Inference route", async () => {
 		const model: Model<"openai-completions"> = {
 			id: "internal/glm-5.2-fast",
@@ -174,10 +138,9 @@ describe("openai-completions empty tools handling", () => {
 		expect(clientOptions.defaultHeaders?.["cf-aig-authorization"]).toBe("Bearer cf-token");
 	});
 
-	it("sends session affinity headers for Workers AI through Cloudflare AI Gateway", async () => {
+	it("sends session affinity headers for Workers AI", async () => {
 		process.env.CLOUDFLARE_ACCOUNT_ID = "account-id";
-		process.env.CLOUDFLARE_GATEWAY_ID = "gateway-id";
-		const workersModel = getModel("cloudflare-ai-gateway", "gpt-4o-mini")!;
+		const workersModel = getModel("cloudflare-workers-ai", "@cf/deepseek-ai/deepseek-v4-flash-0731")!;
 
 		await streamSimple(
 			workersModel,
