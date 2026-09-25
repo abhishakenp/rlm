@@ -82,9 +82,12 @@
  * to `rlmHeadless.attend()`, which is where the fact belongs.
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import { freemem, totalmem } from "node:os";
 import { planLaunch, rlmAgent, sessionFor, withCriterion, type AgentOptions } from "./agent.ts";
 import type { Graph, Task } from "./graph.ts";
 import type { Runner } from "./scheduler.ts";
+import { InProcessWorker } from "./in-process-worker.ts";
+import type { PoolWorkerAgent } from "./pool-worker.ts";
 
 // ─── The wire ────────────────────────────────────────────────────────────────
 
@@ -103,6 +106,16 @@ export type PoolReply =
 	| { type: "chunk"; id: string; text: string }
 	| { type: "done"; id: string; ok: boolean; text: string; error?: string; worker?: "lost" }
 	| { type: "attention"; watching: string | null }
+	/**
+	 * "I am still here", every `heartbeatMs`.
+	 *
+	 * Not the same fact as "the process exists". A worker wedged in a native
+	 * call, swapping, or spinning in a tool that never returns is a live pid
+	 * holding live tasks and answering nothing, and until this existed the only
+	 * bound on that was the per-task timeout — which is forty-five minutes by
+	 * default, because it is sized for a real agent turn and not for a corpse.
+	 */
+	| { type: "heartbeat"; id: string; ts: number }
 	| { type: "fatal"; error: string };
 
 // ─── Options ─────────────────────────────────────────────────────────────────
@@ -110,6 +123,38 @@ export type PoolReply =
 export interface PoolOptions extends AgentOptions {
 	/** Tasks one worker may hold at once. The marginal-cost number lives here. */
 	slots?: number;
+	/**
+	 * Use in-process workers instead of child processes.
+	 *
+	 * Default: `true`. In-process workers run tasks in the host process,
+	 * sharing the composition's `ctx` and `rlmAgent` service. The marginal
+	 * cost of a task is its messages and tool results, not a second copy
+	 * of the framework.
+	 *
+	 * Set to `false` for crash-prone or untrusted tasks — child-process
+	 * workers provide process-level isolation and are the fallback.
+	 *
+	 * When `true`, the pool needs `ctx` and `agent` (the `PoolWorkerAgent`)
+	 * to create runtimes in-process. When `false`, it spawns child processes
+	 * via the entry point as before.
+	 */
+	useInProcess?: boolean;
+	/**
+	 * The Cordis context for in-process workers.
+	 *
+	 * When `useInProcess` is true, the pool uses this `ctx` to resolve
+	 * `rlmAgent` and `rlmHeadless` services. The host composition's `ctx`
+	 * is the right value here.
+	 */
+	ctx?: any;
+	/**
+	 * The agent factory for in-process workers.
+	 *
+	 * When `useInProcess` is true, the pool calls `agent.createRuntime()`
+	 * to build a fresh runtime per task. This is the same `PoolWorkerAgent`
+	 * interface the child-process worker uses.
+	 */
+	agent?: PoolWorkerAgent;
 	/**
 	 * Workers, at most.
 	 *
@@ -133,6 +178,53 @@ export interface PoolOptions extends AgentOptions {
 	bootTimeoutMs?: number;
 	/** How long a cancelled task gets to stop before its worker is retired. */
 	graceMs?: number;
+	/**
+	 * Below this fraction of memory free, admit one task at a time.
+	 *
+	 * The whole of the admission rule, and config rather than a literal because
+	 * every number in this repo that decides behaviour is. Twenty percent is the
+	 * point the laptop starts to lag — the same figure `capacity()` uses for its
+	 * headroom floor, and deliberately the same, because two floors that
+	 * disagree is how a fleet ends up throttled by whichever one nobody
+	 * remembered.
+	 */
+	memoryFloor?: number;
+	/**
+	 * How free memory is read, for a caller that measures it better.
+	 *
+	 * `freemem() / totalmem()` is honest on Linux and close to useless on macOS,
+	 * where it counts only wholly free pages and a healthy machine reads one
+	 * percent. `capacity.ts` already knows how to ask `vm_stat` and
+	 * `memory_pressure`; this is the seam it plugs into, and it is also what
+	 * lets the admission rule be tested with a number instead of a machine.
+	 */
+	freeFraction?: () => number;
+	/**
+	 * The queue is a safety valve, not a buffer.
+	 *
+	 * There was no bound here at all: `run()` pushed and `pump()` drained, so a
+	 * caller that submits faster than the fleet retires holds every prompt, every
+	 * graph and every closure alive in this heap for as long as it takes. That is
+	 * a memory leak with a queue's name on it. Sixty-four is well past anything
+	 * `capacity()` will admit at once and far short of a number that matters.
+	 */
+	queueLimit?: number;
+	/** How often a worker says it is alive. */
+	heartbeatMs?: number;
+	/** No word from a worker for this long and it is treated as dead. */
+	heartbeatTimeoutMs?: number;
+	/**
+	 * A worker that died under a task gets it handed on this many more times.
+	 *
+	 * One. A task that takes a process down is likely to take the next one down
+	 * too, and a pool that re-queues for ever turns one bad task into a machine
+	 * that does nothing but boot. Counted rather than flagged so the number is
+	 * visible and changeable, but the default is the old boolean's meaning
+	 * exactly.
+	 */
+	maxRequeues?: number;
+	/** How long `drain()` waits for work in flight before it kills. */
+	drainTimeoutMs?: number;
 	/** Somewhere to say what the pool is doing. */
 	log?: (line: string) => void;
 }
@@ -160,14 +252,17 @@ interface Pending {
 	 * reporting a timeout as an answer is how a bound stops being visible.
 	 */
 	why?: Error;
-	/** A worker that died under this task gets it handed on exactly once. */
-	requeued?: boolean;
+	/** How many times a dying worker has already handed this task on. */
+	requeues: number;
 	settled?: boolean;
 }
 
 interface Worker {
 	id: number;
+	/** Child process for child-process workers. */
 	child: ChildProcess;
+	/** In-process worker — present when useInProcess is true. */
+	inProcess?: InProcessWorker;
 	slots: number;
 	/** Tasks currently in flight here. */
 	holding: Set<string>;
@@ -175,6 +270,8 @@ interface Worker {
 	lifetime: number;
 	ready: boolean;
 	retiring: boolean;
+	/** When this worker last said anything at all. See `heartbeat`. */
+	lastSeen: number;
 	idle?: NodeJS.Timeout;
 	/** The last of what it said, for when it dies without explaining. */
 	tail: string[];
@@ -192,7 +289,7 @@ export class AgentPool {
 	private readonly workers = new Set<Worker>();
 	private readonly queue: Pending[] = [];
 	private readonly inFlight = new Map<string, Pending>();
-	private closed = false;
+	closed = false;
 	/** Set when the row that made this pool went away while it was still busy. */
 	private draining = false;
 	/** Tasks that have settled here, ever. What "the pool did the work" means. */
@@ -201,19 +298,95 @@ export class AgentPool {
 	private readonly scoped = new Map<NonNullable<AgentOptions["confine"]>, AgentPool>();
 	/** The one session being watched, as far as this pool knows. */
 	private attention: string | null = null;
+	/** One task at a time per session id. See `withSessionLock`. */
+	private readonly sessionLocks = new Map<string, Promise<void>>();
+	/** Looks for workers that have stopped saying anything. Runs only when hired. */
+	private beat?: NodeJS.Timeout;
+	/**
+	 * Nothing may be spawned before this instant.
+	 *
+	 * Set when the OS refuses a process — `EMFILE`, `ENOMEM`. Without it `pump()`
+	 * retries `hire()` on every settle, which under descriptor exhaustion is a
+	 * spin that makes the exhaustion worse.
+	 */
+	private spawnBlockedUntil = 0;
+	/**
+	 * Taking nothing new, but still finishing what it has. See `drain`.
+	 *
+	 * Distinct from `closed`, which also stops `pump()` hiring — and a queued
+	 * task whose worker is busy needs a new worker to reach one, so a drain that
+	 * set `closed` could not actually drain its own queue.
+	 */
+	private stopping = false;
 
 	constructor(options: PoolOptions) {
 		this.options = options;
 	}
 
+	/**
+	 * How much of this machine's memory is free, as a fraction.
+	 *
+	 * The caller's reading when it has one — `capacity.ts` asks `vm_stat` and
+	 * `memory_pressure`, which is the only honest answer on darwin — and the
+	 * arithmetic otherwise. A reading that throws or comes back as nonsense is
+	 * treated as "no room", because guessing generously is how a laptop starts
+	 * swapping and guessing at all is what this rule exists to stop.
+	 */
+	private free(): number {
+		try {
+			const asked = this.options.freeFraction?.();
+			if (typeof asked === "number" && Number.isFinite(asked)) return Math.max(0, Math.min(1, asked));
+			const total = totalmem();
+			if (!total) return 0;
+			return Math.max(0, Math.min(1, freemem() / total));
+		} catch {
+			return 0;
+		}
+	}
+
+	/**
+	 * How many workers may exist, and it is a memory question rather than an
+	 * arithmetic one.
+	 *
+	 * Two static numbers used to answer this: `slots ?? 8` and `maxWorkers ?? 4`.
+	 * Both were guesses about a machine neither of them had looked at, and a
+	 * guess about a machine is wrong on every machine except the one it was
+	 * written on. The OS already refuses what it cannot give — `EMFILE`,
+	 * `ENOMEM`, and `hire()` catches both — so the only pre-emptive question
+	 * worth asking is whether this machine is in trouble *now*: below the floor
+	 * we do one thing at a time, above it we do not cap and let the work and the
+	 * kernel decide.
+	 *
+	 * An explicit `maxWorkers` still wins, because a caller that has measured
+	 * something outranks a rule that has not. `rlm-delegate` passes
+	 * `capacity()`'s live verdict through it, so the fleet-wide budget is
+	 * unaffected by any of this.
+	 */
+	private ceiling(): number {
+		const asked = this.options.maxWorkers;
+		const configured = typeof asked === "function" ? asked() : asked;
+		if (typeof configured === "number" && Number.isFinite(configured) && configured > 0) {
+			return Math.max(1, Math.floor(configured));
+		}
+		return this.free() < (this.options.memoryFloor ?? 0.2) ? 1 : Number.MAX_SAFE_INTEGER;
+	}
+
+	/**
+	 * Tasks one worker may hold at once.
+	 *
+	 * Said by the caller, or the same memory question again: one at a time while
+	 * the machine is tight, uncapped while it is not. `maxTasksPerWorker` is
+	 * what still bounds a worker's life, and it is a different question —
+	 * memory-leak prevention, not concurrency.
+	 */
 	private get slots(): number {
-		return Math.max(1, this.options.slots ?? 8);
+		const asked = this.options.slots;
+		if (typeof asked === "number" && Number.isFinite(asked) && asked > 0) return Math.max(1, Math.floor(asked));
+		return this.free() < (this.options.memoryFloor ?? 0.2) ? 1 : Number.MAX_SAFE_INTEGER;
 	}
 
 	private get maxWorkers(): number {
-		const asked = this.options.maxWorkers;
-		const now = typeof asked === "function" ? asked() : asked;
-		return Math.max(1, Number.isFinite(now as number) ? (now as number) : 4);
+		return this.ceiling();
 	}
 
 	private say(line: string) {
@@ -223,6 +396,9 @@ export class AgentPool {
 	/** Whether this pool is a corpse — a caller holding one must get a new one. */
 	isClosed(): boolean {
 		return this.closed;
+	}
+	status(): object {
+		return { open: !this.closed };
 	}
 
 	/**
@@ -267,27 +443,75 @@ export class AgentPool {
 		return rlmAgent({ ...this.options, ...overrides } as AgentOptions);
 	}
 
+	/**
+	 * One session, one task at a time.
+	 *
+	 * A session is a transcript on disk and a conversation in memory, and two
+	 * tasks appending to it at once do not produce two conversations — they
+	 * produce one file with both halves of two different arguments in it. Nothing
+	 * stopped that before: `sessionFor(graph, task)` is derived, so a retry, a
+	 * planner call and a runner call can all name the same session, and the pool
+	 * would hand them to whichever workers had room.
+	 *
+	 * The lock is per session id and it is a promise chain, not a flag: a waiter
+	 * queues behind whatever is already there and the map entry is dropped only
+	 * when the last waiter leaves, so the map is not a leak either.
+	 */
 	run(task: Task, graph: Graph, overrides: Partial<AgentOptions> = {}): Promise<string> {
+		const sessionId = sessionFor(graph, task);
+		return this.withSessionLock(sessionId, () => this.submit(task, graph, overrides, sessionId));
+	}
+
+	private withSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+		const prev = this.sessionLocks.get(sessionId) ?? Promise.resolve();
+		let release!: () => void;
+		const next = new Promise<void>((r) => (release = r));
+		this.sessionLocks.set(sessionId, prev.then(() => next));
+		return prev.then(async () => {
+			try {
+				return await fn();
+			} finally {
+				release();
+				// Only if nothing queued behind it, or the next waiter's own entry
+				// is deleted out from under it and two of them run together — which
+				// is the exact thing this exists to stop.
+				if (this.sessionLocks.get(sessionId) === next) this.sessionLocks.delete(sessionId);
+			}
+		});
+	}
+
+	private submit(task: Task, graph: Graph, overrides: Partial<AgentOptions>, sessionId: string): Promise<string> {
 		const signal = overrides.signal ?? this.options.signal;
 		const timeoutMs = overrides.timeoutMs ?? this.options.timeoutMs ?? 2_700_000;
 		const onOutput = overrides.onOutput ?? this.options.onOutput;
 		return new Promise<string>((resolve, reject) => {
 			if (this.closed) return reject(new Error("the pool is closed"));
+			if (this.stopping) return reject(new Error("the pool is draining and is not taking new work"));
 			// Work arriving is the answer to "is anyone still using this": a pool
 			// that was draining towards a close is wanted again, so it stops.
 			this.draining = false;
 			if (signal?.aborted) return reject(new Error("stopped before this attempt started"));
+			// A queue nobody bounds is a heap nobody bounds. Refused loudly rather
+			// than accepted and forgotten: the caller can re-offer the task, and
+			// the graph on disk still owes it either way.
+			const limit = this.options.queueLimit ?? 64;
+			if (this.queue.length >= limit) {
+				return reject(
+					new Error(`the pool queue is full (${this.queue.length}/${limit}) — nothing was lost, offer it again`),
+				);
+			}
 			const pending: Pending = {
 				id: `t${nextTaskId++}`,
 				task,
 				graph,
 				prompt: withCriterion(task),
-				sessionId: sessionFor(graph, task),
+				sessionId,
 				timeoutMs,
 				signal,
 				onOutput,
 				resolve,
 				reject,
+				requeues: 0,
 			};
 			if (signal) {
 				const onAbort = () => this.stopTask(pending, new Error("stopped mid-attempt"));
@@ -336,6 +560,7 @@ export class AgentPool {
 			workers: [...this.workers].map((w) => ({
 				id: w.id,
 				pid: w.child.pid,
+				inProcess: !!w.inProcess,
 				ready: w.ready,
 				holding: w.holding.size,
 				lifetime: w.lifetime,
@@ -377,12 +602,59 @@ export class AgentPool {
 		for (const sibling of this.scoped.values()) sibling.closeWhenIdle();
 	}
 
+	/**
+	 * Stop taking work, let what is running finish, and only then kill.
+	 *
+	 * The disposer's answer, and not the same as `close()`. A row unloading is
+	 * not a reason to take a forty-minute agent turn away from the graph that is
+	 * waiting on it — but it is also not a licence to wait for ever, so the wait
+	 * is bounded and the two outcomes are named out loud, because "unload
+	 * orphaned the fleet" and "unload waited politely" look identical in a log
+	 * that only says "closed".
+	 */
+	async drain(timeoutMs?: number): Promise<"drained" | "timed-out"> {
+		const limit = Math.max(0, timeoutMs ?? this.options.drainTimeoutMs ?? 30_000);
+		if (this.closed) return "drained";
+		// `stopping`, not `closed`. Refusing new work and refusing to hire are two
+		// different decisions, and conflating them is how a drain fails to drain:
+		// a queued task whose worker is busy needs a *new* worker to reach one, and
+		// `pump()` will not start one while `closed`. So this pool takes nothing
+		// new and still finishes everything it already accepted.
+		this.stopping = true;
+		this.say(`draining — ${this.inFlight.size} in flight, ${this.queue.length} queued, ${limit}ms to finish`);
+		const deadline = Date.now() + limit;
+		while ((this.inFlight.size || this.queue.length) && Date.now() < deadline) {
+			await new Promise<void>((r) => {
+				const t = setTimeout(r, 50);
+				t.unref?.();
+			});
+		}
+		const outcome = this.inFlight.size || this.queue.length ? "timed-out" : "drained";
+		this.stopping = false;
+		this.say(
+			outcome === "drained"
+				? "drained — everything in flight finished before the workers were let go"
+				: `drain timed out after ${limit}ms with ${this.inFlight.size} in flight and ${this.queue.length} queued — killing anyway`,
+		);
+		await Promise.all([...this.scoped.values()].map((p) => p.drain(Math.max(0, deadline - Date.now()))));
+		await this.close();
+		return outcome;
+	}
+
 	/** Let go of every worker. Anything still queued is failed, not forgotten. */
 	async close(): Promise<void> {
 		this.closed = true;
+		if (this.beat) {
+			clearInterval(this.beat);
+			this.beat = undefined;
+		}
 		for (const pending of [...this.queue]) this.settle(pending, new Error("the pool was closed"));
 		this.queue.length = 0;
 		for (const worker of [...this.workers]) this.retire(worker, "the pool was closed");
+		// The chains are per session and every one of them has settled by now, or
+		// its task was just failed above. Holding them would be a map that only
+		// grows across reloads.
+		this.sessionLocks.clear();
 		await Promise.all([...this.scoped.values()].map((p) => p.close()));
 		this.scoped.clear();
 		// Not unref'd. An unref'd timer does not hold the loop open, so if this is
@@ -408,6 +680,7 @@ export class AgentPool {
 		if (
 			!this.closed &&
 			this.queue.length &&
+			Date.now() >= this.spawnBlockedUntil &&
 			this.workers.size < this.maxWorkers &&
 			![...this.workers].some((w) => !w.ready && !w.retiring)
 		) {
@@ -497,13 +770,81 @@ export class AgentPool {
 	// ─── Workers ─────────────────────────────────────────────────────────────
 
 	private hire(): Worker | undefined {
+		// In-process workers: run tasks in the host process, sharing the
+		// composition's ctx and rlmAgent service. Default when useInProcess
+		// is not explicitly false and the required ctx/agent are available.
+		const useInProcess = this.options.useInProcess ?? true;
+		if (useInProcess && this.options.ctx && this.options.agent && !this.options.confine) {
+			return this.hireInProcess();
+		}
+		return this.hireChild();
+	}
+
+	/** Hire an in-process worker — no child process spawned. */
+	private hireInProcess(): Worker | undefined {
+		const inProc = new InProcessWorker({
+			ctx: this.options.ctx,
+			agent: this.options.agent!,
+			cwd: this.options.cwd ?? process.cwd(),
+			slots: this.slots,
+			heartbeatMs: this.options.heartbeatMs ?? 5_000,
+		});
+		const child = inProc.getChild();
+		const worker: Worker = {
+			id: nextWorkerId++,
+			child: child as unknown as ChildProcess,
+			inProcess: inProc,
+			slots: this.slots,
+			holding: new Set(),
+			lifetime: 0,
+			ready: false,
+			retiring: false,
+			lastSeen: Date.now(),
+			tail: [],
+		};
+		this.workers.add(worker);
+		this.heartbeat();
+
+		const boot = setTimeout(() => {
+			if (worker.ready) return;
+			this.say(`worker ${worker.id} never booted`);
+			this.retire(worker, "it never finished booting");
+		}, this.options.bootTimeoutMs ?? 120_000);
+		boot.unref?.();
+
+		// Wire message handling — same as child-process path
+		child.on("message", (raw: unknown) => this.heard(worker, raw as PoolReply, boot));
+		child.on("exit", (code, signal) => {
+			clearTimeout(boot);
+			this.lost(worker, `it exited ${signal ? `on ${signal}` : code}`);
+		});
+
+		// Start the worker — emits "ready" immediately
+		inProc.start();
+		return worker;
+	}
+
+	/** Hire a child-process worker — the original spawn-based path. */
+	private hireChild(): Worker | undefined {
 		// The same decisions `agent.ts` makes, in the same function, so a worker
 		// and a one-shot can never be started differently by accident: skip rlm's
 		// re-exec (a launcher that does nothing but exec and wait measured 28 MB),
 		// hand the interpreter its sizing flags, and under bun leave out the tsx
 		// loader it does not need and the `--expose-internals` it does not have.
 		const { command, prefix } = planLaunch(this.options);
-		const plain = [...prefix, this.options.entry, "--headless", "--pool-worker", "--slots", String(this.slots)];
+		// The heartbeat interval goes down the command line beside the slots, so a
+		// worker and the parent watching it can never disagree about how often it
+		// is supposed to speak — which is the only way a timeout means anything.
+		const plain = [
+			...prefix,
+			this.options.entry,
+			"--headless",
+			"--pool-worker",
+			"--slots",
+			String(this.slots),
+			"--heartbeat-ms",
+			String(Math.max(250, this.options.heartbeatMs ?? 5_000)),
+		];
 		// The whole worker goes inside the sandbox, not each task. `sandbox-exec`
 		// applies the profile and then `exec`s in place, so the IPC descriptor and
 		// `NODE_CHANNEL_FD` survive it and the process that comes out is the same
@@ -522,7 +863,7 @@ export class AgentPool {
 				detached: true,
 			});
 		} catch (error: any) {
-			this.say(`could not start a worker: ${error?.message ?? error}`);
+			this.refused(error);
 			return undefined;
 		}
 
@@ -534,9 +875,11 @@ export class AgentPool {
 			lifetime: 0,
 			ready: false,
 			retiring: false,
+			lastSeen: Date.now(),
 			tail: [],
 		};
 		this.workers.add(worker);
+		this.heartbeat();
 
 		const boot = setTimeout(() => {
 			if (worker.ready) return;
@@ -557,7 +900,10 @@ export class AgentPool {
 
 		child.on("message", (raw: unknown) => this.heard(worker, raw as PoolReply, boot));
 		child.on("error", (error) => {
-			this.say(`worker ${worker.id} errored: ${error.message}`);
+			// `spawn` reports some refusals asynchronously, so the descriptor and
+			// memory cases have to be recognised on this path too, or the cooldown
+			// only ever arms half the time.
+			this.refused(error, worker.id);
 			this.lost(worker, error.message);
 		});
 		child.on("exit", (code, signal) => {
@@ -569,6 +915,10 @@ export class AgentPool {
 
 	private heard(worker: Worker, message: PoolReply, boot: NodeJS.Timeout) {
 		if (!message || typeof message !== "object") return;
+		// Anything at all counts as a sign of life; the heartbeat is only what a
+		// worker says when it has nothing else to say.
+		worker.lastSeen = Date.now();
+		if (message.type === "heartbeat") return;
 		if (message.type === "ready") {
 			clearTimeout(boot);
 			worker.ready = true;
@@ -626,8 +976,11 @@ export class AgentPool {
 				this.settle(pending, pending.why);
 				continue;
 			}
-			if (pending.requeued) {
-				this.settle(pending, new Error(`the worker died twice under this task — ${why}\n${tail}`));
+			if (pending.requeues >= (this.options.maxRequeues ?? 1)) {
+				this.settle(
+					pending,
+					new Error(`the worker died ${pending.requeues + 1} time(s) under this task — ${why}\n${tail}`),
+				);
 				continue;
 			}
 			// Nothing is coming back for it: a closed pool starts no more
@@ -637,7 +990,7 @@ export class AgentPool {
 				this.settle(pending, new Error(`the pool was closed while this was running — ${why}`));
 				continue;
 			}
-			pending.requeued = true;
+			pending.requeues += 1;
 			pending.worker = undefined;
 			if (pending.timer) clearTimeout(pending.timer);
 			if (pending.grace) clearTimeout(pending.grace);
@@ -677,6 +1030,14 @@ export class AgentPool {
 		if (worker.idle) clearTimeout(worker.idle);
 		this.say(`retiring worker ${worker.id} — ${why}`);
 		this.tell(worker, { type: "retire" });
+		// In-process workers are disposed via the InProcessWorker, not signals.
+		if (worker.inProcess) {
+			// Give it a moment to drain, then dispose.
+			const term = setTimeout(() => worker.inProcess?.dispose(), 250);
+			term.unref?.();
+			worker.child.once("exit", () => clearTimeout(term));
+			return;
+		}
 		const group = (sig: NodeJS.Signals) => {
 			try {
 				if (worker.child.pid) process.kill(-worker.child.pid, sig);
@@ -698,6 +1059,77 @@ export class AgentPool {
 		});
 	}
 
+	/**
+	 * Watch for workers that have stopped saying anything.
+	 *
+	 * A pid that exists is not a worker that works. Wedged in a native call,
+	 * swapping, or spinning inside a tool that never returns, a worker holds its
+	 * tasks and answers nothing, and until this existed the only bound on that
+	 * was the per-task timeout — forty-five minutes by default, because it is
+	 * sized for a real agent turn rather than for a corpse.
+	 *
+	 * One timer for the whole pool, started when the first worker is hired and
+	 * stopped when the last one goes, and `unref`'d so it can never be the reason
+	 * a process stays up. Killing the worker is the whole of the repair: `exit`
+	 * reaches `lost()`, which re-queues what it was holding exactly as it does
+	 * for any other death, and the session lock is released by the task's own
+	 * `finally` when it eventually settles.
+	 */
+	private heartbeat() {
+		if (this.beat) return;
+		const every = Math.max(250, this.options.heartbeatMs ?? 5_000);
+		const dead = Math.max(every * 2, this.options.heartbeatTimeoutMs ?? 15_000);
+		this.beat = setInterval(() => {
+			if (!this.workers.size) {
+				clearInterval(this.beat);
+				this.beat = undefined;
+				return;
+			}
+			const now = Date.now();
+			for (const worker of [...this.workers]) {
+				// A worker still booting is bounded by `bootTimeoutMs`, which is a
+				// different and much longer question — it has not promised to
+				// speak yet.
+				if (!worker.ready || worker.retiring) continue;
+				const silent = now - worker.lastSeen;
+				if (silent <= dead) continue;
+				this.say(
+					`worker ${worker.id} has said nothing for ${silent}ms (${dead}ms is the bound) — treating it as dead`,
+				);
+				this.retire(worker, `it stopped answering for ${silent}ms`);
+			}
+		}, every);
+		this.beat.unref?.();
+	}
+
+	/**
+	 * The OS said no. Stop asking for a bit.
+	 *
+	 * `EMFILE` and `ENOMEM` are the two refusals a fleet actually meets, and both
+	 * get worse the harder you retry: `pump()` calls `hire()` again on every
+	 * settle, so without a cooldown descriptor exhaustion becomes a spin that
+	 * consumes the descriptors freed by the tasks finishing. Nothing is lost —
+	 * whatever was queued stays queued and is handed to the next worker that has
+	 * room, or to a new one once the cooldown lapses.
+	 */
+	private refused(error: any, workerId?: number) {
+		const code = String(error?.code ?? "");
+		const who = workerId === undefined ? "a worker" : `worker ${workerId}`;
+		if (code === "EMFILE" || code === "ENFILE" || code === "ENOMEM") {
+			this.spawnBlockedUntil = Date.now() + 5_000;
+			this.say(
+				`the OS refused ${who} with ${code} — not starting another for 5s; ${this.queue.length} task(s) stay queued`,
+			);
+			return;
+		}
+		// Every other refusal gets the same cooldown. A missing or unrunnable
+		// interpreter (`ENOENT`, `EACCES`) fails instantly, so without one `pump()`
+		// re-hires on the same tick and the loop never yields — the process spins
+		// on spawns and no timer, close or settle ever runs.
+		this.spawnBlockedUntil = Date.now() + 5_000;
+		this.say(`could not start ${who}: ${error?.message ?? error} — not starting another for 5s`);
+	}
+
 	private tell(worker: Worker, message: WorkerBound) {
 		try {
 			worker.child.send?.(message);
@@ -714,10 +1146,20 @@ export class AgentPool {
  * when it unloads — a pool that outlives the row that made it is 143 MB of
  * nothing.
  */
-export const pooledAgent = (options: PoolOptions): Runner & { pool: AgentPool; close: () => Promise<void> } => {
+export const pooledAgent = (
+	options: PoolOptions,
+): Runner & { pool: AgentPool; close: () => Promise<void>; drain: (ms?: number) => Promise<"drained" | "timed-out"> } => {
 	const pool = new AgentPool(options);
-	const runner = pool.runner() as Runner & { pool: AgentPool; close: () => Promise<void> };
+	const runner = pool.runner() as Runner & {
+		pool: AgentPool;
+		close: () => Promise<void>;
+		drain: (ms?: number) => Promise<"drained" | "timed-out">;
+	};
 	runner.pool = pool;
 	runner.close = () => pool.close();
+	// The disposer's answer, and the one a row should reach for: `close()` takes
+	// the workers away from whatever they are holding, `drain()` gives that work
+	// a bounded chance to finish first.
+	runner.drain = (ms?: number) => pool.drain(ms);
 	return runner;
 };

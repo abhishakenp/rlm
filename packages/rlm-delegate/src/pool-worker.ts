@@ -75,6 +75,26 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { PoolReply, PoolRequest, WorkerBound } from "./pool.ts";
+import type { AgentSessionRuntime, SessionManager } from "../../rlm-agent/src/index.ts";
+
+/**
+ * What this file actually needs from the agent, and nothing else.
+ *
+ * It used to say `Runner` — `(task, graph) => Promise<string>` from
+ * `scheduler.ts` — while `runOne` called `agent.createRuntime(...)`, which no
+ * `Runner` has. The two were never the same thing and the type said they were,
+ * so `index.ts` handed the mode the `rlmAgent` *factory* from `agent.ts` and
+ * every pooled task would have died on `agent.createRuntime is not a function`
+ * with the compiler perfectly happy about it.
+ *
+ * Structural rather than the whole `RlmAgentService` because that is the honest
+ * requirement: the worker needs one method. The two types it is written in
+ * terms of come from `@rlm/agent` itself, so there is one definition of what a
+ * runtime is and this file cannot drift from it.
+ */
+export interface PoolWorkerAgent {
+	createRuntime(options: { sessionManager?: SessionManager }): Promise<AgentSessionRuntime>;
+}
 
 /** Names this invocation as a worker rather than a question. */
 export const POOL_WORKER_FLAG = "--pool-worker";
@@ -86,7 +106,7 @@ export const POOL_WORKER_FLAG = "--pool-worker";
  */
 const DEFAULT_SLOTS = 8;
 
-interface Live {
+export interface Live {
 	/** Ask the agent to stop, in-process, without touching the other tasks. */
 	cancel(): Promise<void>;
 	/** Let go of everything this task holds. */
@@ -108,8 +128,10 @@ interface Live {
  * Here the id names a file. If the file is there the session is resumed with
  * everything attempt one left in it; if it is not, a session is started under
  * that name so attempt two can find it.
+ *
+ * Exported so the in-process worker can reuse the same session resolution.
  */
-const sessionManagerFor = async (cwd: string, sessionId: string) => {
+export const sessionManagerFor = async (cwd: string, sessionId: string) => {
 	const { SessionManager, getDefaultSessionDir } = await import("../../coding-agent/src/core/session-manager.js");
 	const dir = getDefaultSessionDir(cwd);
 	const file = join(dir, `${sessionId}.jsonl`);
@@ -133,16 +155,19 @@ const sessionManagerFor = async (cwd: string, sessionId: string) => {
  * The `ok` it returns is print mode's exit code reduced to a boolean, computed
  * from the same three things: the terminal message's stop reason, a failed
  * compaction, and the autonomous quality gate.
+ *
+ * Exported so the in-process worker can reuse the same task execution logic
+ * without spawning a child process.
  */
-const runOne = async (
+export const runOne = async (
 	ctx: any,
 	request: PoolRequest,
 	cwd: string,
 	register: (live: Live) => void,
 	onChunk: (text: string) => void,
+	agent: PoolWorkerAgent,
 ): Promise<{ ok: boolean; text: string; error?: string }> => {
-	const agent = ctx.get("rlmAgent") as { createRuntime: (o: Record<string, unknown>) => Promise<any> } | undefined;
-	if (!agent?.createRuntime) throw new Error("rlm-pool-worker: rlmAgent.createRuntime is not available");
+
 
 	const [
 		{ InProcessAgentConnection },
@@ -241,10 +266,21 @@ const runOne = async (
 };
 
 export interface PoolWorkerOptions {
+	agent: PoolWorkerAgent;
 	/** How many tasks may be in flight here at once. */
 	slots?: number;
 	/** Where tasks run. Defaults to where the worker was started. */
 	cwd?: string;
+	/**
+	 * How often to say "still here", in milliseconds. `0` switches it off.
+	 *
+	 * The parent's only other evidence is the pid, and a pid is not a worker: a
+	 * process wedged in a native call or spinning inside a tool that never
+	 * returns holds its tasks and answers nothing. This is a message on a channel
+	 * the event loop has to reach to send, so it stops arriving exactly when the
+	 * loop stops turning.
+	 */
+	heartbeatMs?: number;
 }
 
 /**
@@ -254,7 +290,7 @@ export interface PoolWorkerOptions {
  * poll. When the parent disconnects — because it retired this worker, or
  * because it died — the loop ends and the host disposes the composition.
  */
-export const runPoolWorker = async (ctx: any, options: PoolWorkerOptions = {}): Promise<number> => {
+export const runPoolWorker = async (ctx: any, options: PoolWorkerOptions): Promise<number> => {
 	const send = (message: PoolReply) => {
 		try {
 			process.send?.(message);
@@ -267,8 +303,10 @@ export const runPoolWorker = async (ctx: any, options: PoolWorkerOptions = {}): 
 		return 2;
 	}
 
+	const { agent } = options;
 	const cwd = options.cwd ?? process.cwd();
 	const slots = Math.max(1, options.slots ?? DEFAULT_SLOTS);
+	const beatMs = options.heartbeatMs ?? 5_000;
 	const live = new Map<string, Live>();
 	/** The directory tasks are supposed to run in, restored if one moves it. */
 	const home = process.cwd();
@@ -334,7 +372,8 @@ export const runPoolWorker = async (ctx: any, options: PoolWorkerOptions = {}): 
 				if (watched === handle.sessionId) applyAttention();
 			},
 			(text) => send({ type: "chunk", id: request.id, text }),
-		).then(
+			agent)
+			.then(
 			(result) => settle(request.id, result),
 			(error: any) =>
 				settle(request.id, { ok: false, text: "", error: String(error?.stack ?? error?.message ?? error) }),
@@ -380,8 +419,20 @@ export const runPoolWorker = async (ctx: any, options: PoolWorkerOptions = {}): 
 		});
 	}
 
+	// Unref'd: the IPC channel is what keeps this process alive, and a timer that
+	// held the loop open would turn a retired worker into one that will not go.
+	const beat =
+		beatMs > 0
+			? setInterval(() => send({ type: "heartbeat", id: String(process.pid), ts: Date.now() }), beatMs)
+			: undefined;
+	beat?.unref?.();
+
 	send({ type: "ready", pid: process.pid, slots });
-	return await finished;
+	try {
+		return await finished;
+	} finally {
+		if (beat) clearInterval(beat);
+	}
 };
 
 export default runPoolWorker;

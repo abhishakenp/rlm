@@ -463,7 +463,26 @@ export const capacity = (options: CapacityOptions = {}): CapacityVerdict => {
 	// asked, fall back to one per core: not because the work is CPU-bound (it is
 	// not), but because it is a number of the right order that nobody has to
 	// maintain, and the budget still has to agree with it.
-	const ceiling = Math.max(1, options.ceiling ?? providerCeiling() ?? Math.max(1, cpus()?.length ?? 2));
+	// ...but bounded locally regardless of what it says.
+	//
+	// omniroute's `maxConcurrent` is a count of concurrent HTTP requests a
+	// router will carry. Read here it becomes a count of agent *subprocesses*,
+	// and those are not the same unit by three orders of magnitude. It answered
+	// 64, this became a fleet of 64, and the honest note two paragraphs up —
+	// "it does not bind here, and the memory budget below is what actually
+	// decides" — turned out to be the bug rather than the reassurance: memory
+	// was the only thing standing between the user and an unusable laptop, and
+	// it did not stand there for long.
+	//
+	// The memory budget stays; it is a good check. This is the second one, so
+	// that a router misconfigured, upgraded, or simply generous cannot size
+	// this machine's process table on its own.
+	const LOCAL_MAX = Math.max(
+		1,
+		Number(process.env.RLM_MAX_FLEET) || Math.max(2, Math.min(8, Math.floor((cpus()?.length ?? 4) / 2))),
+	);
+	const claimed = options.ceiling ?? providerCeiling() ?? Math.max(1, cpus()?.length ?? 2);
+	const ceiling = Math.max(1, Math.min(claimed, LOCAL_MAX));
 	// 30%, his number. Under it nothing new starts at all.
 	const floor = options.floor ?? 0.3;
 	const measured = readings();
