@@ -36,6 +36,10 @@ export interface ResourceLoader {
 	getAppendSystemPrompt(): string[];
 	extendResources(paths: ResourceExtensionPaths): void;
 	reload(): Promise<void>;
+	/** Re-read prompt inputs only (no extensions). Safe while a run is in flight. */
+	reloadPromptInputs?(): Promise<void>;
+	/** True when context files or SYSTEM.md / APPEND_SYSTEM.md on disk differ from what was read. */
+	promptFilesChanged?(): boolean;
 }
 
 function resolvePromptInput(input: string | undefined, description: string): string | undefined {
@@ -334,16 +338,74 @@ export class DefaultResourceLoader implements ResourceLoader {
 	}
 
 	async reload(): Promise<void> {
-		await this.settingsManager.reload();
+		await this.reloadResources(true);
+	}
+
+	/**
+	 * Re-read only what the system prompt is built from: skills, prompt
+	 * templates, context files and SYSTEM.md / APPEND_SYSTEM.md.
+	 *
+	 * `reload()` also re-imports extensions, and that is only safe while the
+	 * session is idle — an extension swapped under a run in flight loses its
+	 * handlers halfway through a turn. This half is safe between two model
+	 * requests of the same run, which is what lets a skill or AGENTS.md edited
+	 * while the agent works reach its very next request instead of the next run.
+	 * Paths contributed by extensions are kept; they are not re-resolved here.
+	 */
+	async reloadPromptInputs(): Promise<void> {
+		await this.reloadResources(false);
+	}
+
+	/**
+	 * Whether the context files or SYSTEM.md / APPEND_SYSTEM.md on disk differ
+	 * from what was last read.
+	 *
+	 * Nothing watches these — they live in the project and its parents, not in
+	 * a resource directory — so the session asks before each model request.
+	 * A handful of small reads against a network round trip. Sources behind an
+	 * override are not checked: the override owns what they resolve to.
+	 */
+	promptFilesChanged(): boolean {
+		if (!this.noContextFiles && !this.agentsFilesOverride) {
+			const onDisk = loadProjectContextFiles({ cwd: this.cwd, agentDir: this.agentDir });
+			if (
+				onDisk.length !== this.agentsFiles.length ||
+				onDisk.some((f, i) => f.path !== this.agentsFiles[i]?.path || f.content !== this.agentsFiles[i]?.content)
+			) {
+				return true;
+			}
+		}
+		if (!this.systemPromptOverride) {
+			const onDisk = resolvePromptInput(this.systemPromptSource ?? this.discoverSystemPromptFile(), "system prompt");
+			if (onDisk !== this.systemPrompt) return true;
+		}
+		if (!this.appendSystemPromptOverride) {
+			const sources =
+				this.appendSystemPromptSource ??
+				(this.discoverAppendSystemPromptFile() ? [this.discoverAppendSystemPromptFile()!] : []);
+			const onDisk = sources
+				.map((s) => resolvePromptInput(s, "append system prompt"))
+				.filter((s): s is string => s !== undefined);
+			if (onDisk.length !== this.appendSystemPrompt.length || onDisk.some((s, i) => s !== this.appendSystemPrompt[i])) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private async reloadResources(includeExtensions: boolean): Promise<void> {
+		if (includeExtensions) await this.settingsManager.reload();
 		const resolvedPaths = await this.packageManager.resolve();
 		const cliExtensionPaths = await this.packageManager.resolveExtensionSources(this.additionalExtensionPaths, {
 			temporary: true,
 		});
 		const metadataByPath = new Map<string, PathMetadata>();
 
-		this.extensionSkillSourceInfos = new Map();
-		this.extensionPromptSourceInfos = new Map();
-		this.extensionThemeSourceInfos = new Map();
+		if (includeExtensions) {
+			this.extensionSkillSourceInfos = new Map();
+			this.extensionPromptSourceInfos = new Map();
+			this.extensionThemeSourceInfos = new Map();
+		}
 
 		// Helper to extract enabled paths and store metadata
 		const getEnabledResources = (
@@ -406,37 +468,42 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const cliEnabledPrompts = getEnabledPaths(cliExtensionPaths.prompts);
 		const cliEnabledThemes = getEnabledPaths(cliExtensionPaths.themes);
 
-		const extensionPaths = this.noExtensions
-			? cliEnabledExtensions
-			: this.mergePaths(cliEnabledExtensions, enabledExtensions);
+		if (includeExtensions) {
+			const extensionPaths = this.noExtensions
+				? cliEnabledExtensions
+				: this.mergePaths(cliEnabledExtensions, enabledExtensions);
 
-		const extensionsResult = await loadExtensions(extensionPaths, this.cwd, this.eventBus);
-		// Set before inline factories run so a factory can see which file-based
-		// extensions actually loaded this cycle (e.g. the built-in Herdr reporter
-		// defers to Herdr's own file-based integration only when it is active).
-		this.loadedExtensionPaths = extensionPaths;
-		const inlineExtensions = await this.loadExtensionFactories(extensionsResult.runtime);
-		extensionsResult.extensions.push(...inlineExtensions.extensions);
-		extensionsResult.errors.push(...inlineExtensions.errors);
+			const extensionsResult = await loadExtensions(extensionPaths, this.cwd, this.eventBus);
+			// Set before inline factories run so a factory can see which file-based
+			// extensions actually loaded this cycle (e.g. the built-in Herdr reporter
+			// defers to Herdr's own file-based integration only when it is active).
+			this.loadedExtensionPaths = extensionPaths;
+			const inlineExtensions = await this.loadExtensionFactories(extensionsResult.runtime);
+			extensionsResult.extensions.push(...inlineExtensions.extensions);
+			extensionsResult.errors.push(...inlineExtensions.errors);
 
-		// Detect extension conflicts (tools, commands, flags with same names from different extensions)
-		// Keep all extensions loaded. Conflicts are reported as diagnostics, and precedence is handled by load order.
-		const conflicts = this.detectExtensionConflicts(extensionsResult.extensions);
-		for (const conflict of conflicts) {
-			extensionsResult.errors.push({ path: conflict.path, error: conflict.message });
-		}
-
-		for (const p of this.additionalExtensionPaths) {
-			if (isLocalPath(p) && !existsSync(p)) {
-				extensionsResult.errors.push({ path: p, error: `Extension path does not exist: ${p}` });
+			// Detect extension conflicts (tools, commands, flags with same names from different extensions)
+			// Keep all extensions loaded. Conflicts are reported as diagnostics, and precedence is handled by load order.
+			const conflicts = this.detectExtensionConflicts(extensionsResult.extensions);
+			for (const conflict of conflicts) {
+				extensionsResult.errors.push({ path: conflict.path, error: conflict.message });
 			}
-		}
-		this.extensionsResult = this.extensionsOverride ? this.extensionsOverride(extensionsResult) : extensionsResult;
-		this.applyExtensionSourceInfo(this.extensionsResult.extensions, metadataByPath);
 
-		const skillPaths = this.noSkills
+			for (const p of this.additionalExtensionPaths) {
+				if (isLocalPath(p) && !existsSync(p)) {
+					extensionsResult.errors.push({ path: p, error: `Extension path does not exist: ${p}` });
+				}
+			}
+			this.extensionsResult = this.extensionsOverride ? this.extensionsOverride(extensionsResult) : extensionsResult;
+			this.applyExtensionSourceInfo(this.extensionsResult.extensions, metadataByPath);
+		}
+
+		let skillPaths = this.noSkills
 			? this.mergePaths(cliEnabledSkills, this.additionalSkillPaths)
 			: this.mergePaths([...cliEnabledSkills, ...this.additionalSkillPaths], enabledSkills);
+		// A full reload drops extension-contributed paths and the session adds
+		// them back afterwards; the prompt-only reload has no such second pass.
+		if (!includeExtensions) skillPaths = this.mergePaths(skillPaths, [...this.extensionSkillSourceInfos.keys()]);
 
 		this.lastSkillPaths = skillPaths;
 		this.updateSkillsFromPaths(skillPaths, metadataByPath);
@@ -448,9 +515,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 			}
 		}
 
-		const promptPaths = this.noPromptTemplates
+		let promptPaths = this.noPromptTemplates
 			? this.mergePaths(cliEnabledPrompts, this.additionalPromptTemplatePaths)
 			: this.mergePaths([...cliEnabledPrompts, ...enabledPrompts], this.additionalPromptTemplatePaths);
+		if (!includeExtensions) promptPaths = this.mergePaths(promptPaths, [...this.extensionPromptSourceInfos.keys()]);
 
 		this.lastPromptPaths = promptPaths;
 		this.updatePromptsFromPaths(promptPaths, metadataByPath);
@@ -460,15 +528,17 @@ export class DefaultResourceLoader implements ResourceLoader {
 			}
 		}
 
-		const themePaths = this.noThemes
-			? this.mergePaths(cliEnabledThemes, this.additionalThemePaths)
-			: this.mergePaths([...cliEnabledThemes, ...enabledThemes], this.additionalThemePaths);
+		if (includeExtensions) {
+			const themePaths = this.noThemes
+				? this.mergePaths(cliEnabledThemes, this.additionalThemePaths)
+				: this.mergePaths([...cliEnabledThemes, ...enabledThemes], this.additionalThemePaths);
 
-		this.lastThemePaths = themePaths;
-		this.updateThemesFromPaths(themePaths, metadataByPath);
-		for (const p of this.additionalThemePaths) {
-			if (!existsSync(p) && !this.themeDiagnostics.some((d) => d.path === p)) {
-				this.themeDiagnostics.push({ type: "error", message: "Theme path does not exist", path: p });
+			this.lastThemePaths = themePaths;
+			this.updateThemesFromPaths(themePaths, metadataByPath);
+			for (const p of this.additionalThemePaths) {
+				if (!existsSync(p) && !this.themeDiagnostics.some((d) => d.path === p)) {
+					this.themeDiagnostics.push({ type: "error", message: "Theme path does not exist", path: p });
+				}
 			}
 		}
 

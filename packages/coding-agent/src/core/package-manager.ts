@@ -24,8 +24,8 @@ function getEnv(): NodeJS.ProcessEnv {
 
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Readable } from "node:stream";
-import { globSync } from "glob";
 import ignore from "ignore";
+import { createRequire } from "node:module";
 import { minimatch } from "minimatch";
 import { CONFIG_DIR_NAME, getBundledSkillsDir } from "../config.js";
 import { shouldUseWindowsShell } from "../utils/child-process.js";
@@ -34,6 +34,11 @@ import { canonicalizePath, isLocalPath } from "../utils/paths.js";
 import type { ResourceDiagnostic } from "./diagnostics.js";
 import { isStdoutTakenOver } from "./output-guard.js";
 import type { PackageSource, SettingsManager } from "./settings-manager.js";
+
+// `glob` (with its own minimatch, path-scurry, lru-cache) is needed only for
+// package manifests that list glob patterns; load it then, not at startup.
+const globSync: typeof import("glob").globSync = (...args) =>
+	(createRequire(import.meta.url)("glob") as typeof import("glob")).globSync(...args);
 
 const NETWORK_TIMEOUT_MS = 10000;
 const UPDATE_CHECK_CONCURRENCY = 4;

@@ -102,6 +102,32 @@ export function resolveConfigValueUncached(config: string): string | undefined {
 	return resolveEnvOrLiteral(config);
 }
 
+const commandResultsThisTask = new Map<string, string | undefined>();
+
+/**
+ * Like {@link resolveConfigValueUncached}, but a `!command` runs at most once
+ * per synchronous task: the result is dropped at the next microtask.
+ *
+ * For fingerprints that answer "has this credential changed since it was
+ * rejected?". One `getAvailable()` asks that once per model in a single pass —
+ * a stale Anthropic key ran its command 14 times, ~470ms blocking the UI
+ * thread. A re-login is still seen by the very next check.
+ */
+export function resolveConfigValueThisTask(config: string): string | undefined {
+	if (!config.startsWith("!")) {
+		return resolveEnvOrLiteral(config);
+	}
+	if (commandResultsThisTask.has(config)) {
+		return commandResultsThisTask.get(config);
+	}
+	const value = executeCommandUncached(config);
+	if (commandResultsThisTask.size === 0) {
+		queueMicrotask(() => commandResultsThisTask.clear());
+	}
+	commandResultsThisTask.set(config, value);
+	return value;
+}
+
 export function resolveConfigValueOrThrow(config: string, description: string): string {
 	const resolvedValue = resolveConfigValueUncached(config);
 	if (resolvedValue !== undefined) {

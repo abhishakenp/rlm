@@ -40,6 +40,7 @@ import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.js";
 import {
 	clearConfigValueCache,
 	resolveConfigValueOrThrow,
+	resolveConfigValueThisTask,
 	resolveConfigValueUncached,
 	resolveHeadersOrThrow,
 } from "./resolve-config-value.js";
@@ -1087,7 +1088,7 @@ export class ModelRegistry {
 				valueMaterial:
 					options?.resolvedApiKey === undefined ? undefined : `${providerApiKey}\0${options.resolvedApiKey}`,
 				resolveValueMaterial: () => {
-					const resolved = resolveConfigValueUncached(providerApiKey);
+					const resolved = resolveConfigValueThisTask(providerApiKey);
 					return resolved === undefined ? undefined : `${providerApiKey}\0${resolved}`;
 				},
 			});

@@ -1,6 +1,6 @@
 import { matchesSavedSessionSelector, normalizeSessionId } from "./session-id.js";
 import type { SessionInfo } from "./session-manager.js";
-import { SessionManager } from "./session-manager.js";
+import { findSessionFileByExactId, getDefaultSessionDir, SessionManager } from "./session-manager.js";
 
 export type ResolvedSession =
 	| { type: "path"; path: string }
@@ -49,6 +49,14 @@ export function looksLikeSessionPath(selector: string): boolean {
 export async function resolveSessionPath(selector: string, cwd: string, sessionDir?: string): Promise<ResolvedSession> {
 	if (looksLikeSessionPath(selector)) {
 		return { type: "path", path: selector };
+	}
+
+	// A full id names its file: read one header instead of parsing every session.
+	const byFileName = findSessionFileByExactId(sessionDir ?? getDefaultSessionDir(cwd), selector, cwd);
+	if (byFileName) {
+		return byFileName.matchesCwd
+			? { type: "local", path: byFileName.path }
+			: { type: "global", path: byFileName.path, cwd: byFileName.cwd };
 	}
 
 	const localSessions = await SessionManager.list(cwd, sessionDir);

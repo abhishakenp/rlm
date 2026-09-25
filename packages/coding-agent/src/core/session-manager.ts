@@ -17,7 +17,7 @@ import {
 } from "fs";
 import { readdir, readFile, stat } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
-import { v7 as uuidv7 } from "uuid";
+import { uuidv7 } from "../utils/uuidv7.js";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.js";
 import { readFirstLineSync, readLinesAsBuffers } from "../utils/file-lines.js";
 import { captureGitContext, type GitContext, gitContextsEqual } from "../utils/git.js";
@@ -28,7 +28,13 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.js";
-import { cloneUsage } from "./usage.js";
+import {
+	addAssistantUsage,
+	cloneUsage,
+	emptyUsage,
+	type SessionUsageSummary,
+	sessionUsageSummaryFrom,
+} from "./usage.js";
 
 export const CURRENT_SESSION_VERSION = 3;
 const SESSION_LIST_SEARCH_TEXT_MAX_CHARS = 64 * 1024;
@@ -173,6 +179,16 @@ export type SessionStateStatus = "active" | "archived" | "crash";
 
 export interface SessionState {
 	status: SessionStateStatus;
+	/**
+	 * Why the session reached a non-"active" status. Only a terminal record
+	 * carries one, and it exists because the status alone cannot distinguish the
+	 * ways a run stops being live: a deliberate archive, a provider request that
+	 * threw after the last toolResult, and a process that died mid-turn all used
+	 * to leave a branch whose final entry said nothing at all about the ending.
+	 * Reconstructing that from the tail of the branch is guesswork, so the writer
+	 * states it instead.
+	 */
+	reason?: string;
 }
 
 export interface SessionStateEntry extends SessionEntryBase {
@@ -180,7 +196,7 @@ export interface SessionStateEntry extends SessionEntryBase {
 	state: SessionState;
 }
 
-export type AgentTaskState = "needs_input" | "completed";
+export type AgentTaskState = "needs_input" | "completed" | "error";
 
 export interface AgentStatus {
 	summary: string;
@@ -241,12 +257,19 @@ export interface SessionContext {
 	model: { provider: string; modelId: string } | null;
 }
 
+export interface SessionModelRef {
+	provider: string;
+	modelId: string;
+}
+
 export interface SessionInfo {
 	path: string;
 	id: string;
 	cwd: string;
 	name?: string;
 	state?: SessionState;
+	/** Last model the session ran with (prime-agent v0.9.6 shape; rlm's listing leaves it unset). */
+	model?: SessionModelRef;
 	parentSessionPath?: string;
 	rlmDepth: number;
 	created: Date;
@@ -255,6 +278,8 @@ export interface SessionInfo {
 	firstMessage: string;
 	allMessagesText: string;
 	agentStatus?: AgentStatus;
+	/** Aggregate usage (prime-agent v0.9.6 shape; rlm's listing leaves it unset). */
+	usage?: SessionUsageSummary;
 }
 
 export type ReadonlySessionManager = Pick<
@@ -736,6 +761,34 @@ function sessionInfoMatchesCwd(session: SessionInfo, cwd: string): boolean {
 	return !!session.cwd && normalizeCwd(session.cwd) === normalizeCwd(cwd);
 }
 
+/**
+ * The saved session named `<id>.jsonl` in `sessionDir`, found from its header
+ * alone, plus whether it belongs to `cwd`.
+ *
+ * `--resume <full id>` used to list every session to match one id, which
+ * parses each file whole: 6,300 files / 525 MB here, ~40s before the chat
+ * appeared. Undefined whenever the file is missing or its header disagrees,
+ * so the caller falls back to that scan.
+ */
+export function findSessionFileByExactId(
+	sessionDir: string,
+	id: string,
+	cwd: string,
+): { path: string; cwd: string; matchesCwd: boolean } | undefined {
+	const path = join(sessionDir, `${id}.jsonl`);
+	if (!existsSync(path)) return undefined;
+	try {
+		const header = readSessionHeader(path);
+		if (header?.type !== "session" || typeof header.id !== "string" || typeof header.cwd !== "string") {
+			return undefined;
+		}
+		if (header.id.replaceAll("-", "").toLowerCase() !== id.replaceAll("-", "").toLowerCase()) return undefined;
+		return { path, cwd: header.cwd, matchesCwd: !!header.cwd && normalizeCwd(header.cwd) === normalizeCwd(cwd) };
+	} catch {
+		return undefined;
+	}
+}
+
 function sessionHeaderMatchesCwd(header: Partial<SessionHeader> | undefined, cwd: string): boolean {
 	return (
 		header?.type === "session" &&
@@ -953,6 +1006,10 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 		let state: SessionState | undefined;
 		let agentStatus: AgentStatus | undefined;
 		let lastActivityTime: number | undefined;
+		// The agents view shows Model, Tokens and Cost for saved rows too, and a
+		// saved session is the only place those still exist after a restart.
+		let model: SessionModelRef | undefined;
+		const usage = emptyUsage();
 
 		for await (const lineBuffer of readLinesAsBuffers(filePath)) {
 			const line = lineBuffer.toString("utf8");
@@ -987,6 +1044,12 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 				const infoEntry = entry as SessionInfoEntry;
 				name = infoEntry.name?.trim() || undefined;
 			}
+			if (entry.type === "model_change") {
+				const change = entry as { provider?: unknown; modelId?: unknown };
+				if (typeof change.provider === "string" && typeof change.modelId === "string") {
+					model = { provider: change.provider, modelId: change.modelId };
+				}
+			}
 			if (entry.type === "session_state") {
 				const stateEntry = entry as SessionStateEntry;
 				const status = normalizeSessionStateStatus(stateEntry.state?.status);
@@ -1013,6 +1076,13 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 			messageCount++;
 
 			const message = (entry as SessionMessageEntry).message;
+			if (message?.role === "assistant" && (message as { usage?: unknown }).usage) {
+				try {
+					addAssistantUsage(usage, (message as { usage: Parameters<typeof addAssistantUsage>[1] }).usage);
+				} catch {
+					// A malformed usage record must not hide the session from the list.
+				}
+			}
 			if (!isMessageWithContent(message)) continue;
 			if (message.role !== "user" && message.role !== "assistant") continue;
 
@@ -1045,6 +1115,8 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 			firstMessage: firstMessage || "(no messages)",
 			allMessagesText,
 			agentStatus,
+			...(model ? { model } : {}),
+			...(sessionUsageSummaryFrom(usage) ? { usage: sessionUsageSummaryFrom(usage) } : {}),
 		};
 	} catch {
 		return null;
@@ -1176,6 +1248,31 @@ export class SessionManager {
 		}
 	}
 
+	/**
+	 * A subagent in its parent's directory inherits the parent's git context.
+	 *
+	 * `captureGitContext` is three synchronous `git` spawns. Paid once per
+	 * top-level session that is nothing; paid by every subagent it held the
+	 * event loop for ~0.4 s each, measured — 98.9 s of frozen process while
+	 * 100 recursive subagents were being created. A child created seconds after
+	 * its parent in the same cwd has the parent's repo, branch and commit.
+	 */
+	private _gitContextForNewSession(
+		parentSession: string | undefined,
+		parentHeader: Partial<SessionHeader> | undefined,
+	): GitContext | undefined {
+		if (parentSession) {
+			let header = parentHeader;
+			if (!header) {
+				try {
+					header = readSessionHeader(parentSession);
+				} catch {}
+			}
+			if (header?.cwd && resolve(header.cwd) === resolve(this.cwd)) return header.git;
+		}
+		return captureGitContext(this.cwd) ?? undefined;
+	}
+
 	newSession(options?: NewSessionOptions): string | undefined {
 		let sessionId = options?.id ?? createSessionId();
 		let sessionFile: string | undefined;
@@ -1203,7 +1300,7 @@ export class SessionManager {
 
 		this.sessionId = sessionId;
 		const timestamp = new Date().toISOString();
-		const git = this.persist ? (captureGitContext(this.cwd) ?? undefined) : undefined;
+		const git = this.persist ? this._gitContextForNewSession(options?.parentSession, parentHeader) : undefined;
 		const rlmDepth = hasExplicitRlmDepth
 			? options?.rlmDepth
 			: options?.parentSession
@@ -1525,10 +1622,21 @@ export class SessionManager {
 			id: generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
-			state: { status: state.status },
+			state: state.reason ? { status: state.status, reason: state.reason } : { status: state.status },
 		};
 		this._appendEntry(entry);
 		return entry.id;
+	}
+
+	/**
+	 * True when the branch already ends in a record that explains how the
+	 * session stopped. Last-rites writers consult this so a session that was
+	 * archived, or that already crashed once, is not annotated twice by a later
+	 * process-level hook firing on the way down.
+	 */
+	hasTerminalSessionState(): boolean {
+		const status = this.getSessionState()?.status;
+		return status === "archived" || status === "crash";
 	}
 
 	getSessionName(): string | undefined {

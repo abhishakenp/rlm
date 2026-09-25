@@ -64,6 +64,8 @@ export interface AgentSessionCreationOptions {
 	rlmSessionDir?: string;
 	rlmParentNodeId?: string;
 	rlmParentAgent?: string;
+	/** The spawning session, for the in-process agent_message/agent_observe family. */
+	rlmParentSession?: import("./agent-session.js").AgentSession;
 	subagentRuntimeHost?: SubagentRuntimeHost;
 	rlmHeartbeatController?: AgentRlmHeartbeatController;
 	prewarmCodeKernel?: boolean;
@@ -71,6 +73,12 @@ export interface AgentSessionCreationOptions {
 	serializedRefine?: boolean;
 	executionMode?: AgentExecutionMode;
 	telemetryDisabled?: true;
+	/**
+	 * Task context snapshot passed explicitly from the parent (rlm-sdk),
+	 * replacing the `globalThis.__rlmTaskContextSnapshot` global. Unsafe for
+	 * concurrent in-process workers — concurrent tasks overwrite each other.
+	 */
+	rlmTaskContextSnapshot?: Record<string, any> | null;
 	initialGoal?: { objective: string; tokenBudget?: number };
 }
 
@@ -89,6 +97,28 @@ export interface AgentSessionServices {
 	resourceLoader: ResourceLoader;
 	mcpManager: McpManager;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
+}
+
+/**
+ * An array that is always `[...head, ...tail]` as they are *now*. `tail` may
+ * itself be a live proxy (rlm's row-contributed factories); reading through
+ * keeps later additions visible to whoever holds this array.
+ */
+export function liveConcat<T>(head: readonly T[], tail: readonly T[]): T[] {
+	const current = (): T[] => [...head, ...tail];
+	return new Proxy([] as T[], {
+		get: (_target, prop) => {
+			const live = current();
+			const value = Reflect.get(live, prop, live);
+			return typeof value === "function" ? value.bind(live) : value;
+		},
+		has: (_target, prop) => Reflect.has(current(), prop),
+		ownKeys: () => Reflect.ownKeys(current()),
+		getOwnPropertyDescriptor: (_target, prop) => {
+			const d = Reflect.getOwnPropertyDescriptor(current(), prop);
+			return d && { ...d, configurable: true };
+		},
+	});
 }
 
 function applyExtensionFlagValues(
@@ -171,7 +201,11 @@ export async function createAgentSessionServices(
 		: [createHerdrAgentStateExtension(() => resourceLoader.getLoadedExtensionPaths())];
 	const resourceLoader: DefaultResourceLoader = new DefaultResourceLoader({
 		...(options.resourceLoaderOptions ?? {}),
-		extensionFactories: [...builtinExtensionFactories, ...userExtensionFactories],
+		// A live view, not a copy: @rlm/agent hands in a proxy over the factories
+		// rows contribute, and a row mounted after this session was built (a
+		// cordis.yml edit, a hot swap) must reach it on the next reload. Spreading
+		// it here froze the set at session creation.
+		extensionFactories: liveConcat(builtinExtensionFactories, userExtensionFactories),
 		cwd,
 		agentDir,
 		settingsManager,
@@ -254,6 +288,7 @@ export async function createAgentSessionFromServices(
 		rlmSessionDir: options.rlmSessionDir,
 		rlmParentNodeId: options.rlmParentNodeId,
 		rlmParentAgent: options.rlmParentAgent,
+		rlmParentSession: options.rlmParentSession,
 		subagentRuntimeHost: options.subagentRuntimeHost,
 		rlmHeartbeatController: options.rlmHeartbeatController,
 		sessionStartEvent: options.sessionStartEvent,

@@ -4,6 +4,7 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
+import { DEFAULT_OUTAGE_MAX_BACKOFF_MS, DEFAULT_OUTAGE_PATIENCE_MS } from "./endpoint-outage.js";
 
 const RECENT_MODELS_LIMIT = 20;
 export const DEFAULT_IDLE_EVICTION_MINUTES = 90;
@@ -37,6 +38,8 @@ export interface RetrySettings {
 	enabled?: boolean; // default: true
 	maxRetries?: number; // default: 3
 	baseDelayMs?: number; // default: 2000 (exponential backoff: 2s, 4s, 8s)
+	outagePatienceMs?: number; // default: 600000 - keep retrying an unreachable endpoint this long (ignores maxRetries)
+	outageMaxBackoffMs?: number; // default: 30000 - ceiling for one delay while the endpoint is unreachable
 	provider?: ProviderRetrySettings;
 }
 
@@ -921,11 +924,19 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getRetrySettings(): { enabled: boolean; maxRetries: number; baseDelayMs: number } {
+	getRetrySettings(): {
+		enabled: boolean;
+		maxRetries: number;
+		baseDelayMs: number;
+		outagePatienceMs: number;
+		outageMaxBackoffMs: number;
+	} {
 		return {
 			enabled: this.getRetryEnabled(),
 			maxRetries: this.settings.retry?.maxRetries ?? 3,
 			baseDelayMs: this.settings.retry?.baseDelayMs ?? 2000,
+			outagePatienceMs: this.settings.retry?.outagePatienceMs ?? DEFAULT_OUTAGE_PATIENCE_MS,
+			outageMaxBackoffMs: this.settings.retry?.outageMaxBackoffMs ?? DEFAULT_OUTAGE_MAX_BACKOFF_MS,
 		};
 	}
 

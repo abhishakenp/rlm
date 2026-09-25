@@ -205,6 +205,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			modelFallbackMessage = formatNoModelsAvailableMessage();
 		} else if (modelFallbackMessage) {
 			modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
+		} else if (result.fallbackMessage) {
+			modelFallbackMessage = result.fallbackMessage;
 		}
 	}
 
@@ -376,11 +378,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		rlmSessionDir: options.rlmSessionDir,
 		rlmParentNodeId: options.rlmParentNodeId,
 		rlmParentAgent: options.rlmParentAgent,
+		rlmParentSession: options.rlmParentSession,
 		subagentRuntimeHost: options.subagentRuntimeHost,
 		sessionStartEvent: options.sessionStartEvent,
 		prewarmCodeKernel: options.prewarmCodeKernel,
 		autonomous: options.autonomous,
 		serializedRefine: options.serializedRefine,
+		rlmTaskContextSnapshot: options.rlmTaskContextSnapshot,
 		initialGoal: options.initialGoal,
 	});
 	const extensionsResult = resourceLoader.getExtensions();

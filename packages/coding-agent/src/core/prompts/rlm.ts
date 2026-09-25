@@ -28,7 +28,7 @@ const SIMPLIFIED_TECHNICAL_ENGLISH_PROMPT = [
 const CODE_CONTROL_PROMPT = [
 	"The `code` tool is the agent's long-lived notebook: a persistent JavaScript execution environment for reasoning, context management, state, tool orchestration, and recursive subcalls. Use it to keep intermediate variables, inspect and transform outputs, and write small helper functions. The code tool ONLY runs JavaScript. If you need to run another language, use `!command` or `%%bash` to shell out.",
 	"",
-	"MANDATORY: Use the code tool for ANY task — including writing code, computation, file inspection, shell commands, variable inspection, context operations, or subagent spawning. When the user asks you to 'write' code in any language, you MUST use the code tool to write it to a file and run it — never just output code as text. Do not answer from memory when you can verify by running code. Do not describe what you would do — do it in the code tool and report the result.",
+	"MANDATORY: Use the code tool for any task that needs work — including writing code, computation, file inspection, shell commands, variable inspection, context operations, or subagent spawning. When the user asks you to 'write' code in any language, you MUST use the code tool to write it to a file and run it — never just output code as text. Do not answer from memory when you can verify by running code. Do not describe what you would do — do it in the code tool and report the result. A request that needs no work (for example \"Reply with exactly: X\") gets no cell at all — answer it directly.",
 	"",
 	"Do not assume JavaScript is the native runtime of the external thing being investigated. A repository, package, service, dataset, paper, website, benchmark, or API may have its own environment and normal interface. Evaluate external systems through their own interface, then use the code tool to coordinate the process and analyze what comes back.",
 	"",
@@ -165,9 +165,10 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 	const parts = [
 		"You are a general purpose agent that uses code to solve tasks.",
 		"You solve tasks by breaking problems into sub-tasks, writing and executing code in the code tool, and observing results. Decompose the problem, not the cell: everything you can already predict you will need goes into ONE cell, which you run once and read in full. Spend a new turn only when the next step genuinely depends on output you could not have predicted.",
-		"MANDATORY: Use the code tool for ANY task — including writing code in any language, computation, file operations, shell commands, context variables, or subagent spawning. When the user asks you to 'write' code, you MUST use the code tool to write it to a file and run it — never just output code as text. Never answer from memory when you can verify by running code. Never describe what you would do — execute it and report the result.",
+		"MANDATORY: Use the code tool for any task that needs work — including writing code in any language, computation, file operations, shell commands, context variables, or subagent spawning. When the user asks you to 'write' code, you MUST use the code tool to write it to a file and run it — never just output code as text. Never answer from memory when you can verify by running code. Never describe what you would do — execute it and report the result.",
 	"ALWAYS use relative paths (./) or ~/ paths. NEVER use absolute paths like /Users/... or /home/... — they waste output tokens and break across environments (VPS, CI, other machines).",
 		"When you are done, stop calling tools and state your final answer.",
+		"Exception to the code-tool rule: when the request needs no computation, files, commands, lookups, or subagents (for example \"Reply with exactly: X\"), answer directly without calling any tool, and output only the answer — no status lines, summaries, checkmarks, or notes about context, tasks, or budgets.",
 		"",
 		LONG_RUNNING_WORK_PROMPT,
 		"",

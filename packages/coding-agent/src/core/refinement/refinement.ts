@@ -369,6 +369,154 @@ function isRefinementResult(data: unknown): data is RefinementResult {
 	return typeof data === "object" && data !== null && "id" in data && "appliedEdits" in data;
 }
 
+// ─── Global-store safeguards ─────────────────────────────────────────────────
+//
+// The global store is loaded into every session's system prompt, so a wrong
+// global entry misleads every future run. On 2026-09-25 one did: a kernel
+// mid-hot-reload raised errors, auto-refine promoted them, and the store told
+// every session "rlm.spawn / context.set / agent_message are not available in
+// the code tool" — false, and enough to stop subagent spawning everywhere.
+
+/**
+ * Failures rlm itself caused — its kernel, its hot reload, its own source
+ * files, or a host API it should have provided. They say nothing durable about
+ * the environment, so they never become global lessons. Returns the matched
+ * cause, or undefined for an ordinary tool error.
+ */
+export function hostCausedFailure(errorText: string, hostGlobals: readonly string[] = []): string | undefined {
+	const text = errorText ?? "";
+	if (/provisioner disposed/i.test(text)) return "the code kernel was disposed by rlm";
+	if (/does not parse|kept running code|HMR|hot[- ]reload/i.test(text)) return "rlm was hot-reloading";
+	if (/(is bound in this kernel|exists in the code tool), but this session does not provide it/.test(text))
+		return "a session capability limit";
+	if (/(Cannot find (module|package)|SyntaxError|Unexpected (token|end of|EOF))[^\n]{0,300}\/proj\/rlm\/(packages|cordis)/i.test(text))
+		return "rlm's own source failed to load";
+	const undefinedName = /ReferenceError: ([A-Za-z_$][\w$]*) is not defined/.exec(text)?.[1];
+	if (undefinedName && hostGlobals.includes(undefinedName)) return `the host global ${undefinedName} was missing`;
+	return undefined;
+}
+
+export interface GlobalStoreLimits {
+	/** Names the code kernel binds; a lesson claiming one is unavailable is rejected. */
+	hostGlobals?: readonly string[];
+	/** Most entries the global store may hold across all kinds. */
+	maxEntries?: number;
+	/** Most characters of entry content the global store may hold. */
+	maxChars?: number;
+}
+
+export const DEFAULT_GLOBAL_MAX_ENTRIES = 30;
+export const DEFAULT_GLOBAL_MAX_CHARS = 24_000;
+
+const UNAVAILABLE_CLAIM =
+	/\b(not available|unavailable|not defined|does not exist|doesn'?t exist|not exposed|ReferenceError|never (use|call|attempt)|cannot (use|call)|only available in)\b/i;
+
+/**
+ * Screen a proposal bound for the GLOBAL store. Returns the edits that may
+ * apply and the ones refused, with a reason each (recorded as unapplied edits
+ * so the refusal shows in the refinement log).
+ */
+export function screenGlobalProposal(
+	proposal: RefinementProposal,
+	state: HarnessState,
+	limits: GlobalStoreLimits = {},
+): { proposal: RefinementProposal; rejected: AppliedRefinementEdit[] } {
+	const maxEntries = limits.maxEntries ?? DEFAULT_GLOBAL_MAX_ENTRIES;
+	const maxChars = limits.maxChars ?? DEFAULT_GLOBAL_MAX_CHARS;
+	const hostGlobals = limits.hostGlobals ?? [];
+	const all = Object.values(state.entries).flatMap((kind) => Object.values(kind ?? {}));
+	let entries = all.length;
+	let chars = all.reduce((n, e) => n + String(e.content ?? "").length, 0);
+	const kept: RefinementEdit[] = [];
+	const rejected: AppliedRefinementEdit[] = [];
+	const refuse = (edit: RefinementEdit, error: string) =>
+		rejected.push({ ...edit, id: edit.id ?? "", applied: false, error });
+	for (const edit of proposal.edits) {
+		if (edit.action === "delete") {
+			kept.push(edit);
+			continue;
+		}
+		const content = `${edit.title ?? ""}\n${edit.content ?? ""}`;
+		if (UNAVAILABLE_CLAIM.test(content)) {
+			// Judge sentence by sentence: "__dirname is not defined (use path.resolve)"
+			// names `path` without claiming it is missing.
+			const sentences = content.split(/(?<=[.!?;])\s+|\n+/);
+			// A mention must look like API use — `rlm.spawn`, `goal(`, `context`
+			// in backticks, or an identifier like agent_message — so ordinary
+			// words ("a vm context", "the goal") are not read as claims.
+			const named = hostGlobals.filter((name) => {
+				const n = name.replace(/[$]/g, "\\$");
+				const mention = new RegExp(
+					`(^|[^\\w$.])${n}\\s*[.(]|\`${n}\`` + (name.includes("_") ? `|(^|[^\\w$.])${n}\\b` : ""),
+				);
+				return sentences.some((s) => UNAVAILABLE_CLAIM.test(s) && mention.test(s));
+			});
+			if (named.length > 0) {
+				refuse(
+					edit,
+					`global lesson claims ${named.join(", ")} unavailable, but the code kernel binds ${named.length > 1 ? "them" : "it"}; ` +
+						"an error calling it is a session or host fault, not a durable fact",
+				);
+				continue;
+			}
+		}
+		const existing = edit.id ? state.entries[edit.kind]?.[edit.id] : undefined;
+		const addedEntries = existing ? 0 : 1;
+		const addedChars = String(edit.content ?? "").length - String(existing?.content ?? "").length;
+		if (entries + addedEntries > maxEntries) {
+			refuse(edit, `global store is full (${entries}/${maxEntries} entries): update or delete an existing entry instead`);
+			continue;
+		}
+		if (chars + addedChars > maxChars) {
+			refuse(edit, `global store content limit reached (${chars}/${maxChars} chars): merge or shorten entries instead`);
+			continue;
+		}
+		entries += addedEntries;
+		chars += addedChars;
+		kept.push(edit);
+	}
+	return { proposal: { ...proposal, edits: kept }, rejected };
+}
+
+/** Every global entry, for auditing: kind, id, title, size, dates. */
+export function listGlobalLessons(harnessStateDir: string = getGlobalHarnessStateDir()) {
+	const state = loadHarnessState(harnessStateDir, "global");
+	return Object.entries(state.entries).flatMap(([kind, records]) =>
+		Object.values(records ?? {}).map((e) => ({
+			kind,
+			id: e.id,
+			title: e.title,
+			chars: String(e.content ?? "").length,
+			created_at: e.created_at,
+			updated_at: e.updated_at,
+			content: e.content,
+		})),
+	);
+}
+
+/** Delete global entries by id (any kind) through the store's own apply path; logged like any refinement. */
+export function removeGlobalLessons(
+	ids: readonly string[],
+	reason: string,
+	harnessStateDir: string = getGlobalHarnessStateDir(),
+): RefinementResult {
+	const state = loadHarnessState(harnessStateDir, "global");
+	const edits: RefinementEdit[] = [];
+	for (const id of ids) {
+		for (const [kind, records] of Object.entries(state.entries)) {
+			if (records?.[id]) edits.push({ action: "delete", kind: kind as RefinementKind, id });
+		}
+	}
+	const result = applyRefinementProposal(
+		state,
+		{ summary: `Remove global lessons: ${ids.join(", ")}`, rationale: reason, expectedOutcome: "entries removed", edits },
+		{ id: generateRefinementId(), scope: "global" },
+	);
+	result.harnessStatePath = saveHarnessState(harnessStateDir, state);
+	appendGlobalRefinement(harnessStateDir, result);
+	return result;
+}
+
 /**
  * Append a global-scope refinement to the cross-session history log so it can be
  * rolled back from any session. Local-scope refinements are recorded only in the

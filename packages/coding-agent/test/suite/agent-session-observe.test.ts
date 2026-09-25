@@ -108,12 +108,12 @@ describe("AgentSession agent observe host requests", () => {
 		}
 	});
 
-	it("is unavailable without a daemon-backed controller", async () => {
+	it("works in-process without a daemon-backed controller", async () => {
+		// rlm runs subagents in-process; observation is served from the in-process
+		// family instead of refusing when no daemon supplied a controller.
 		const harness = await createHarness();
 		try {
-			expect(() => harness.session.handleAgentObserveHostRequest("agent_observe.list")).toThrow(
-				"agent observation is not available",
-			);
+			expect(() => harness.session.handleAgentObserveHostRequest("agent_observe.list")).not.toThrow();
 		} finally {
 			harness.cleanup();
 		}

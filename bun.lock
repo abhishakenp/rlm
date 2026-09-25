@@ -64,6 +64,7 @@
         "@earendil-works/pi-ai": "^0.8.0",
         "@earendil-works/pi-tui": "^0.8.0",
         "@silvia-odwyer/photon-node": "^0.3.4",
+        "acorn": "^8.18.0",
         "chalk": "^5.5.0",
         "cli-highlight": "^2.1.11",
         "diff": "^9.0.0",
@@ -203,6 +204,14 @@
       "version": "0.1.0",
       "dependencies": {
         "@deepseek-ai/cordis": "*",
+      },
+    },
+    "packages/rlm-host": {
+      "name": "@rlm/host",
+      "version": "0.1.0",
+      "dependencies": {
+        "@deepseek-ai/cordis": "*",
+        "@deepseek-ai/cordis-plugin-loader": "*",
       },
     },
     "packages/rlm-integration": {
@@ -636,6 +645,8 @@
 
     "@rlm/hmr": ["@rlm/hmr@workspace:packages/rlm-hmr"],
 
+    "@rlm/host": ["@rlm/host@workspace:packages/rlm-host"],
+
     "@rlm/integration": ["@rlm/integration@workspace:packages/rlm-integration"],
 
     "@rlm/learn": ["@rlm/learn@workspace:packages/rlm-learn"],
@@ -817,6 +828,8 @@
     "@xterm/headless": ["@xterm/headless@6.0.0", "", {}, "sha512-5Yj1QINYCyzrZtf8OFIHi47iQtI+0qYFPHmouEfG8dHNxbZ9Tb9YGSuLcsEwj9Z+OL75GJqPyJbyoFer80a2Hw=="],
 
     "@xterm/xterm": ["@xterm/xterm@6.0.0", "", {}, "sha512-TQwDdQGtwwDt+2cgKDLn0IRaSxYu1tSUjgKarSDkUM0ZNiSRXFpjxEsvc/Zgc5kq5omJ+V0a8/kIM2WD3sMOYg=="],
+
+    "acorn": ["acorn@8.18.0", "", { "bin": { "acorn": "bin/acorn" } }, "sha512-lGq+9yr1/GuAWaVYIHRjvvySG5/4VfKIvC8EWxStPdcDh/Ka7FG3twP6v4d5BkravUilhIAsG4Qj83t02LWUPQ=="],
 
     "agent-base": ["agent-base@7.1.4", "", {}, "sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ=="],
 

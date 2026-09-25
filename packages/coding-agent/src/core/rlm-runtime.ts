@@ -235,6 +235,12 @@ export interface CreateRlmSubagentRuntimeOptions {
 	rlmParentNodeId: string;
 	/** Source of the Code cell that spawned this subagent, for display. */
 	spawnCode?: string;
+	/**
+	 * Task context snapshot passed explicitly to the child, replacing the
+	 * `globalThis.__rlmTaskContextSnapshot` global. Unsafe for concurrent
+	 * in-process workers — concurrent tasks overwrite each other's snapshot.
+	 */
+	rlmTaskContextSnapshot?: Record<string, any> | null;
 	/** Publish the session to the parent before a host makes the runtime addressable. */
 	onSessionPublished?: (session: AgentSession) => void;
 }

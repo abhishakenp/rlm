@@ -568,11 +568,20 @@ export async function findInitialModel(options: {
 		}
 	}
 	if (availableModels.length > 0) {
-		const defaultModel = findPreferredDefaultModel(availableModels);
-		if (defaultModel) {
-			return { model: defaultModel, thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
-		}
-		return { model: availableModels[0], thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
+		const chosen = findPreferredDefaultModel(availableModels) ?? availableModels[0];
+		// A configured default that can't be used is never swapped out silently:
+		// the replacement may be a paid or unfunded provider (a stale default once
+		// opened sessions on deepseek-v4-pro, which answered 402 Insufficient Balance).
+		const fallbackMessage =
+			defaultProvider && defaultModelId
+				? `Default model ${defaultProvider}/${defaultModelId} is unavailable (${
+						modelRegistry.find(defaultProvider, defaultModelId)
+							? `no credentials for ${defaultProvider}`
+							: "not in the model registry"
+					}); using ${chosen.provider}/${chosen.id} for this session. Change it with /model`
+				: undefined;
+		if (fallbackMessage) log.warn(fallbackMessage);
+		return { model: chosen, thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage };
 	}
 	return { model: undefined, thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
 }

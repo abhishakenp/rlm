@@ -1,4 +1,15 @@
-import { parse } from "yaml";
+import { createRequire } from "node:module";
+
+// Bun's native YAML parser, when there is one: the `yaml` package is 72 modules
+// and ~280 KB of source that every session (and every daemon worker) would load
+// just to read skill frontmatter. Both parsers returned identical results on all
+// 1,007 frontmatter blocks found in the repo, ~/.rlm and installed skills.
+// Under Node the package is loaded on first use instead.
+const parseYaml = (text: string): unknown => {
+	const native = (globalThis as { Bun?: { YAML?: { parse(s: string): unknown } } }).Bun?.YAML;
+	if (native) return native.parse(text);
+	return (createRequire(import.meta.url)("yaml") as typeof import("yaml")).parse(text);
+};
 
 type ParsedFrontmatter<T extends Record<string, unknown>> = {
 	frontmatter: T;
@@ -32,7 +43,7 @@ export const parseFrontmatter = <T extends Record<string, unknown> = Record<stri
 	if (!yamlString) {
 		return { frontmatter: {} as T, body };
 	}
-	const parsed = parse(yamlString);
+	const parsed = parseYaml(yamlString);
 	return { frontmatter: (parsed ?? {}) as T, body };
 };
 

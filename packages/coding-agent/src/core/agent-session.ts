@@ -58,6 +58,10 @@ import {
 	startsAgentRun,
 } from "./agent-messages.js";
 import {
+	createInProcessAgentMessageController,
+	createInProcessAgentObserveController,
+} from "./in-process-agent-messages.js";
+import {
 	AGENT_OBSERVE_SKILL_NAME,
 	type AgentObserveAgentSnapshot,
 	type AgentObserveController,
@@ -194,6 +198,10 @@ import {
 	appendGlobalRefinement,
 	applyRefinementProposal,
 	generateRefinementId,
+	hostCausedFailure,
+	listGlobalLessons,
+	removeGlobalLessons,
+	screenGlobalProposal,
 	getGlobalHarnessStateDir,
 	getLocalHarnessStateDir,
 	getRefinementHistory,
@@ -259,6 +267,7 @@ import {
 } from "./session-manager.js";
 import type { SessionStats } from "./session-stats.js";
 import type { SettingsManager } from "./settings-manager.js";
+import { isEndpointOutageError, outageDelayMs, shouldKeepWaitingForEndpoint } from "./endpoint-outage.js";
 import { type Skill } from "./skills.js";
 import {
 	parseRefineCommandOptions,
@@ -272,7 +281,7 @@ import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-promp
 import { THINKING_LEVELS } from "./thinking-levels.js";
 import { type BashOperations, createLocalBashOperations } from "./bash-operations.js";
 import { createAllToolDefinitions } from "./tools/index.js";
-import { CodeKernelProvisioner } from "./tools/code.js";
+import { CodeKernelProvisioner, KERNEL_HOST_APIS } from "./tools/code.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
 import { addAssistantUsage, emptyUsage } from "./usage.js";
 import { SERPER_CREDENTIAL_ID, SERPER_ENV_VAR, WEBSEARCH_SKILL_NAME } from "./websearch-credential.js";
@@ -343,6 +352,8 @@ export type AgentSessionEvent =
 			maxAttempts: number;
 			delayMs: number;
 			errorMessage: string;
+			/** Present while waiting out an unreachable endpoint; attempts are then open-ended. */
+			outage?: { elapsedMs: number; patienceMs: number };
 	  }
 	| {
 			type: "auto_retry_end";
@@ -377,7 +388,18 @@ export type AgentSessionEvent =
 			runId?: string;
 	  }
 	| { type: "refine_complete"; result: RefinementResult }
-	| { type: "refine_failed"; error: string };
+	| { type: "refine_failed"; error: string }
+	| {
+			/**
+			 * The session reached a terminal state on its own rather than by the
+			 * user ending it. Emitted alongside the terminal session_state record so
+			 * a host that is still holding the session can stop presenting it as
+			 * live instead of waiting on input that is never going to arrive.
+			 */
+			type: "session_resolved";
+			reason: "needs_input_timeout";
+			timeoutMs: number;
+	  };
 
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
 
@@ -413,7 +435,10 @@ export interface AgentSessionConfig {
 	 * Default: true.
 	 */
 	includeGoals?: boolean;
+	/** Omitted in-process: an in-process controller over this session's family is used instead. */
 	agentMessageController?: AgentSessionMessageController;
+	/** The session that spawned this one as an RLM child (in-process family for agent_message). */
+	rlmParentSession?: AgentSession;
 	agentObserveController?: AgentObserveController;
 	/**
 	 * Whether the bundled compact skill and its compact.* host handlers are
@@ -456,10 +481,26 @@ export interface AgentSessionConfig {
 	 */
 	serializedRefine?: boolean;
 	/**
+	 * Task context snapshot passed explicitly from the parent (rlm-sdk).
+	 *
+	 * Replaces the `globalThis.__rlmTaskContextSnapshot` global, which is
+	 * unsafe for concurrent in-process workers — concurrent tasks overwrite
+	 * each other's snapshot. Passed through AgentSessionConfig so the session
+	 * can load it into the context service during _buildCodeRuntime.
+	 */
+	rlmTaskContextSnapshot?: Record<string, any> | null;
+	/**
 	 * Initial goal to seed at session creation. Only applied when rlmDepth
 	 * is 0 and no persisted thread_goal_state entry exists in the branch.
 	 */
 	initialGoal?: { objective: string; tokenBudget?: number };
+	/**
+	 * How long the session may stay idle awaiting user input after finishing a
+	 * turn before it resolves itself with a terminal record. Omit or pass 0 to
+	 * wait forever, which is what an interactive operator wants. Falls back to
+	 * the RLM_NEEDS_INPUT_TIMEOUT_MS environment variable when not given.
+	 */
+	needsInputTimeoutMs?: number;
 }
 
 export interface ExtensionBindings {
@@ -937,7 +978,25 @@ Reviewer instructions: ${review.instructions}`
 		tool_error: "A tool errored. Learn from the error so it never repeats. Create a prompt note (behavioral fix), memory (durable fact), or skill (repeatable procedure) as appropriate.",
 		tool_discovery: "Significant tool usage this turn. Persist useful discoveries (file locations, API patterns, project structure) so they don't need to be rediscovered. Create memories for facts, prompt notes for behavioral lessons.",
 	};
-	return `Automatic refine review triggered by ${reason}. ${reasonContext[reason] ?? ""} Do not promote anything global unless explicitly requested. Reviewer rationale: ${review.rationale}${detail}`;
+	const scopeRule = autoRefineIsGlobal(reason)
+		? "These edits go to the GLOBAL harness store, which every future session loads — that is the only way a tool-error lesson stops the same error in the next session. Record only durable lessons about this environment, its tools and its APIs (never task progress or one-off details), update an existing entry instead of adding a near-duplicate, and return an empty edits array when the error was a one-off."
+		: "Do not promote anything global unless explicitly requested.";
+	return `Automatic refine review triggered by ${reason}. ${reasonContext[reason] ?? ""} ${scopeRule} Reviewer rationale: ${review.rationale}${detail}`;
+}
+
+/**
+ * Tool-error lessons are written globally; every other automatic review stays local.
+ *
+ * Measured before this existed: 138 of 138 refinements since the fork were
+ * local, including ones whose own summary said "Create global memory …", so no
+ * lesson ever reached a new session. The same overlay lesson was rediscovered
+ * on Sep 3 and Sep 6 while rlm-guard kept refusing the same cordis.yml write in
+ * 38 sessions. A tool error is the one trigger whose whole purpose is "never
+ * repeat this", which only a global entry can do; interval, compact and
+ * discovery reviews capture task state and stay session-scoped.
+ */
+function autoRefineIsGlobal(reason: AutoRefineReason): boolean {
+	return reason === "tool_error";
 }
 
 function isNonNegativeInteger(value: unknown): value is number {
@@ -1037,6 +1096,173 @@ function attributeChildUsage(parentUsage: Usage, childUsage: Usage): void {
 	parentUsage.totalTokens = parentContextTokens;
 }
 
+/**
+ * How long a session may sit idle waiting for the user before it is resolved
+ * with a terminal record instead of staying live forever. A session that has
+ * finished its turn and is waiting for input is indistinguishable, from the
+ * outside, from one whose operator walked away and never came back; the second
+ * kind used to leave a branch that simply stopped, with the agents view still
+ * reporting it as needing input months later. Off by default so an interactive
+ * operator is never timed out mid-thought — headless and delegated runs, which
+ * have nobody to answer, are the callers that set it.
+ */
+export const NEEDS_INPUT_TIMEOUT_DISABLED = 0;
+
+/**
+ * Env override for {@link AgentSessionConfig.needsInputTimeoutMs}, following the
+ * same "config wins, then env, then default" order the session already uses for
+ * RLM_DEPTH. Present so a supervisor that spawns runs it does not construct
+ * (launchd, the drive job, a delegated worker) can bound them without a code
+ * change. Non-numeric and negative values are ignored rather than throwing: a
+ * bad env var must not stop a session from starting.
+ */
+export const NEEDS_INPUT_TIMEOUT_ENV_VAR = "RLM_NEEDS_INPUT_TIMEOUT_MS";
+
+function resolveNeedsInputTimeoutMs(configured: number | undefined): number {
+	if (typeof configured === "number" && Number.isFinite(configured) && configured > 0) {
+		return configured;
+	}
+	if (configured !== undefined) {
+		// An explicit 0/undefined-shaped value from the caller is a deliberate
+		// opt-out and must not fall through to the environment.
+		return NEEDS_INPUT_TIMEOUT_DISABLED;
+	}
+	const fromEnv = Number(process.env[NEEDS_INPUT_TIMEOUT_ENV_VAR]);
+	if (Number.isFinite(fromEnv) && fromEnv > 0) {
+		return fromEnv;
+	}
+	return NEEDS_INPUT_TIMEOUT_DISABLED;
+}
+
+/**
+ * Sessions that still owe the branch a terminal record, keyed by the callback
+ * that writes one. Process-level rather than per-session because Node caps
+ * listener counts per event and a top-level run can hold dozens of live
+ * subagent sessions at once; one set of hooks serves all of them.
+ */
+type SessionLastRites = (reason: string) => void;
+const pendingSessionLastRites = new Set<SessionLastRites>();
+let sessionLastRitesHooksInstalled = false;
+
+function describeFatal(error: unknown): string {
+	// Message only. The record is a one-line epitaph that a session listing
+	// renders verbatim; the stack still reaches stderr via Node's own fatal path.
+	if (error instanceof Error) return error.message;
+	return String(error);
+}
+
+function runPendingSessionLastRites(reason: string): void {
+	// Copied first: a rites callback deregisters itself, which would otherwise
+	// mutate the set mid-iteration.
+	for (const rites of [...pendingSessionLastRites]) {
+		try {
+			rites(reason);
+		} catch {
+			// The process is already on its way down. A failed final write is not
+			// worth converting into a second fatal error that hides the first.
+		}
+	}
+}
+
+function uninstallSessionLastRitesHooks(): void {
+	if (!sessionLastRitesHooksInstalled) return;
+	sessionLastRitesHooksInstalled = false;
+	process.off("exit", onProcessExitLastRites);
+	process.off("uncaughtException", onUncaughtExceptionLastRites);
+	process.off("unhandledRejection", onUnhandledRejectionLastRites);
+}
+
+const onProcessExitLastRites = (): void => {
+	runPendingSessionLastRites("process exited while the session was still live");
+};
+
+function recordThenRestoreDefaultFatalBehaviour(
+	event: "uncaughtException" | "unhandledRejection",
+	error: unknown,
+): void {
+	runPendingSessionLastRites(`${event}: ${describeFatal(error)}`);
+	// Merely registering a listener for these events is enough to stop Node from
+	// crashing, and a process that limps on after a fatal error is strictly worse
+	// than the silent death this recorder exists to fix. When we are the only
+	// listener we are also the only reason the default path did not run, so undo
+	// that: drop the hooks and rethrow on the next tick, which reaches Node's real
+	// fatal handling — stack to stderr, exit code 1 — unchanged. When something
+	// else is listening, that owner decides the outcome and we only record.
+	if (process.listenerCount(event) > 1) return;
+	uninstallSessionLastRitesHooks();
+	process.nextTick(() => {
+		throw error instanceof Error ? error : new Error(String(error));
+	});
+}
+
+const onUncaughtExceptionLastRites = (error: unknown): void => {
+	recordThenRestoreDefaultFatalBehaviour("uncaughtException", error);
+};
+
+const onUnhandledRejectionLastRites = (reason: unknown): void => {
+	recordThenRestoreDefaultFatalBehaviour("unhandledRejection", reason);
+};
+
+/**
+ * Install the process-level hooks that give a dying session its terminal record.
+ *
+ * The failure this exists for: the `code` tool evaluates model-authored
+ * JavaScript in an in-process `vm` context, so a cell that leaves a rejecting
+ * promise behind — or calls `process.exit` — takes the whole agent down. Node's
+ * default for an unhandled rejection is to throw, and with no listener anywhere
+ * in the package that ends the process between the toolResult write and the
+ * next provider request. The branch then just stops after a toolResult, with no
+ * assistant reply and no record of why, which is indistinguishable on disk from
+ * a session someone is still typing into.
+ *
+ * Provider failures do NOT come through here: the stream layer converts them
+ * into an assistant message with `stopReason: "error"`, which is already
+ * persisted on its own. These hooks are for deaths that never reach that path.
+ */
+function installSessionLastRitesHooks(): void {
+	if (sessionLastRitesHooksInstalled) return;
+	sessionLastRitesHooksInstalled = true;
+	// `exit` is the only one of the three that cannot change the outcome — a
+	// listener there can neither cancel nor defer the exit — so it is safe to
+	// carry the common case, including a `process.exit()` from inside a cell.
+	// It only runs synchronous work, which is why the record is written with
+	// appendFileSync rather than queued.
+	process.on("exit", onProcessExitLastRites);
+	process.on("uncaughtException", onUncaughtExceptionLastRites);
+	process.on("unhandledRejection", onUnhandledRejectionLastRites);
+}
+
+/**
+ * The context variables as listed in the system prompt. `skill.*` repeats the
+ * skills catalogue already in the prompt, and `runtime.systemPrompt` is a copy
+ * of the prompt itself — listing them cost ~5 KB a turn and kept pulling a
+ * trivial turn into context bookkeeping. They stay variables (context.get
+ * reads them); only the listing leaves them out, and says so.
+ */
+export const listedContextSummary = (summary: string): string => {
+	const lines = summary.split("\n");
+	const isOmitted = (line: string) => /^\s*(skill\.\S+|runtime\.systemPrompt)\s/.test(line);
+	const kept = lines.filter((line) => !isOmitted(line));
+	const omitted = lines.length - kept.length;
+	if (omitted === 0) return summary;
+	return `${kept.join("\n")}\n  (${omitted} more not listed: skill.* — the skills catalogue above — and runtime.systemPrompt — this prompt; context.get reads them)`;
+};
+
+/**
+ * Reload news goes to the prompt tray's one transient notice (rlm-tui
+ * `announce`, which also logs it), never to stderr: a line written to stderr
+ * under a running TUI lands in the middle of the chat. Without a TUI (print
+ * mode, tests) it is logged only; RLM_HMR_VERBOSE prints it too.
+ */
+const announceReload = (text: string, level: "info" | "warn" = "info"): void => {
+	const tui = (globalThis as any).__rlmTui;
+	try {
+		if (typeof tui?.announce === "function") tui.announce(text, { level });
+		else (globalThis as any).__rlmLog?.(level, "hmr", text);
+	} catch {}
+	if (process.env.RLM_HMR_VERBOSE) console.error(`[rlm] ${text}`);
+};
+
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -1103,6 +1329,10 @@ export class AgentSession {
 
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
+	/** Attempts spent waiting out an unreachable endpoint; they don't count against maxRetries. */
+	private _outageAttempts = 0;
+	/** When the current run of endpoint-unreachable failures began. */
+	private _outageStartedAt: number | undefined = undefined;
 	private _retryPromise: Promise<void> | undefined = undefined;
 	private _retryResolve: (() => void) | undefined = undefined;
 	private _retryAuthFailureSources: AuthSourceToken[] = [];
@@ -1149,6 +1379,17 @@ export class AgentSession {
 	private _extensionErrorListener?: ExtensionErrorListener;
 	private _extensionErrorUnsubscriber?: () => void;
 	private _disposed = false;
+	/**
+	 * Registered with the process-level last-rites hooks while this session can
+	 * still die without explaining itself. Cleared once a terminal record has
+	 * been written, or once the session is disposed, so a clean shutdown never
+	 * annotates the branch with a crash it did not have.
+	 */
+	private _sessionLastRites?: SessionLastRites;
+	/** Guards the terminal record so only the first cause to fire is recorded. */
+	private _terminalStateRecorded = false;
+	private readonly _needsInputTimeoutMs: number;
+	private _needsInputTimer?: ReturnType<typeof setTimeout>;
 	private readonly _disposeCallbacks = new Set<() => void | Promise<void>>();
 	private _disposeCallbacksPromise?: Promise<void>;
 	// Set at the start of async teardown so a child finishing mid-disposeAsync doesn't
@@ -1168,6 +1409,8 @@ export class AgentSession {
 	private _rlmSessionDir?: string;
 	private _rlmParentNodeId?: string;
 	private _rlmParentAgent?: string;
+	/** Task context snapshot passed explicitly, replacing the global. */
+	private _rlmTaskContextSnapshot: Record<string, any> | null = null;
 	private _repliedToParentSinceTask: boolean | undefined;
 	private _parentReplyCount = 0;
 	private _subagentRuntimeHost?: SubagentRuntimeHost;
@@ -1215,6 +1458,11 @@ export class AgentSession {
 
 	private _baseSystemPrompt = "";
 	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
+	/** Something the built prompt depends on changed; rebuild before the next model request. */
+	private _systemPromptStale = false;
+	/** Skills, prompt templates or prompt files changed on disk; re-read them first. */
+	private _promptInputsStale = false;
+	private _promptStaleReasons = new Set<string>();
 	private _assistantTurnsSinceAutoRefine = 0;
 	/** Tool calls in the current turn — triggers discovery refinement when high. */
 	private _toolCallsThisTurn = 0;
@@ -1267,8 +1515,14 @@ export class AgentSession {
 		this._includeGoals = config.includeGoals ?? true;
 		this._includeCompactSkill = config.includeCompactSkill ?? this.settingsManager.getCompactionAgentCallable();
 		this._rlmHeartbeatController = config.rlmHeartbeatController;
-		this._agentMessageController = config.agentMessageController;
-		this._agentObserveController = config.agentObserveController;
+		// In-process sessions have no daemon to route agent messages; their family
+		// (parent, siblings, children) lives in this process — see in-process-agent-messages.ts.
+		this._agentMessageController =
+			config.agentMessageController ??
+			createInProcessAgentMessageController(() => this as never, config.rlmParentSession as never);
+		this._agentObserveController =
+			config.agentObserveController ??
+			createInProcessAgentObserveController(() => this as never, config.rlmParentSession as never);
 		this._mcpManager = config.mcpManager;
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
@@ -1289,6 +1543,7 @@ export class AgentSession {
 		this._rlmSessionDir = config.rlmSessionDir;
 		this._rlmParentNodeId = config.rlmParentNodeId;
 		this._rlmParentAgent = config.rlmParentAgent;
+		this._rlmTaskContextSnapshot = config.rlmTaskContextSnapshot ?? null;
 		// Initialize fleet identity for distributed spawning
 		this._fleetIdentity = {
 			agentId: this._rlmParentNodeId ?? randomUUID(),
@@ -1330,12 +1585,15 @@ export class AgentSession {
 			this._goalAccountingStartedAt = Date.now();
 		}
 
+		this._needsInputTimeoutMs = resolveNeedsInputTimeoutMs(config.needsInputTimeoutMs);
+		this._installSessionLastRites();
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._installAgentTurnHook();
 		this._installAgentContinuationHook();
 		this._installPromptHmrListener();
 		this._installResourceHmrListener();
+		this._installPromptBoundaryRefresh();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -1432,7 +1690,11 @@ export class AgentSession {
 			// Track all tool calls and errors for auto-refine.
 			// Any error → learn from it. Many tool calls → learn from discoveries.
 			this._toolCallsThisTurn++;
-			if (isError) {
+			// A code cell that throws comes back with isError:false and
+			// details.status "error" — the ✗ in the UI reads details, the model
+			// reads the traceback. Counting only isError meant the single most
+			// common failure (a cell exception) never scheduled a lesson.
+			if (isError || (result?.details as { status?: unknown } | undefined)?.status === "error") {
 				this._toolErrorsThisTurn++;
 				this._trackToolErrorDynamic(toolCall.name, args as Record<string, unknown>, result);
 			}
@@ -1480,6 +1742,16 @@ export class AgentSession {
 				?.map((c: any) => (typeof c === "string" ? c : c?.text ?? ""))
 				.join(" ")
 				.slice(0, 500) ?? "";
+
+			// rlm's own faults (a disposed kernel, a hot reload in flight, its
+			// source failing to load, a host API it failed to bind) are not
+			// lessons about the environment; learning them globally is how
+			// "rlm.spawn is not available in the code tool" reached every session.
+			const hostCause = hostCausedFailure(errorText, KERNEL_HOST_APIS);
+			if (hostCause) {
+				(globalThis as any).__rlmLog?.("info", "refine", `auto-refine skipped: ${hostCause}`);
+				return;
+			}
 
 			const review: AutoRefineReview = {
 				shouldRefine: true,
@@ -1536,26 +1808,33 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 	}
 
 	/**
-	 * Listen for HMR prompt-changed events. Rebuild the system prompt on the
-	 * next turn. Active work is NEVER interrupted.
+	 * Listen for HMR prompt-changed events. The prompt is rebuilt before the
+	 * next model request — mid-run included — by _refreshSystemPromptAtBoundary.
+	 * Active work is NEVER interrupted.
+	 *
+	 * This used to clear _baseSystemPromptOptions and nothing more. Nothing
+	 * read that as a signal, so the prompt kept its old text until something
+	 * unrelated happened to rebuild it — a restart, in practice.
 	 */
 	private _installPromptHmrListener(): void {
 		const ctx = (globalThis as any).__rlmCordisContext;
 		if (!ctx?.on) return;
 		try {
-			// HMR: system prompt/skills changed → invalidate cache.
-			// Next LLM turn uses the new prompt. Active work never interrupted.
 			// The LLM creates/updates context variables itself — system doesn't.
 			const invalidatePrompt = () => {
-				this._baseSystemPromptOptions = undefined as any;
+				this._systemPromptStale = true;
 			};
 			ctx.on("rlm/prompt-changed", (data: any) => {
 				invalidatePrompt();
-				// Only log for HMR-triggered invalidations (have a path), not context mutations
-				if (data?.path) {
-					console.error("[rlm] HMR: system prompt invalidated, will rebuild on next turn");
-				}
+				// A path means a file changed (skills, prompts); context mutations have none.
+				if (data?.path) this._markPromptInputsStale(basename(dirname(String(data.path))));
 			});
+			// Skills and prompt templates live in the resource dirs, so every
+			// resource change may reshape the prompt, not only the ones rlm-hmr
+			// classifies as prompt-shaped.
+			ctx.on("rlm/resources-changed", (data: any) =>
+				this._markPromptInputsStale(data?.reason ?? "resources changed"),
+			);
 			// Context mutations also invalidate the prompt so the next turn's
 			// contextSummary and any plugin fragments that depend on epoch are fresh.
 			// rlm-context already emits rlm/prompt-changed on mutation, but we also
@@ -1597,17 +1876,158 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 			this._hotReload = installResourceHotReload(ctx, {
 				isBusy: () => this._agentRunning,
 				reload: () => this.reload(),
-				onReload: (reason) =>
-					console.error(`[rlm] HMR: session resources reloaded (${reason})`),
-				onError: (error: any) =>
-					console.error(`[rlm] HMR: session reload failed: ${error?.message ?? error}`),
+				onReload: (reason) => announceReload(`↻ resources reloaded (${reason})`),
+				onError: (error: any) => announceReload(`⚠ reload failed: ${error?.message ?? error}`, "warn"),
 			});
 		} catch { /* best effort */ }
+	}
+
+	private _markPromptInputsStale(reason: string): void {
+		this._systemPromptStale = true;
+		this._promptInputsStale = true;
+		this._promptStaleReasons.add(reason);
+	}
+
+	/**
+	 * Run the prompt refresh at the one point the agent loop is guaranteed to
+	 * pass between two model requests of the same run: transformContext is
+	 * awaited before every request, and the loop reads the system prompt only
+	 * after it returns. That is also where steering messages land.
+	 *
+	 * Child and side agents are built with this agent's transformContext, so
+	 * their requests run the refresh too. That only ever updates this session's
+	 * prompt early, which is what it is for.
+	 */
+	private _installPromptBoundaryRefresh(): void {
+		const inner = this.agent.transformContext;
+		this.agent.transformContext = async (messages, signal) => {
+			await this._refreshSystemPromptAtBoundary();
+			return inner ? inner(messages, signal) : messages;
+		};
+	}
+
+	/**
+	 * Bring the system prompt up to date before a model request.
+	 *
+	 * A skill, prompt template, SYSTEM.md, AGENTS.md or context variable that
+	 * changed while the agent was working reaches its very next request — after
+	 * the tool call in flight, not after the run, and never after a restart.
+	 * Only prompt inputs are re-read here; extensions and tools still wait for
+	 * the run to end (HotReloadScheduler), because swapping those mid-turn is
+	 * what breaks a turn.
+	 *
+	 * This trades prompt cache for freshness on purpose: a changed prompt is a
+	 * cache miss on the next request. An unchanged rebuild costs nothing.
+	 */
+	private async _refreshSystemPromptAtBoundary(): Promise<void> {
+		const loader = this._resourceLoader;
+		// Context files and SYSTEM.md live in the project, where nothing watches
+		// them, so ask the loader whether the disk still matches what it read.
+		if (!this._promptInputsStale) {
+			try {
+				if (loader.promptFilesChanged?.()) this._markPromptInputsStale("context files");
+			} catch {}
+		}
+		if (!this._systemPromptStale) return;
+		const reloadInputs = this._promptInputsStale;
+		const reason = [...this._promptStaleReasons].join(", ");
+		this._systemPromptStale = false;
+		this._promptInputsStale = false;
+		this._promptStaleReasons.clear();
+		try {
+			if (reloadInputs) await loader.reloadPromptInputs?.();
+			const oldBase = this._baseSystemPrompt;
+			const nextBase = this._rebuildSystemPrompt(this.getActiveToolNames());
+			if (nextBase === oldBase) return;
+			this._baseSystemPrompt = nextBase;
+			this.agent.state.systemPrompt = this._refreshExtensionSystemPrompt(this.agent.state.systemPrompt, oldBase);
+			if (reloadInputs) {
+				announceReload(`↻ prompt updated (${reason || "prompt inputs changed"})`);
+			}
+		} catch (error: any) {
+			announceReload(`⚠ prompt refresh failed: ${error?.message ?? error}`, "warn");
+		}
 	}
 
 	private _installAgentTurnHook(): void {
 		this.agent.shouldStopBeforeTurn = () => this._shouldStopBeforeTurn();
 		this.agent.shouldStopAfterTurn = (context) => this._shouldStopAfterTurn(context);
+	}
+
+	/**
+	 * Claim a slot in the process-level last-rites hooks, so that if this process
+	 * dies while the session is live the branch still ends in a record saying so.
+	 *
+	 * Only persisted sessions register. An in-memory session has no file for a
+	 * terminal record to land in, and registering one would keep a disposed test
+	 * session reachable from a process-level set for the life of the process.
+	 */
+	private _installSessionLastRites(): void {
+		if (!this.sessionManager.isPersisted()) return;
+		const rites: SessionLastRites = (reason) => this._recordTerminalSessionState("crash", reason);
+		this._sessionLastRites = rites;
+		pendingSessionLastRites.add(rites);
+		installSessionLastRitesHooks();
+	}
+
+	/** Drop this session's claim; called once its outcome is settled either way. */
+	private _releaseSessionLastRites(): void {
+		if (!this._sessionLastRites) return;
+		pendingSessionLastRites.delete(this._sessionLastRites);
+		this._sessionLastRites = undefined;
+	}
+
+	/**
+	 * Write the one record that says how this session stopped, and stop owing one.
+	 *
+	 * Deliberately synchronous: every caller is either a process-exit hook or a
+	 * timer firing on a session nobody is going to come back to, and
+	 * SessionManager persists through appendFileSync, so the entry is on disk
+	 * before this returns. Anything queued through the async agent-event pipeline
+	 * would simply never run on the way down.
+	 */
+	private _recordTerminalSessionState(status: "crash" | "archived", reason: string): void {
+		if (this._terminalStateRecorded) return;
+		this._terminalStateRecorded = true;
+		this._releaseSessionLastRites();
+		try {
+			if (this.sessionManager.hasTerminalSessionState()) return;
+			this.sessionManager.appendSessionState({ status, reason });
+		} catch {
+			// A branch that cannot take its own epitaph is already unwritable; there
+			// is no better outcome available from inside a dying process.
+		}
+	}
+
+	/**
+	 * Start (or restart) the clock on an idle session waiting for a user who may
+	 * never answer. Called at the end of every run; a new prompt cancels it.
+	 */
+	private _armNeedsInputTimeout(): void {
+		this._clearNeedsInputTimeout();
+		if (this._needsInputTimeoutMs <= NEEDS_INPUT_TIMEOUT_DISABLED) return;
+		if (this._disposed || this._terminalStateRecorded) return;
+		if (!this.sessionManager.isPersisted()) return;
+		const timeoutMs = this._needsInputTimeoutMs;
+		this._needsInputTimer = setTimeout(() => {
+			this._needsInputTimer = undefined;
+			if (this._disposed || this.isStreaming) return;
+			this._recordTerminalSessionState(
+				"archived",
+				`no user input for ${timeoutMs}ms while the session was awaiting input`,
+			);
+			this._emit({ type: "session_resolved", reason: "needs_input_timeout", timeoutMs });
+		}, timeoutMs);
+		// A pending answer that never comes must not be the reason the process
+		// stays alive; the timer records the outcome if the process gets there
+		// first, and the exit hooks cover it if it does not.
+		this._needsInputTimer.unref?.();
+	}
+
+	private _clearNeedsInputTimeout(): void {
+		if (!this._needsInputTimer) return;
+		clearTimeout(this._needsInputTimer);
+		this._needsInputTimer = undefined;
 	}
 
 	private _emit(event: AgentSessionEvent): void {
@@ -3772,6 +4192,7 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 						attempt: this._retryAttempt,
 					});
 					this._retryAttempt = 0;
+					this._resetOutageRetry();
 					this._retryAuthFailureSources = [];
 				}
 				if (this._accountGoalUsageForAssistantMessage(assistantMsg)) {
@@ -3873,6 +4294,8 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 		if (event.type === "agent_start") {
 			this._turnIndex = 0;
 			this._agentRunning = true;
+			// Work arrived, so the session is no longer waiting on anyone.
+			this._clearNeedsInputTimeout();
 			this.sessionManager.recordGitStateIfChanged();
 			await this._extensionRunner.emit({ type: "agent_start" });
 		} else if (event.type === "agent_end") {
@@ -3884,6 +4307,10 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 			});
 			// The run is over, so a reload that arrived mid-turn can land now.
 			this._agentRunning = false;
+			// The turn is done and the next move belongs to the user. Start the
+			// clock so a session nobody answers resolves itself instead of sitting
+			// in "needs input" forever.
+			this._armNeedsInputTimeout();
 			void this._hotReload?.onIdle();
 		} else if (event.type === "turn_start") {
 			const extensionEvent: TurnStartEvent = {
@@ -4241,6 +4668,12 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 			return;
 		}
 		this._disposed = true;
+		// A disposed session was shut down on purpose. It no longer owes the branch
+		// a crash record, and leaving the claim registered would both keep this
+		// instance alive in a process-level set and let a later unrelated fatal
+		// error annotate a session that had already ended cleanly.
+		this._clearNeedsInputTimeout();
+		this._releaseSessionLastRites();
 		for (const run of this._unsettledRlmChildRuns) run.suppressTerminalNotice = true;
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
 		this._sessionActionCommitDisposeAbortController.abort();
@@ -4554,6 +4987,15 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 	private _registerInfrastructureVars(skills: Skill[], tools: string[], systemPrompt: string): void {
 		const ctx = (globalThis as any).__rlmContextProxy;
 		if (!ctx) return;
+		// The context is one store shared by every session in the process, and
+		// these vars describe the root. A subagent writing `runtime.systemPrompt`
+		// overwrote the root's with its own, and every write fires
+		// rlm/prompt-changed, which marks EVERY session stale; each then rebuilt
+		// its prompt on its next request and wrote again. Subagents at different
+		// depths have different prompts, so the value never settled: measured at
+		// 50 subagents, 131 prompt-changed + 126 context-set events, and at 200
+		// the rebuilds (buildCompositePrompt) were 37.7% of all CPU.
+		if (this._rlmDepth > 0) return;
 		try {
 			// Runtime state — immutable facts about the environment.
 			const skillNames = skills.map((s) => s.name);
@@ -4573,12 +5015,15 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 			const promptSummary = systemPrompt.length > 5000
 				? systemPrompt.slice(0, 5000) + `... (${systemPrompt.length} chars)`
 				: systemPrompt;
-			if (ctx.get("runtime.systemPrompt") === undefined) {
+			const currentPrompt = ctx.get("runtime.systemPrompt");
+			if (currentPrompt === undefined) {
 				ctx.set("runtime.systemPrompt", promptSummary, {
 					type: "prompt", mutable: true, description: "Active system prompt (hot-reloadable)",
 					scope: "session", source: "system",
 				});
-			} else {
+			} else if (currentPrompt !== promptSummary) {
+				// Only a real change: an unchanged rebuild must not announce itself,
+				// or the announcement invalidates the prompt that was just built.
 				ctx.update("runtime.systemPrompt", promptSummary);
 			}
 			// Each skill as a variable.
@@ -4605,7 +5050,7 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 		try {
 			const summary = proxy.summarize();
 			if (!summary || summary === "(no context variables)") return undefined;
-			return summary;
+			return listedContextSummary(summary);
 		} catch {
 			return undefined;
 		}
@@ -6329,6 +6774,26 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 					displayResult = false;
 					break;
 				}
+				case "lessons": {
+					const args = (input.command.args ?? "").trim().split(/\s+/).filter(Boolean);
+					if (args[0] === "rm" || args[0] === "remove" || args[0] === "delete") {
+						const ids = args.slice(1);
+						if (ids.length === 0) throw new Error("usage: /lessons rm <id…>");
+						const removed = removeGlobalLessons(ids, "removed by the user with /lessons rm");
+						const done = removed.appliedEdits.filter((edit) => edit.applied).map((edit) => edit.id);
+						const missing = ids.filter((id) => !done.includes(id));
+						resultText = `Removed ${done.length} global lesson${done.length === 1 ? "" : "s"}${done.length ? `: ${done.join(", ")}` : ""}${missing.length ? ` (not found: ${missing.join(", ")})` : ""}.`;
+					} else {
+						const lessons = listGlobalLessons();
+						const chars = lessons.reduce((n, l) => n + l.chars, 0);
+						resultText = lessons.length
+							? `Global lessons (${lessons.length}, ${chars} chars — loaded into every session):\n` +
+								lessons.map((l) => `- ${l.kind}:${l.id} (${l.chars}c, ${String(l.updated_at ?? l.created_at ?? "").slice(0, 10)}) — ${l.title}`).join("\n") +
+								"\nRemove one with /lessons rm <id>."
+							: "No global lessons.";
+					}
+					break;
+				}
 				case "goal":
 					await this._handleGoalSlashCommand(input.text, input.images);
 					resultText = this._goalState.objective
@@ -7705,10 +8170,8 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 			throw new Error("Compaction cancelled");
 		}
 
-		// Same invalidation idiom as the HMR prompt-changed handler above: the field
-		// is declared with a definite-assignment assertion and cleared to force a
-		// rebuild on the next turn.
-		this._baseSystemPromptOptions = undefined as any;
+		// The context summary in the prompt moved on; rebuild before the next request.
+		this._systemPromptStale = true;
 
 		this.sessionManager.appendCompaction(
 			summary,
@@ -8107,7 +8570,10 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 	private async _runApprovedRefine(reason: AutoRefineReason, review: AutoRefineReview): Promise<void> {
 		this._autoRefineInProgress = true;
 		try {
-			await this.refine({ instructions: autoRefineInstructions(reason, review) }, { trigger: "auto" });
+			await this.refine(
+				{ instructions: autoRefineInstructions(reason, review), global: autoRefineIsGlobal(reason) || undefined },
+				{ trigger: "auto" },
+			);
 			this._pendingAutoRefineReview = undefined;
 			this._turnIntervalAutoRefinePending = false;
 			this._lastAutoRefineReviewAt = Date.now();
@@ -8477,12 +8943,19 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 			if (this._disposed || refineAbort.signal.aborted) {
 				throw new Error("Refinement cancelled because the session was disposed.");
 			}
-			const result = applyRefinementProposal(state, proposal, {
+			// Global entries reach every session: refuse ones that claim a host API
+			// is missing, and keep the store within its size budget.
+			const screened =
+				targetScope === "global"
+					? screenGlobalProposal(proposal, state, { hostGlobals: KERNEL_HOST_APIS })
+					: { proposal, rejected: [] };
+			const result = applyRefinementProposal(state, screened.proposal, {
 				id: plan.id,
 				rollbackOf: plan.rollbackOf,
 				scope: targetScope,
 				baselineState: plan.baselineState,
 			});
+			if (screened.rejected.length > 0) result.appliedEdits.push(...screened.rejected);
 			result.harnessStatePath = saveHarnessState(targetHarnessStateDir, state);
 			if (targetScope === "global") {
 				appendGlobalRefinement(globalHarnessStateDir, result);
@@ -8885,6 +9358,30 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 		extensions.runtime.getExecEnv = provider;
 	}
 
+	/**
+	 * Point an already-started session's extension UI at a new front end.
+	 *
+	 * `bindExtensions` also announces `session_start`, which is right once per
+	 * session and wrong every time the agents view reopens its chat: extensions
+	 * would see the same session start over and over. This swaps the bindings
+	 * alone.
+	 */
+	rebindExtensionUi(bindings: ExtensionBindings): void {
+		if (bindings.uiContext !== undefined) {
+			this._extensionUIContext = bindings.uiContext;
+		}
+		if (bindings.commandContextActions !== undefined) {
+			this._extensionCommandContextActions = bindings.commandContextActions;
+		}
+		if (bindings.shutdownHandler !== undefined) {
+			this._extensionShutdownHandler = bindings.shutdownHandler;
+		}
+		if (bindings.onError !== undefined) {
+			this._extensionErrorListener = bindings.onError;
+		}
+		this._applyExtensionBindings(this._extensionRunner);
+	}
+
 	async bindExtensions(bindings: ExtensionBindings): Promise<void> {
 		if (bindings.uiContext !== undefined) {
 			this._extensionUIContext = bindings.uiContext;
@@ -9208,30 +9705,42 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 				]),
 			);
 		} else {
-			// Rebuilding (e.g. /reload) replaces the provisioner; drop the previous
-			// kernel so the session never holds two live kernels. Gate the new kernel's
-			// startup on the old one's dispose (which flushes a final snapshot), so a
-			// reload can't restore from a snapshot the old kernel is still writing.
-			const previousDispose = this._codeKernelProvisioner?.dispose();
+			// The kernel lives as long as the session. A rebuild — `/reload`, a
+			// resource or plugin reload, a heartbeat controller attached — hands the
+			// RUNNING kernel its new inputs instead of disposing it and starting
+			// another: that used to fail every cell in flight with "Code kernel
+			// provisioner disposed" and drop every variable the agent had made
+			// (49 such failures in the log, 42 of them while files were being
+			// edited). Only disposeAsync ends a kernel.
 			this._codeKernelSnapshotDir = this.sessionManager.getSessionArtifactDir();
-			// Only surface the "revived from your previous session" notice on the first
-			// build (a genuine resume). A later rebuild (/reload) restores state silently
-			// for continuity — the conversation is unchanged, so there's nothing to flag.
-			const notifyRestore = !this._codeRuntimeBuilt;
-			this._codeKernelProvisioner = new CodeKernelProvisioner(this._cwd, {
+			const kernelInputs = {
 				env: this._rlmKernelEnv(),
 				sessionId: this.sessionId,
 				hostHandlers: this._createKernelHostHandlers(),
 				snapshotDir: this._codeKernelSnapshotDir,
-				readyGate: previousDispose,
-				onRestore: notifyRestore ? (result) => this._onCodeStateRestored(result) : undefined,
 				commandPrefix: this.settingsManager.getShellCommandPrefix(),
 				shellPath: this.settingsManager.getShellPath(),
 				contextProxy: (globalThis as any).__rlmContextProxy,
-			});
+			};
+			const live = this._codeKernelProvisioner;
+			if (live && !(live as any)._disposed) {
+				// A kernel built before this method existed (hot reload) still has
+				// its old inputs; it keeps running on them rather than being replaced.
+				if (typeof live.update === "function") live.update(kernelInputs);
+			} else {
+				// Only surface the "revived from your previous session" notice on the
+				// first build (a genuine resume).
+				const notifyRestore = !this._codeRuntimeBuilt;
+				this._codeKernelProvisioner = new CodeKernelProvisioner(this._cwd, {
+					...kernelInputs,
+					onRestore: notifyRestore ? (result) => this._onCodeStateRestored(result) : undefined,
+				});
+			}
 
 			// If a task context snapshot was passed from the parent, load it.
-			const taskSnapshot = (globalThis as any).__rlmTaskContextSnapshot;
+			// Replaces globalThis.__rlmTaskContextSnapshot — unsafe for concurrent
+			// in-process workers (concurrent tasks overwrite each other's snapshot).
+			const taskSnapshot = this._rlmTaskContextSnapshot;
 			if (taskSnapshot && (globalThis as any).__rlmContextProxy) {
 				try {
 					const ctxService = (globalThis as any).__rlmContextProxy;
@@ -9249,8 +9758,8 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 							scope: "task",
 						});
 					}
-					// Clear the global so it doesn't leak to the next child.
-					delete (globalThis as any).__rlmTaskContextSnapshot;
+					// Clear the snapshot so it doesn't reload on /reload.
+					this._rlmTaskContextSnapshot = null;
 				} catch {
 					// Best effort — context passing is optional.
 				}
@@ -9602,6 +10111,7 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 		sessionDir: string;
 		model: Model<any>;
 		thinkingLevel?: ThinkingLevel;
+		rlmTaskContextSnapshot?: Record<string, any> | null;
 	}): CreateRlmSubagentRuntimeOptions {
 		return {
 			parentSession: this,
@@ -9624,6 +10134,7 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 			rlmDepth: this._rlmDepth + 1,
 			rlmMaxDepth: this._rlmMaxDepth,
 			rlmParentNodeId: options.id,
+			rlmTaskContextSnapshot: options.rlmTaskContextSnapshot ?? null,
 		};
 	}
 
@@ -9689,6 +10200,8 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 			rlmSessionDir: options.sessionDir,
 			rlmParentNodeId: options.rlmParentNodeId,
 			rlmParentAgent: options.parentSession.sessionName ?? options.parentSession.sessionId,
+			rlmParentSession: options.parentSession,
+			rlmTaskContextSnapshot: options.rlmTaskContextSnapshot ?? null,
 			sessionStartEvent: { type: "session_start", reason: "startup" },
 		});
 		if (child.sessionName !== options.sessionName) {
@@ -10397,6 +10910,11 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 	}
 
 	// In-process mode only; external clients attach to the child session directly.
+	/** This session's direct RLM children (not grandchildren). */
+	rlmDirectChildSessions(): AgentSession[] {
+		return [...this._rlmChildSessions.values()];
+	}
+
 	getRlmChildSession(childId: string): AgentSession | undefined {
 		const direct = this._activeRlmChildRuns.get(childId)?.session ?? this._rlmChildSessions.get(childId);
 		if (direct) {
@@ -10714,7 +11232,9 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 			let childRuntime: RlmSubagentRuntime | undefined;
 			try {
 				// Context transfer — copy/move 1 or many vars atomically (harness live, micro-flags gated)
-				// Must set snapshot synchronously before child creation so child's _buildRuntime can load it via global.
+				// Pass snapshot explicitly to the child via CreateRlmSubagentRuntimeOptions,
+				// replacing the globalThis.__rlmTaskContextSnapshot global — unsafe for
+				// concurrent in-process workers (concurrent tasks overwrite each other's snapshot).
 				const ctxProxy = (globalThis as any).__rlmContextProxy;
 				const cordisCtx = (globalThis as any).__rlmCordisContext;
 				const rlmContextSvc = cordisCtx?.get?.("rlmContext");
@@ -10723,20 +11243,19 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 				if ((wantsMove || wantsCopy) && rlmContextSvc?.config?.enableSubagentTransfer === false) {
 					throw new Error("rlm.run: subagent transfer disabled by rlm-context config (enableSubagentTransfer=false)");
 				}
+				let taskContextSnapshot: Record<string, any> | null = null;
 				if (ctxProxy && (wantsMove || wantsCopy)) {
 					if (wantsMove) {
-						const snap = ctxProxy.move(rawContextMove as string[]);
-						(globalThis as any).__rlmTaskContextSnapshot = snap;
+						taskContextSnapshot = ctxProxy.move(rawContextMove as string[]);
 					} else if (wantsCopy) {
 						if (rawContextStrategy === "move") {
-							const snap = ctxProxy.move(rawContext as string[]);
-							(globalThis as any).__rlmTaskContextSnapshot = snap;
+							taskContextSnapshot = ctxProxy.move(rawContext as string[]);
 						} else {
-							const snap = ctxProxy.copy(rawContext as string[]);
-							(globalThis as any).__rlmTaskContextSnapshot = snap;
+							taskContextSnapshot = ctxProxy.copy(rawContext as string[]);
 						}
 					}
 				}
+				subagentOptions.rlmTaskContextSnapshot = taskContextSnapshot;
 				childRuntime = await this._createRlmSubagentRuntime(subagentOptions);
 				const child = childRuntime.session;
 				if (run.status === "cancelled") throw new Error(run.error ?? "RLM child cancelled");
@@ -10745,11 +11264,49 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 				throwIfCancelled();
 				run.status = "running";
 				emitChildUpdate();
+				// Streaming previews, at most one update per child every 250 ms.
+				//
+				// A child emitted a parent-level update for every streamed token, and
+				// re-read and compacted its whole message each time; parents forward
+				// their children's updates, so every token of every descendant reached
+				// the root's listeners and the TUI's per-event refresh. Measured with
+				// 200 streaming subagents: emitChildUpdate and what it drives were
+				// ~30% of CPU. Status, tool and end events still go out immediately;
+				// only the "still writing" preview is coalesced (trailing, so the
+				// latest text always lands).
+				let pendingStreamingMessage: AssistantMessage | undefined;
+				let streamingTimer: ReturnType<typeof setTimeout> | undefined;
+				let lastStreamingEmit = 0;
+				const flushStreamingUpdate = () => {
+					if (streamingTimer) clearTimeout(streamingTimer);
+					streamingTimer = undefined;
+					const message = pendingStreamingMessage;
+					pendingStreamingMessage = undefined;
+					if (!message) return;
+					lastStreamingEmit = Date.now();
+					const text = compactRlmText(readAssistantText(message));
+					if (text) answerPreview = text;
+					activity = { kind: "writing" };
+					emitChildUpdate();
+				};
+				const dropStreamingUpdate = () => {
+					if (streamingTimer) clearTimeout(streamingTimer);
+					streamingTimer = undefined;
+					pendingStreamingMessage = undefined;
+				};
+				const queueStreamingUpdate = (message: AssistantMessage) => {
+					pendingStreamingMessage = message;
+					if (streamingTimer) return;
+					const wait = 250 - (Date.now() - lastStreamingEmit);
+					if (wait <= 0) flushStreamingUpdate();
+					else streamingTimer = setTimeout(flushStreamingUpdate, wait);
+				};
 				const unsubscribeChildEvents = child.subscribe((event) => {
 					if (event.type === "rlm_child_update") {
 						this._emit(event);
 						return;
 					}
+					if (event.type !== "message_update") dropStreamingUpdate();
 					if (event.type === "agent_start") {
 						activity = { kind: "waiting" };
 						emitChildUpdate();
@@ -10788,7 +11345,9 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 						if (text) answerPreview = text;
 						void flushAgentTraceUpload(child.sessionManager).catch(() => undefined);
 						emitChildUpdate();
-					} else if (event.type === "message_start" || event.type === "message_update") {
+					} else if (event.type === "message_update") {
+						if (event.message.role === "assistant") queueStreamingUpdate(event.message as AssistantMessage);
+					} else if (event.type === "message_start") {
 						if (event.message.role === "assistant") {
 							const text = compactRlmText(readAssistantText(event.message as AssistantMessage));
 							if (text) answerPreview = text;
@@ -10808,7 +11367,10 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 						emitChildUpdate();
 					}
 				});
-				run.unsubscribe = unsubscribeChildEvents;
+				run.unsubscribe = () => {
+					dropStreamingUpdate();
+					unsubscribeChildEvents();
+				};
 				const content = `[task from parent]\n\n${prompt}`;
 				const spawnMessage: AgentSessionMessage = {
 					role: "custom",
@@ -10836,6 +11398,13 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 				});
 				await child.waitForRlmQuiescence();
 				if (run.error) throw new Error(run.error);
+				// A run whose last word is a provider error did not finish its task —
+				// it ran out of retries. Tell the parent it failed rather than that it
+				// "completed without a reply", which reads as done.
+				const childLast = child.messages[child.messages.length - 1];
+				if (childLast?.role === "assistant" && (childLast as AssistantMessage).stopReason === "error") {
+					throw new Error((childLast as AssistantMessage).errorMessage ?? "the model request failed");
+				}
 				run.status = "done";
 				durationMs = Date.now() - startedAt;
 				activity = undefined;
@@ -11305,7 +11874,13 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 			finalError: message.errorMessage,
 		});
 		this._retryAttempt = 0;
+		this._resetOutageRetry();
 		this._retryAuthFailureSources = [];
+	}
+
+	private _resetOutageRetry(): void {
+		this._outageAttempts = 0;
+		this._outageStartedAt = undefined;
 	}
 
 	private async _handleRetryableError(
@@ -11331,7 +11906,30 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 
 		this._retryAttempt++;
 
-		if (this._retryAttempt > settings.maxRetries) {
+		// An unreachable endpoint is waited out for the patience window instead of
+		// spending the attempt budget: a gateway restart takes a minute, and three
+		// attempts over fourteen seconds ended every run caught in one.
+		const outage = isEndpointOutageError(message.errorMessage);
+		let delayMs: number;
+		let giveUp: boolean;
+		if (outage) {
+			this._outageAttempts++;
+			const now = Date.now();
+			this._outageStartedAt ??= now;
+			delayMs = outageDelayMs(this._outageAttempts, {
+				baseDelayMs: settings.baseDelayMs,
+				maxBackoffMs: settings.outageMaxBackoffMs,
+			});
+			giveUp = !shouldKeepWaitingForEndpoint(this._outageStartedAt, now, delayMs, {
+				patienceMs: settings.outagePatienceMs,
+			});
+		} else {
+			const budgetAttempt = this._retryAttempt - this._outageAttempts;
+			delayMs = settings.baseDelayMs * 2 ** (budgetAttempt - 1);
+			giveUp = budgetAttempt > settings.maxRetries;
+		}
+
+		if (giveUp) {
 			this._markProviderAuthStaleForRetryFailure(message, options);
 			this._emit({
 				type: "auto_retry_end",
@@ -11340,19 +11938,21 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 				finalError: message.errorMessage,
 			});
 			this._retryAttempt = 0;
+			this._resetOutageRetry();
 			this._retryAuthFailureSources = [];
 			this._resolveRetry(); // Resolve so waitForRetry() completes
 			return false;
 		}
 
-		const delayMs = settings.baseDelayMs * 2 ** (this._retryAttempt - 1);
-
 		this._emit({
 			type: "auto_retry_start",
 			attempt: this._retryAttempt,
-			maxAttempts: settings.maxRetries,
+			maxAttempts: outage ? this._retryAttempt : settings.maxRetries,
 			delayMs,
 			errorMessage: message.errorMessage || "Unknown error",
+			...(outage
+				? { outage: { elapsedMs: Date.now() - (this._outageStartedAt ?? Date.now()), patienceMs: settings.outagePatienceMs } }
+				: {}),
 		});
 
 		const messages = this.agent.state.messages;
@@ -11367,6 +11967,7 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 			const attempt = this._retryAttempt;
 			this._markProviderAuthStaleForRetryFailure(message, options);
 			this._retryAttempt = 0;
+			this._resetOutageRetry();
 			this._retryAbortController = undefined;
 			this._emit({
 				type: "auto_retry_end",
@@ -11402,6 +12003,7 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 				finalError: "Retry cancelled",
 			});
 			this._retryAttempt = 0;
+			this._resetOutageRetry();
 		}
 		this._retryAuthFailureSources = [];
 		this._resolveRetry();

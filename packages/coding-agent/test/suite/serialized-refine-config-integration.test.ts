@@ -161,7 +161,9 @@ describe("Serialized refine controller availability (unit)", () => {
 		harness.session.setRlmHeartbeatController(fakeController);
 
 		expect(internals._rlmHeartbeatController).toBe(fakeController);
-		expect(internals._codeKernelProvisioner).not.toBe(initialProvisioner);
+		// The kernel survives the rebuild (rlm keeps one kernel per session and
+		// updates its host handlers in place), so the same provisioner stays.
+		expect(internals._codeKernelProvisioner).toBe(initialProvisioner);
 		expect(internals._createKernelHostHandlers()).toHaveProperty("rlm_heartbeat.create");
 
 		// Verify the controller is usable via host request.

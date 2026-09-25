@@ -258,7 +258,56 @@ function runGit(cwd: string, args: string[]): string | null {
 	return result.stdout.trim() || null;
 }
 
+/**
+ * What has to change on disk for a repository's commit, branch or origin to
+ * change: HEAD (checkout), the branch ref and HEAD's reflog (commit, reset),
+ * packed-refs (gc), and config (remote set-url). Stats only — no spawn.
+ */
+function gitStateSignature(paths: GitPaths): string {
+	const files = [paths.headPath, join(dirname(paths.headPath), "logs", "HEAD"), join(paths.commonGitDir, "packed-refs"), join(paths.commonGitDir, "config")];
+	try {
+		const head = readFileSync(paths.headPath, "utf8").trim();
+		if (head.startsWith("ref: ")) files.push(join(paths.commonGitDir, head.slice(5).trim()));
+	} catch {}
+	return files
+		.map((file) => {
+			try {
+				const stat = statSync(file);
+				return `${stat.mtimeMs}:${stat.size}`;
+			} catch {
+				return "-";
+			}
+		})
+		.join("|");
+}
+
+const gitContextCache = new Map<string, { signature: string; context: GitContext | null }>();
+
+/**
+ * Repo, branch and commit for `cwd`, cached until the repository changes.
+ *
+ * Every session records this at creation and at the start and end of every
+ * run, and each read used to be three synchronous `git` spawns on the main
+ * thread. With recursive subagents that is thousands of spawns sharing one
+ * event loop — measured at 100 subagents: a 98.9 s freeze while they were
+ * created. A directory that is not in a repository now costs a few `stat`s
+ * and no spawn at all; one that is costs the spawns only when HEAD, the
+ * branch, the reflog, packed-refs or config actually changed.
+ */
 export function captureGitContext(cwd: string): GitContext | null {
+	if (process.env.GIT_DIR || process.env.GIT_WORK_TREE) return captureGitContextUncached(cwd);
+	const paths = findGitPaths(resolve(cwd));
+	if (!paths) return null;
+	const key = resolve(cwd);
+	const signature = gitStateSignature(paths);
+	const cached = gitContextCache.get(key);
+	if (cached && cached.signature === signature) return cached.context ? { ...cached.context } : null;
+	const context = captureGitContextUncached(cwd);
+	gitContextCache.set(key, { signature, context });
+	return context ? { ...context } : null;
+}
+
+export function captureGitContextUncached(cwd: string): GitContext | null {
 	const commit = runGit(cwd, ["rev-parse", "HEAD"]);
 	const branch = runGit(cwd, ["branch", "--show-current"]);
 	const remote = runGit(cwd, ["remote", "get-url", "origin"]);

@@ -29,7 +29,7 @@ import {
 	savePrimeCliApiKey,
 	savePrimeCliTeamSelection,
 } from "./prime-inference-auth.js";
-import { resolveConfigValue, resolveConfigValueRecent, resolveConfigValueUncached } from "./resolve-config-value.js";
+import { resolveConfigValue, resolveConfigValueThisTask, resolveConfigValueUncached } from "./resolve-config-value.js";
 
 export type PrimeTeamCredential = {
 	teamId: string;
@@ -403,7 +403,7 @@ export class AuthStorage {
 	private getStoredCredentialValueMaterial(providerId: string, credential: AuthCredential): string | undefined {
 		if (credential.type === "api_key") {
 			if (credential.key.startsWith("!")) {
-				const resolvedKey = resolveConfigValueRecent(credential.key);
+				const resolvedKey = resolveConfigValueThisTask(credential.key);
 				return resolvedKey === undefined ? undefined : `api_key:command:${credential.key}\0${resolvedKey}`;
 			}
 			return `api_key:${credential.key}\0${resolveConfigValue(credential.key) ?? ""}`;

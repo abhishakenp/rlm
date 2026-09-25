@@ -296,7 +296,7 @@ describe("createAgentSessionFromServices", () => {
 		}
 	});
 
-	it("hides daemon-backed orchestration skills unless their host bridges are available", async () => {
+	it("offers agent_message/agent_observe through in-process bridges, and uses a daemon's controllers when given", async () => {
 		const tempDir = join(tmpdir(), `pi-session-skills-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		cleanupPaths.push(tempDir);
@@ -336,8 +336,10 @@ describe("createAgentSessionFromServices", () => {
 			sessionManager: SessionManager.create(tempDir, join(tempDir, "sessions-without")),
 		});
 		try {
-			expect(visibleSkillNames(withoutControllers)).not.toContain(AGENT_MESSAGE_SKILL_NAME);
-			expect(visibleSkillNames(withoutControllers)).not.toContain(AGENT_OBSERVE_SKILL_NAME);
+			// No daemon: the session's in-process family bridges both APIs.
+			expect(visibleSkillNames(withoutControllers)).toContain(AGENT_MESSAGE_SKILL_NAME);
+			expect(visibleSkillNames(withoutControllers)).toContain(AGENT_OBSERVE_SKILL_NAME);
+			expect(kernelHostHandlers(withoutControllers)).toHaveProperty("agent_message.send");
 		} finally {
 			withoutControllers.dispose();
 		}
@@ -374,7 +376,8 @@ describe("createAgentSessionFromServices", () => {
 		});
 		try {
 			expect(visibleSkillNames(withControllers)).toContain(AGENT_OBSERVE_SKILL_NAME);
-			expect(visibleSkillNames(withControllers)).not.toContain(AGENT_MESSAGE_SKILL_NAME);
+			// A given observe controller replaces only observe; messaging stays in-process.
+			expect(visibleSkillNames(withControllers)).toContain(AGENT_MESSAGE_SKILL_NAME);
 		} finally {
 			withControllers.dispose();
 		}

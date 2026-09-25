@@ -449,6 +449,54 @@ describe("default model selection", () => {
 		expect(result.model?.id).toBe("openai/ghost-model");
 	});
 
+	test("findInitialModel announces, never silently swaps, an unusable configured default", async () => {
+		const deepseek: Model<"anthropic-messages"> = { ...mockModels[0], provider: "deepseek", id: "deepseek-v4-pro" };
+		const known = { ...mockModels[0], provider: "openrouter", id: "anthropic/claude-sonnet-5" };
+		const registry = {
+			refreshAvailableModels: async () => [deepseek],
+			find: (provider: string, id: string) => (provider === known.provider && id === known.id ? known : undefined),
+		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
+
+		const noCreds = await findInitialModel({
+			scopedModels: [],
+			isContinuing: false,
+			defaultProvider: "openrouter",
+			defaultModelId: "anthropic/claude-sonnet-5",
+			modelRegistry: registry,
+		});
+		expect(noCreds.model).toBe(deepseek);
+		expect(noCreds.fallbackMessage).toBe(
+			"Default model openrouter/anthropic/claude-sonnet-5 is unavailable (no credentials for openrouter); using deepseek/deepseek-v4-pro for this session. Change it with /model",
+		);
+
+		const missing = await findInitialModel({
+			scopedModels: [],
+			isContinuing: false,
+			defaultProvider: "omniroute",
+			defaultModelId: "auto/best-free",
+			modelRegistry: registry,
+		});
+		expect(missing.fallbackMessage).toContain("omniroute/auto/best-free is unavailable (not in the model registry)");
+	});
+
+	test("findInitialModel keeps a configured default whose provider is registered, reachable or not", async () => {
+		const omni: Model<"anthropic-messages"> = { ...mockModels[0], provider: "omniroute", id: "auto/best-free" };
+		const deepseek: Model<"anthropic-messages"> = { ...mockModels[0], provider: "deepseek", id: "deepseek-v4-pro" };
+		const registry = {
+			refreshAvailableModels: async () => [deepseek, omni],
+		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
+
+		const result = await findInitialModel({
+			scopedModels: [],
+			isContinuing: false,
+			defaultProvider: "omniroute",
+			defaultModelId: "auto/best-free",
+			modelRegistry: registry,
+		});
+		expect(result.model).toBe(omni);
+		expect(result.fallbackMessage).toBeUndefined();
+	});
+
 	test("findInitialModel uses medium as the built-in default thinking level", async () => {
 		const reasoningModel = mockModels[0];
 		const registry = {

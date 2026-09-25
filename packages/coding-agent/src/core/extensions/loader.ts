@@ -9,7 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { KeyId } from "@earendil-works/pi-tui";
-import { CONFIG_DIR_NAME, getAgentDir, isBunBinary } from "../../config.js";
+import { CONFIG_DIR_NAME, getAgentDir, isBunBinary, isBunRuntime } from "../../config.js";
 import { createEventBus, type EventBus } from "../event-bus.js";
 import type { ExecOptions } from "../exec.js";
 import { execCommand } from "../exec.js";
@@ -38,7 +38,9 @@ function getAliases(): Record<string, string> {
 	if (_aliases) return _aliases;
 
 	const __dirname = path.dirname(fileURLToPath(import.meta.url));
-	const packageIndex = path.resolve(__dirname, "../..", "index.js");
+	// Running from src/ there is only index.ts (compiled .js twins no longer sit next to sources).
+	const packageIndexJs = path.resolve(__dirname, "../..", "index.js");
+	const packageIndex = fs.existsSync(packageIndexJs) ? packageIndexJs : path.resolve(__dirname, "../..", "index.ts");
 
 	const typeboxEntry = require.resolve("typebox");
 	const typeboxCompileEntry = require.resolve("typebox/compile");
@@ -337,8 +339,14 @@ async function loadExtensionModule(extensionPath: string) {
 		// virtualModules so extensions share the bundle's module instances
 		// (file-path aliases would load a second, divergent copy of each package).
 		// Also disable tryNative so jiti handles ALL imports (not just the entry point)
-		// In Node.js/dev: use aliases to resolve to node_modules paths
-		...(isBunBinary || isBundledCli
+		// In Node.js/dev: use aliases to resolve to node_modules paths.
+		// Under Bun running the TypeScript sources (how rlm runs) the aliases were
+		// just as wrong: jiti transformed a second copy of every pi package, so an
+		// extension's `AssistantMessageComponent`, `theme`, `Container`… were not
+		// the classes the TUI renders with (prototype patches landed nowhere,
+		// instanceof failed). Bun imported bundled-modules natively, so its
+		// namespaces are the live ones — serve those.
+		...(isBunBinary || isBundledCli || isBunRuntime
 			? { virtualModules: (await import("./bundled-modules.js")).VIRTUAL_MODULES, tryNative: false }
 			: { alias: getAliases() }),
 	});

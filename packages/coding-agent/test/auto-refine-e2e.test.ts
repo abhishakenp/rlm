@@ -24,7 +24,7 @@ import { registerFauxProvider } from "@earendil-works/pi-ai";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
-import { loadHarnessState } from "../src/core/refinement/index.js";
+import { getGlobalHarnessStateDir, loadHarnessState } from "../src/core/refinement/index.js";
 
 const { completeSimpleMock } = vi.hoisted(() => ({
 	completeSimpleMock: vi.fn(),
@@ -161,9 +161,9 @@ describe("auto-refine end-to-end: error → learn → persist", () => {
 		// 4. Verify completeSimple was called (model was invoked for refinement).
 		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
 
-		// 5. Verify the harness entry was created on disk (local harness).
-		const localHarnessDir = getLocalHarnessDir(s);
-		const state = loadHarnessState(localHarnessDir, "local");
+		// 5. Verify the harness entry was created on disk — in the GLOBAL store.
+		const toolErrorHarnessDir = getGlobalHarnessStateDir(); // tool-error lessons are global: they must reach the next session
+		const state = loadHarnessState(toolErrorHarnessDir, "global");
 		expect(state.entries.memory?.js_json_parse_needs_valid_string).toBeDefined();
 		expect(state.entries.memory?.js_json_parse_needs_valid_string?.title).toBe(
 			"JSON.parse requires valid string input",
@@ -171,6 +171,15 @@ describe("auto-refine end-to-end: error → learn → persist", () => {
 
 		// 6. Verify pending review was cleared.
 		expect(s._pendingAutoRefineReview).toBeUndefined();
+
+		// 7. The point of learning from an error: a NEW session starts with the lesson.
+		// Before tool-error refines went global, this was undefined — every lesson
+		// died with the session that learned it.
+		const { session: next } = await createSession();
+		expect((next as any)._loadMergedHarnessState().entries.memory?.js_json_parse_needs_valid_string?.title).toBe(
+			"JSON.parse requires valid string input",
+		);
+		next.dispose();
 
 		session.dispose();
 	});
@@ -257,8 +266,8 @@ describe("auto-refine end-to-end: error → learn → persist", () => {
 
 		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
 
-		const localHarnessDir = getLocalHarnessDir(s);
-		const state = loadHarnessState(localHarnessDir, "local");
+		const toolErrorHarnessDir = getGlobalHarnessStateDir(); // tool-error lessons are global: they must reach the next session
+		const state = loadHarnessState(toolErrorHarnessDir, "global");
 		expect(state.entries.memory?.subagent_lesson_avoids_undefined_vars).toBeDefined();
 
 		session.dispose();
@@ -326,6 +335,22 @@ describe("auto-refine end-to-end: error → learn → persist", () => {
 		vi.unstubAllEnvs();
 	});
 
+	it("a code-cell exception (isError:false, details.status 'error') schedules a tool-error lesson", async () => {
+		const { session } = await createSession();
+		const s = session as any;
+		await s.agent.afterToolCall({
+			toolCall: { name: "code", id: "tc-cell", input: {} } as any,
+			args: { code: "console.log(__dirname)" },
+			result: {
+				content: [{ type: "text", text: "ReferenceError: __dirname is not defined" }],
+				details: { status: "error", durationMs: 18 },
+			} as any,
+			isError: false,
+		});
+		expect(s._pendingAutoRefineReview?.reason).toBe("tool_error");
+		session.dispose();
+	});
+
 	it("DISPOSAL DRAIN: pending review runs on disposeAsync (learning never lost)", async () => {
 		const { session } = await createSession();
 		const s = session as any;
@@ -359,8 +384,8 @@ describe("auto-refine end-to-end: error → learn → persist", () => {
 		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
 
 		// Verify memory was created in the session artifact harness dir.
-		const localHarnessDir = getLocalHarnessDir(s);
-		const state = loadHarnessState(localHarnessDir, "local");
+		const toolErrorHarnessDir = getGlobalHarnessStateDir(); // tool-error lessons are global: they must reach the next session
+		const state = loadHarnessState(toolErrorHarnessDir, "global");
 		expect(state.entries.memory?.disposal_drain_lesson).toBeDefined();
 	});
 

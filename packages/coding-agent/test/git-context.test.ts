@@ -75,6 +75,33 @@ describe("captureGitContext", () => {
 	it("returns null outside a git repo", () => {
 		expect(captureGitContext(dir)).toBeNull();
 	});
+
+	it("serves repeated reads from cache and still sees commits, checkouts and remote changes", () => {
+		initRepo(dir);
+		const first = commit(dir, "one");
+		expect(captureGitContext(dir)?.commit).toBe(first);
+		// Unchanged repository: the cached answer is identical and fast.
+		const started = performance.now();
+		for (let i = 0; i < 200; i++) expect(captureGitContext(dir)?.commit).toBe(first);
+		expect(performance.now() - started).toBeLessThan(500);
+
+		const second = commit(dir, "two");
+		expect(captureGitContext(dir)?.commit).toBe(second);
+
+		git(dir, "checkout", "-q", "-b", "feature");
+		expect(captureGitContext(dir)?.branch).toBe("feature");
+
+		git(dir, "remote", "add", "origin", "https://github.com/acme/widgets.git");
+		expect(captureGitContext(dir)?.repoUrl).toBe("https://github.com/acme/widgets.git");
+	});
+
+	it("hands out copies, so a caller mutating the result cannot poison the cache", () => {
+		initRepo(dir);
+		const sha = commit(dir, "init");
+		const ctx = captureGitContext(dir);
+		if (ctx) ctx.commit = "mutated";
+		expect(captureGitContext(dir)?.commit).toBe(sha);
+	});
 });
 
 describe("gitContextsEqual", () => {

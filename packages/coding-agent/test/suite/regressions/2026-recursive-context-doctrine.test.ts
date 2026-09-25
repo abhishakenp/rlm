@@ -46,7 +46,6 @@ describe("2026 recursive context doctrine — without explicit instruction AI us
 		// ensure no leakage between tests
 		delete (globalThis as any).__rlmContextProxy;
 		delete (globalThis as any).__rlmPrompt;
-		delete (globalThis as any).__rlmTaskContextSnapshot;
 		delete (globalThis as any).__rlmTui;
 	});
 
@@ -113,7 +112,10 @@ describe("2026 recursive context doctrine — without explicit instruction AI us
 		await new Promise((r) => setTimeout(r, 500));
 		expect(captured.length).toBeGreaterThan(0);
 		const joined = captured.join("\n");
-		expect(joined).toContain("MUST use `context.*` automatically at EVERY step");
+		expect(joined).toContain("use `context.*` automatically at every step");
+		// …but only for real work: a direct one-shot answer must not be pushed into
+		// context bookkeeping (it made "Reply with exactly: pong" end in narration).
+		expect(joined).toContain("Not for a direct answer");
 		expect(joined).toContain("copy / move / mutate / clone");
 		expect(joined).toContain("Everything Is A Variable");
 		try { await (svc as any)[Symbol.asyncDispose]?.(); } catch {}

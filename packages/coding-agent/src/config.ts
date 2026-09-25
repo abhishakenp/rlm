@@ -17,6 +17,25 @@ import { fileURLToPath } from "url";
 import { shouldUseWindowsShell } from "./utils/child-process.js";
 
 // =============================================================================
+// Iris Attention Service Configuration
+// =============================================================================
+
+// Iris provides attention/focus state tracking for context management.
+// The specifier is the package's own `name` field — `iris-attention`, bare and
+// unscoped. It was written here as "@earendil-works/iris-attention", a scope
+// that has never existed on npm or in this tree, and because every row that
+// reaches config.ts imports it, one unresolvable specifier took `config`,
+// `session`, `tools`, `refine`, `agent`, `renderer` and `print` out of every
+// boot for 4,395 consecutive sweeps.
+// See: packages/iris-attention/src/index.ts
+import { IrisAttention } from "iris-attention";
+
+// Re-export for type checking and plugin registration
+export { IrisAttention };
+export const irisService = IrisAttention.provide();
+
+
+// =============================================================================
 // Package Detection
 // =============================================================================
 
