@@ -1,6 +1,15 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { lockSync } from "proper-lockfile";
 
@@ -15,6 +24,26 @@ interface SessionLeaseOwner {
 	activeSessionId?: string;
 	sessionPath: string;
 	createdAt: string;
+}
+
+/** Why a lease directory no longer belongs to anybody. */
+export type DeadLeaseReason = "owner-unreadable" | "process-gone" | "process-replaced";
+
+/** One lease the reaper removed, or would remove under `dryRun`. */
+export interface ReapedSessionLease {
+	directory: string;
+	reason: DeadLeaseReason;
+	pid?: number;
+	sessionPath?: string;
+	activeSessionId?: string;
+	createdAt?: string;
+}
+
+export interface ReapSessionLeasesOptions {
+	/** Report what would go without removing anything. */
+	dryRun?: boolean;
+	/** A lease directory the caller is itself about to take, and must not sweep. */
+	except?: string;
 }
 
 export class SessionAlreadyActiveError extends Error {
@@ -174,15 +203,44 @@ function getCurrentProcessStartId(): string | undefined {
 	return currentProcessStartId;
 }
 
-function isLeaseOwnerAlive(owner: SessionLeaseOwner): boolean {
+/**
+ * Why a lease is dead, or `undefined` while it still belongs to someone.
+ *
+ * One classifier, two callers with different questions. `acquireSessionLease`
+ * only ever needs yes-or-no; the reaper has to be able to say *why* it removed
+ * a directory, because a sweep that cannot explain itself is a sweep nobody
+ * will trust with a forensic record. Sharing the decision is also what
+ * guarantees the reaper can never be more aggressive than the acquire path: a
+ * lease the sweep deletes is precisely a lease the next acquire would have
+ * reclaimed anyway.
+ *
+ * The two dead cases are the two ways an owner disappears. A pid that no
+ * longer answers `kill(pid, 0)` is gone. A pid that answers but whose start
+ * identity no longer matches the one recorded in `owner.json` is a *different*
+ * process wearing a recycled pid — the case that would otherwise hold a
+ * session hostage for ever behind a pid check that looks perfectly healthy.
+ * An owner whose start identity cannot be read at all is left alone: not
+ * knowing is not the same as knowing it is dead.
+ */
+function classifyDeadLease(owner: SessionLeaseOwner | undefined): DeadLeaseReason | undefined {
+	if (!owner) {
+		return "owner-unreadable";
+	}
 	if (!isProcessAlive(owner.pid)) {
-		return false;
+		return "process-gone";
 	}
 	if (!owner.processStartId) {
-		return true;
+		return undefined;
 	}
 	const currentStartId = getProcessStartId(owner.pid);
-	return currentStartId === undefined || currentStartId === owner.processStartId;
+	if (currentStartId === undefined) {
+		return undefined;
+	}
+	return currentStartId === owner.processStartId ? undefined : "process-replaced";
+}
+
+function isLeaseOwnerAlive(owner: SessionLeaseOwner): boolean {
+	return classifyDeadLease(owner) === undefined;
 }
 
 function withLeaseGuard<T>(directory: string, action: () => T): T {
@@ -229,6 +287,100 @@ function reclaimStaleLease(directory: string): boolean {
 	return true;
 }
 
+/**
+ * Remove every lease in `agentDir` whose owner is gone.
+ *
+ * Until this existed nothing ever swept the directory. `acquireSessionLease`
+ * reclaims a stale lease, but only the one lease it is trying to take — so a
+ * lease for a session that is never opened again is immortal, and a rename of
+ * the agent directory orphans the whole set at once. That is how one machine
+ * arrived at 172 `.lock` directories, every pid long dead, every recorded
+ * `sessionPath` still pointing at a directory that had been renamed away.
+ *
+ * Each candidate is examined under its own guard, which is what makes the
+ * sweep safe to run while sessions are starting: the guard is the same lock
+ * `acquireSessionLease` holds across its candidate/rename dance, so a lease
+ * being created right now is either not yet visible or is read complete. A
+ * guard we cannot take belongs to somebody actively working on that lease, and
+ * the lease is left for them.
+ */
+export function reapStaleSessionLeases(
+	agentDir: string,
+	options: ReapSessionLeasesOptions = {},
+): ReapedSessionLease[] {
+	const root = join(agentDir, "session-leases");
+	let entries: string[];
+	try {
+		entries = readdirSync(root);
+	} catch {
+		return [];
+	}
+
+	const reaped: ReapedSessionLease[] = [];
+	for (const entry of entries) {
+		// `.lock` is the settled name. The transient `.candidate-*`, `.stale-*`
+		// and `.guard` siblings belong to a live acquire and are not ours to judge.
+		if (!entry.endsWith(".lock")) {
+			continue;
+		}
+		const directory = join(root, entry);
+		if (options.except && directory === options.except) {
+			continue;
+		}
+		try {
+			withLeaseGuard(directory, () => {
+				if (!existsSync(directory)) {
+					return;
+				}
+				const owner = readLeaseOwner(directory);
+				const reason = classifyDeadLease(owner);
+				if (!reason) {
+					return;
+				}
+				if (!options.dryRun && !reclaimStaleLease(directory)) {
+					return;
+				}
+				reaped.push({
+					directory,
+					reason,
+					pid: owner?.pid,
+					sessionPath: owner?.sessionPath,
+					activeSessionId: owner?.activeSessionId,
+					createdAt: owner?.createdAt,
+				});
+			});
+		} catch {
+			// Contended or unreadable: whoever holds the guard owns the decision.
+		}
+	}
+	return reaped;
+}
+
+const sweptLeaseRoots = new Set<string>();
+
+/**
+ * Sweep a lease root once per process, on the way in.
+ *
+ * Reaping belongs on the acquire path rather than in a cron job because the
+ * acquire path is the only code that is guaranteed to run whenever leases are
+ * in use at all, and it already knows the directory layout. Once per process
+ * per root keeps it off the hot path — a resident host pays for it at its
+ * first session and never again — and every failure is swallowed, because a
+ * process must still be able to take its own lease on a day the sweep cannot.
+ */
+function sweepLeaseRootOnce(agentDir: string, except: string): void {
+	const root = join(agentDir, "session-leases");
+	if (sweptLeaseRoots.has(root)) {
+		return;
+	}
+	sweptLeaseRoots.add(root);
+	try {
+		reapStaleSessionLeases(agentDir, { except });
+	} catch {
+		// Housekeeping must never stand between a process and its own session.
+	}
+}
+
 export function acquireSessionLease(
 	sessionPath: string | undefined,
 	agentDir: string,
@@ -241,6 +393,7 @@ export function acquireSessionLease(
 	const root = join(agentDir, "session-leases");
 	mkdirSync(root, { recursive: true, mode: 0o700 });
 	const directory = leaseDirectory(agentDir, canonicalPath);
+	sweepLeaseRootOnce(agentDir, directory);
 
 	return withLeaseGuard(directory, () => {
 		for (let attempt = 0; attempt < 3; attempt++) {
