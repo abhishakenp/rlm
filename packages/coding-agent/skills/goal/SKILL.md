@@ -4,6 +4,8 @@ description: Manage the persistent thread goal from JS kernel. Use to read goal 
 ---
 
 # Goal
+> rlm's code tool runs JavaScript: positional arguments as written below, keyword arguments in a trailing object — e.g. `await goal.create("ship the release notes", { token_budget: 200000 })`.
+
 
 The thread goal is a persistent objective the harness keeps re-prompting you to
 pursue across turns until it is complete. Goal state (status, token budget,

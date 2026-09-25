@@ -3,9 +3,13 @@
  * Used by both edit.ts (for execution) and tool-execution.ts (for preview rendering).
  */
 
-import * as Diff from "diff";
 import { constants } from "fs";
 import { access, readFile } from "fs/promises";
+import { createRequire } from "node:module";
+
+// `diff` is 19 modules; load it the first time an edit needs a diff, not with the
+// agent core that imports this file.
+const diffLib = (): typeof import("diff") => createRequire(import.meta.url)("diff");
 import { resolveToCwd } from "./path-utils.js";
 
 export function detectLineEnding(content: string): "\r\n" | "\n" {
@@ -256,7 +260,7 @@ export function generateDiffString(
 	contextLines = 4,
 	startLine = 1,
 ): { diff: string; firstChangedLine: number | undefined } {
-	const parts = Diff.diffLines(oldContent, newContent);
+	const parts = diffLib().diffLines(oldContent, newContent);
 	const output: string[] = [];
 
 	const oldLines = oldContent.split("\n");

@@ -15,7 +15,7 @@ JS kernel:
 await refine.status()
 await refine.run()
 await refine.run("create a memory about always checking git status before committing")
-await refine.run("promote the error-handling pattern to a global skill", global_=True)
+await refine.run("promote the error-handling pattern to a global skill", { global: true })
 ```
 
 ## API
@@ -23,10 +23,10 @@ await refine.run("promote the error-handling pattern to a global skill", global_
 - `await refine.status()` — current refine state as a dict: `pending` (whether a
   requested refine is already queued for this turn) and `in_flight` (whether a
   refine is currently planning or applying).
-- `await refine.run(instructions=None, global_=False)` — schedule refinement.
+- `await refine.run(instructions?, { global: true }?)` — schedule refinement.
   Returns `{"scheduled": True}` immediately, or `{"scheduled": False, "reason": ...}`
   when refinement cannot start. Optional `instructions` focus the refinement on a
-  specific observation. Set `global_=True` to target the global harness store
+  specific observation. Pass `{ global: true }` to target the global harness store
   (cross-session); omit for local (session-scoped) refinement.
 
 ## Rules

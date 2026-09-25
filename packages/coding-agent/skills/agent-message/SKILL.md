@@ -4,6 +4,8 @@ description: Message an agent's parent, siblings, or direct children through the
 ---
 
 # Agent Message
+> rlm's code tool runs JavaScript: positional arguments as written below, keyword arguments in a trailing object — e.g. `await agent_message.send("status: done", { receiver_role: "parent" })`.
+
 
 Send direct messages within the current agent's nuclear family through the
 local daemon: parent, siblings, and direct children only. Roots are siblings.

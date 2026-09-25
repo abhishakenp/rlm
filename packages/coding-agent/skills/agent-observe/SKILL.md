@@ -4,6 +4,8 @@ description: Read-only observation of an agent's parent, siblings, and direct ch
 ---
 
 # Agent Observe
+> rlm's code tool runs JavaScript: positional arguments as written below, keyword arguments in a trailing object — e.g. `await agent_observe.recent_messages("worker-1", { limit: 6 })`.
+
 
 Observe the current agent's nuclear family through the local daemon: parent,
 siblings, direct children, and self. Observation is currently limited to family

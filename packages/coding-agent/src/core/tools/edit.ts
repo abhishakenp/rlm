@@ -1,5 +1,9 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { Box, type Component, Container, Spacer, Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Box } from "@earendil-works/pi-tui/components/box.js";
+import { Spacer } from "@earendil-works/pi-tui/components/spacer.js";
+import { Text } from "@earendil-works/pi-tui/components/text.js";
+import { type Component, Container } from "@earendil-works/pi-tui/tui.js";
+import { wrapTextWithAnsi } from "@earendil-works/pi-tui/utils.js";
 import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
 import type { Static } from "typebox";

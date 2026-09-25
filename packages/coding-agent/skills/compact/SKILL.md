@@ -4,6 +4,8 @@ description: Check context usage and compact the conversation from JS kernel. Us
 ---
 
 # Compact
+> rlm's code tool runs JavaScript: positional arguments as written below, keyword arguments in a trailing object — e.g. `await compact.run("keep the failing test names")`.
+
 
 Compaction replaces older conversation history with a dense summary, freeing
 context so long-running work can continue. The implementation lives in the

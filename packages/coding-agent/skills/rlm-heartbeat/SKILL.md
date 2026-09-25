@@ -4,6 +4,8 @@ description: Manage agent-owned RLM heartbeats from JS kernel. Use when the user
 ---
 
 # RLM Heartbeat
+> rlm's code tool runs JavaScript: positional arguments as written below, keyword arguments in a trailing object — e.g. `await rlm_heartbeat.create("check test progress", { interval: "5m", label: "tests" })`.
+
 
 RLM heartbeats are internal recurring prompts for the current agent session.
 They are separate from the user's visible `/heartbeat`: this skill cannot read,
