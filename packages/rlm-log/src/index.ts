@@ -8,12 +8,12 @@
  *
  * Two things were missing.
  *
- *   The structured log had stopped. `installFileLogSink()` is called from
- *   packages/coding-agent/src/main.ts — the entry point rlm no longer uses —
- *   so when the Cordis shell became the host, ~/.rlm/agent/logs/agent.jsonl
- *   simply stopped being written and nobody noticed. This plugin installs the
- *   sink again, so the agent's own logging resumes flowing to the same file it
- *   always used.
+ *   The agent's own structured logging was not in this file. pi-ai emits
+ *   through a process-wide sink, and under the Cordis shell nobody was folding
+ *   that stream in here — so a tool failing inside the agent and a plugin
+ *   reloading around it were recorded in two different places, or in the
+ *   agent's case in no place anybody read. `adoptAgentLogging()` below claims
+ *   that sink, so the agent's entries are ordinary lines of this recorder.
  *
  *   Nothing recorded the events that only exist now: a plugin reloading, a
  *   session re-deriving its resources, a tool failing, a turn beginning and
@@ -46,7 +46,7 @@ export interface RlmLogConfig {
 	maxBytes?: number;
 	/** Also mirror to stderr. Default false — it would fight the TUI. */
 	console?: boolean;
-	/** Install the coding-agent/pi-ai file sink as well. Default true. */
+	/** Fold the agent's own (pi-ai) structured logging into this file. Default true. */
 	installAgentSink?: boolean;
 }
 
@@ -163,7 +163,7 @@ export class RlmLogService extends Service {
 			argv: process.argv.slice(1),
 		});
 
-		if (this.config.installAgentSink !== false) await this.installAgentSink();
+		if (this.config.installAgentSink !== false) await this.adoptAgentLogging();
 		this.watchProcess();
 		this.watchBus();
 		this.watchSessions();
@@ -226,18 +226,77 @@ export class RlmLogService extends Service {
 	}
 
 	/**
-	 * Resume the agent's own structured logging.
+	 * Take over the agent's structured logging — into this file, not beside it.
 	 *
-	 * It writes to ~/.rlm/agent/logs/agent.jsonl and stopped when the Cordis
-	 * shell replaced main.ts as the entry point.
+	 * What stood here called `installFileLogSink()` from
+	 * packages/coding-agent/src/core/logging.ts, which points pi-ai's
+	 * process-wide sink at ~/.rlm/agent/logs/agent.jsonl. Under this host that
+	 * produced the one outcome worse than no log at all: two structured logs,
+	 * one live and one lying. `agent.jsonl` was last written on 2026-08-30, and
+	 * 96% of everything it ever held came from `coding-agent.daemon` and
+	 * `coding-agent.daemon-supervisor` — an architecture the Cordis shell does
+	 * not run. Meanwhile this plugin announced `agent.sink.installed` on every
+	 * boot, so a file nothing reads and almost nothing writes looked maintained.
+	 * Nothing in the repo reads agent.jsonl; `scripts/rlm-logs.mjs` reads this
+	 * file. So there is one log now, and it is this one.
+	 *
+	 * The sink is installed on **every** pi-ai module instance the repo can
+	 * reach, and that is not belt-and-braces. `packages/ai` is loaded twice: as
+	 * `src/index.ts` under tsx, which is how this host runs, and as
+	 * `dist/index.js` through the `@earendil-works/pi-ai` specifier. The two
+	 * hold separate module-level sinks — `src.setLogSink !== dist.setLogSink` —
+	 * so installing on one and emitting through the other is precisely how a log
+	 * ends up silently empty while its installer reports success.
+	 *
+	 * Relative paths rather than the package specifier because this package has
+	 * no `node_modules` of its own to resolve `@earendil-works/pi-ai` through;
+	 * the old code borrowed coding-agent's resolution for exactly that reason.
 	 */
-	private async installAgentSink() {
-		try {
-			const mod: any = await import("../../coding-agent/src/core/logging.js");
-			mod.installFileLogSink?.({ host: "cordis-shell" });
-			this.write("info", PLUGIN_ID, "agent.sink.installed");
-		} catch (error: any) {
-			this.write("warn", PLUGIN_ID, "agent.sink.failed", { error: error?.message ?? String(error) });
+	private async adoptAgentLogging() {
+		const state = ((globalThis as any).__rlmAgentSink ??= { installed: "", error: "" }) as {
+			installed: string;
+			error: string;
+		};
+		const sink = (entry: any) => {
+			const { ts: _ts, level, component, msg, ...fields } = entry ?? {};
+			this.write(
+				typeof level === "string" && level in LEVELS ? (level as LogLevel) : "info",
+				typeof component === "string" && component ? component : "agent",
+				typeof msg === "string" ? msg : String(msg ?? ""),
+				fields,
+			);
+		};
+
+		const installed: string[] = [];
+		const failures: string[] = [];
+		for (const target of ["../../ai/src/index.ts", "../../ai/dist/index.js"]) {
+			try {
+				const mod: any = await import(target);
+				if (typeof mod.setLogSink !== "function") throw new Error("no setLogSink export");
+				mod.setLogSink(sink);
+				installed.push(target);
+			} catch (error: any) {
+				failures.push(`${target}: ${error?.message ?? String(error)}`);
+			}
+		}
+
+		// Say it once. A reload that lands on the same answer as last time is not
+		// news, and this plugin used to spend 71% of the system's warn+error
+		// budget re-announcing an unchanged verdict on every boot and reload.
+		const summary = installed.join(",");
+		if (installed.length && summary !== state.installed) {
+			this.write("info", PLUGIN_ID, "agent.sink.installed", { targets: installed });
+			state.installed = summary;
+		} else if (installed.length) {
+			this.write("debug", PLUGIN_ID, "agent.sink.reused", { targets: installed });
+		}
+
+		const error = failures.join(" | ");
+		if (error && error !== state.error) {
+			// Only a total failure is a warning: one instance is enough to record
+			// through, and the other may simply not have been built.
+			this.write(installed.length ? "debug" : "warn", PLUGIN_ID, "agent.sink.failed", { error });
+			state.error = error;
 		}
 	}
 
