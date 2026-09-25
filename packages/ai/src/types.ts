@@ -13,7 +13,8 @@ export type KnownApi =
 	| "bedrock-converse-stream"
 	| "google-generative-ai"
 	| "google-vertex"
-	| "google-image-generation";
+	| "google-image-generation"
+	| "cerebras-conversations";
 
 export type Api = KnownApi | (string & {});
 

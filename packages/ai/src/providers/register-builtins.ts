@@ -17,6 +17,7 @@ import type { GoogleOptions } from "./google.js";
 import type { GoogleVertexOptions } from "./google-vertex.js";
 import type { GoogleImageOptions } from "./google-image.js";
 import type { MistralOptions } from "./mistral.js";
+import type { CerebrasOptions } from "./cerebras.js";
 import type { OpenAICodexResponsesOptions } from "./openai-codex-responses.js";
 import type { OpenAICompletionsOptions } from "./openai-completions.js";
 import type { OpenAIResponsesOptions } from "./openai-responses.js";
@@ -57,6 +58,11 @@ interface GoogleImageProviderModule {
 interface GoogleVertexProviderModule {
 	streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOptions>;
 	streamSimpleGoogleVertex: StreamFunction<"google-vertex", SimpleStreamOptions>;
+}
+
+interface CerebrasProviderModule {
+	streamCerebras: StreamFunction<"cerebras-conversations", CerebrasOptions>;
+	streamSimpleCerebras: StreamFunction<"cerebras-conversations", SimpleStreamOptions>;
 }
 
 interface MistralProviderModule {
@@ -108,6 +114,9 @@ let googleImageProviderModulePromise:
 	| undefined;
 let googleVertexProviderModulePromise:
 	| Promise<LazyProviderModule<"google-vertex", GoogleVertexOptions, SimpleStreamOptions>>
+	| undefined;
+let cerebrasProviderModulePromise:
+	| Promise<LazyProviderModule<"cerebras-conversations", CerebrasOptions, SimpleStreamOptions>>
 	| undefined;
 let mistralProviderModulePromise:
 	| Promise<LazyProviderModule<"mistral-conversations", MistralOptions, SimpleStreamOptions>>
@@ -274,6 +283,19 @@ function loadGoogleVertexProviderModule(): Promise<
 	return googleVertexProviderModulePromise;
 }
 
+function loadCerebrasProviderModule(): Promise<
+	LazyProviderModule<"cerebras-conversations", CerebrasOptions, SimpleStreamOptions>
+> {
+	cerebrasProviderModulePromise ||= import("./cerebras.js").then((module) => {
+		const provider = module as CerebrasProviderModule;
+		return {
+			stream: provider.streamCerebras,
+			streamSimple: provider.streamSimpleCerebras,
+		};
+	});
+	return cerebrasProviderModulePromise;
+}
+
 function loadMistralProviderModule(): Promise<
 	LazyProviderModule<"mistral-conversations", MistralOptions, SimpleStreamOptions>
 > {
@@ -352,6 +374,8 @@ export const streamGoogleImage = createLazyStream(loadGoogleImageProviderModule)
 export const streamSimpleGoogleImage = createLazySimpleStream(loadGoogleImageProviderModule);
 export const streamGoogleVertex = createLazyStream(loadGoogleVertexProviderModule);
 export const streamSimpleGoogleVertex = createLazySimpleStream(loadGoogleVertexProviderModule);
+export const streamCerebras = createLazyStream(loadCerebrasProviderModule);
+export const streamSimpleCerebras = createLazySimpleStream(loadCerebrasProviderModule);
 export const streamMistral = createLazyStream(loadMistralProviderModule);
 export const streamSimpleMistral = createLazySimpleStream(loadMistralProviderModule);
 export const streamOpenAICodexResponses = createLazyStream(loadOpenAICodexResponsesProviderModule);
@@ -422,6 +446,12 @@ export function registerBuiltInApiProviders(): void {
 		api: "bedrock-converse-stream",
 		stream: streamBedrockLazy,
 		streamSimple: streamSimpleBedrockLazy,
+	});
+
+	registerApiProvider({
+		api: "cerebras-conversations",
+		stream: streamCerebras,
+		streamSimple: streamSimpleCerebras,
 	});
 }
 
