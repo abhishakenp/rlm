@@ -174,6 +174,16 @@ console.log("\na criterion that cannot pass becomes a question, not a loop");
 		concurrency: 1,
 		maxSweeps: 5,
 	});
+	t("the first run lists its questions in the report", () => {
+		eq(report.questionsUnchanged, false);
+		ok(renderReport(report).includes("/never —"), renderReport(report));
+	});
+	t("the second run, with the same questions, says so in one line instead of repeating them", () => {
+		eq(again.questionsUnchanged, true);
+		const text = renderReport(again);
+		ok(text.includes("unchanged since the last run"), text);
+		ok(!text.includes("/never —"), text);
+	});
 	t("running it again spends no further attempts on work that is stopped", () => {
 		eq(again.owed.length, 3);
 		eq(by("never").attempts.length <= 3, true);

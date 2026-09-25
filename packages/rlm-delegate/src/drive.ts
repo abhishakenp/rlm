@@ -25,7 +25,7 @@
  *      the loop runs out of things it knows, it produces a question — see
  *      impasse.ts, which is where that judgement is written down.
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { capacity } from "./capacity.ts";
 import { outstanding, runnable, type Graph, type Task } from "./graph.ts";
@@ -143,10 +143,27 @@ export interface DriveReport {
 	stalledBy?: string;
 	stoppedBy?: string;
 	graphs: number;
+	/**
+	 * How many graphs the store holds at all, before any filter.
+	 *
+	 * `graphs` counts the ones this sweep actually looked at, and for four
+	 * thousand consecutive sweeps that was zero while this field would have
+	 * been zero too — the backlog really was empty, every graph having been
+	 * quarantined. The report said "that is a fault, not an empty backlog"
+	 * anyway, because it could not tell the two apart, and a watchdog that
+	 * cries wolf on every run is one nobody reads by the time it is right.
+	 */
+	stored: number;
 	proven: string[];
 	owed: string[];
 	questions: Impasse[];
 	questionsPath?: string;
+	/**
+	 * The questions are the same ones the last run wrote down. Each sweep is a
+	 * fresh process, so without this the whole list was printed into drive.log
+	 * every sweep — 2,936 copies of the same dead tasks in 16.9 MB.
+	 */
+	questionsUnchanged?: boolean;
 }
 
 /** What the graph looked like, so "did anything move?" is a comparison and not a feeling. */
@@ -887,13 +904,24 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 						if (task.proof.kind === "unstated") continue;
 						if (task.attempts.length >= 2 * (options.maxAttempts ?? 3)) continue;
 						try {
+							// When me-2 rejected the work, its diagnosis is the one
+							// piece of information the planner needs to change the
+							// approach rather than repeat it. Without it the planner
+							// sees a task that "reported done" and has no idea why
+							// that was not enough. The review reason is carried in
+							// the unstated note so it is visible at re-plan time,
+							// and refineOne also includes it in the history it
+							// hands the planner directly.
+							const me2 = task.review?.verdict === "rejected" && task.review.reason
+								? ` (me-2 said: ${task.review.reason.slice(0, 200)})`
+								: "";
 							store.answered(
 								graph.id,
 								task.id,
 								{ kind: "unstated" },
 								task.state === "unproven"
 									? "the drive, because a turn ended and no criterion was ever run"
-									: "the drive, because this check never once moved",
+									: `the drive, because this check never once moved${me2}`,
 							);
 							say("rlm/drive-replanning", { graph: graph.id, task: task.id, was: task.proof.kind === "shell" ? task.proof.run : task.state });
 						} catch (error: any) {
@@ -966,8 +994,8 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 	}
 	if (stalledBy) ended = "stalled";
 
-	const all = store
-		.ids()
+	const storedIds = store.ids();
+	const all = storedIds
 		.filter((id) => touched.has(id))
 		.map((id) => store.load(id))
 		.filter((g): g is Graph => !!g)
@@ -975,10 +1003,21 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 	const found = impasses(all.filter((g) => outstanding(g.tasks).length));
 
 	let questionsPath: string | undefined;
+	let questionsUnchanged = false;
 	try {
 		questionsPath = options.questionsPath ?? join(store.dir, "QUESTIONS.md");
 		mkdirSync(store.dir, { recursive: true });
-		writeFileSync(questionsPath, renderImpasses(found), "utf8");
+		const next = renderImpasses(found);
+		let previous = "";
+		try {
+			previous = readFileSync(questionsPath, "utf8");
+		} catch {
+			/* first run */
+		}
+		// The "As of" line is the only part that changes when nothing else has.
+		const body = (text: string) => text.replace(/^As of \S+\. /m, "");
+		questionsUnchanged = found.length > 0 && body(previous) === body(next);
+		writeFileSync(questionsPath, next, "utf8");
 	} catch {
 		// A question that could not be written down is still returned in the
 		// report; failing to write the file must not lose it.
@@ -991,10 +1030,12 @@ export const drive = async (store: Store, options: DriveOptions): Promise<DriveR
 		stoppedBy: stoppedBy ?? undefined,
 		stalledBy: stalledBy ?? undefined,
 		graphs: all.length,
+		stored: storedIds.length,
 		proven: all.flatMap((g) => g.tasks.filter((t) => t.state === "done").map((t) => `${g.id}/${t.id}`)),
 		owed: all.flatMap((g) => outstanding(g.tasks).map((t) => `${g.id}/${t.id}`)),
 		questions: found,
 		questionsPath,
+		questionsUnchanged,
 	};
 	say("rlm/drive-done", {
 		sweeps: report.sweeps,
@@ -1012,8 +1053,10 @@ export const renderReport = (report: DriveReport): string =>
 		// "Settled" over nothing at all is not a result, it is a filter that ate
 		// the work. Say so, because the sentence that reads like success is the
 		// one nobody checks.
-		report.ended === "settled" && report.graphs === 0
-			? "the drive looked at no graphs at all — that is a fault, not an empty backlog: check what is restricting it"
+		report.ended === "settled" && report.graphs === 0 && report.stored > 0
+			? `the drive looked at no graphs at all, and the store holds ${report.stored} — that is a fault, not an empty backlog: check what is restricting it`
+			: report.ended === "settled" && report.graphs === 0
+			? "the backlog is empty — nothing is owed and nothing was restricted"
 			: `the drive ${
 					report.ended === "settled"
 						? "worked everything it could"
@@ -1026,8 +1069,10 @@ export const renderReport = (report: DriveReport): string =>
 		`  ${report.proven.length} proven done, ${report.owed.length} still owed, across ${report.graphs} graph(s), in ${report.sweeps} sweep(s)`,
 		...(report.questions.length
 			? [
-					`  ${report.questions.length} waiting on one sentence from you${report.questionsPath ? ` — ${report.questionsPath}` : ""}`,
-					...report.questions.slice(0, 15).map((q) => `    ${q.graph}/${q.task.id} — ${q.question}`),
+					`  ${report.questions.length} waiting on one sentence from you${report.questionsPath ? ` — ${report.questionsPath}` : ""}${report.questionsUnchanged ? " (unchanged since the last run, not repeated here)" : ""}`,
+					...(report.questionsUnchanged
+						? []
+						: report.questions.slice(0, 15).map((q) => `    ${q.graph}/${q.task.id} — ${q.question}`)),
 				]
 			: []),
 	].join("\n");

@@ -12,6 +12,13 @@
 # as a sweep that started and ended in the same second.
 N=/Users/abhi/.local/share/fnm/node-versions/v22.23.1/installation/bin/node
 TIMEOUT=/opt/homebrew/bin/timeout
+
+# Sweep cadence. The floor is what a busy drive gets; the ceiling is where an
+# idle one settles — long enough that an empty backlog costs nothing, short
+# enough that work queued by hand is picked up within a coffee.
+SWEEP_MIN_SECONDS=45
+SWEEP_MAX_SECONDS=1800
+idle=0
 LOG="$HOME/.rlm/agent/delegate/drive.log"
 cd /Users/abhi/proj/rlm || exit 1
 mkdir -p "$(dirname "$LOG")"
@@ -24,7 +31,21 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$(di
 [ -x "$N" ] || { echo "[$(date +%H:%M:%S)] no node at $N" >> "$LOG"; exit 1; }
 [ -x "$TIMEOUT" ] || TIMEOUT=""
 
+# Size-based rotation, one old copy. The log grew to 16.9 MB unrotated; the
+# idle back-off below only reads its last 25 lines, so nothing is lost by
+# starting a fresh file between sweeps.
+LOG_MAX_BYTES=5242880
+rotate_log() {
+  local size
+  size=$(/usr/bin/stat -f %z "$LOG" 2>/dev/null || echo 0)
+  if [ "$size" -gt "$LOG_MAX_BYTES" ]; then
+    /bin/mv -f "$LOG" "$LOG.1"
+    echo "[$(date +%H:%M:%S)] log rotated (${size} bytes) — previous run in $LOG.1" >> "$LOG"
+  fi
+}
+
 while true; do
+  rotate_log
   stood_down=0
   for f in "$HOME/Desktop/.iris-autonomy-off" "$HOME/.rlm/agent/delegate/drive.stop"; do
     if [ -f "$f" ]; then
@@ -94,5 +115,30 @@ while true; do
   fi
   rc=$?
   echo "[$(date +%H:%M:%S)] sweep ended rc=$rc" >> "$LOG"
-  sleep 45
+
+  # Back off when there is nothing to do.
+  #
+  # A fixed 45s sleep meant a full cordis boot — tsx loader, the whole module
+  # graph, every row — three times every two minutes, forever, whether or not
+  # a single graph was waiting. It ran 4,395 times against an empty backlog and
+  # cost more than the work would have. An idle drive should get out of the
+  # way; a busy one must not be slowed down, so any sweep that saw work resets
+  # the delay to the floor immediately.
+  #
+  # The marker is the drive's own sentence for "the store is empty", so this
+  # cannot drift away from what the drive actually decided.
+  if /usr/bin/tail -n 25 "$LOG" | /usr/bin/grep -q "the backlog is empty"; then
+    idle=$((idle + 1))
+  else
+    idle=0
+  fi
+  delay=$SWEEP_MIN_SECONDS
+  n=0
+  while [ "$n" -lt "$idle" ] && [ "$delay" -lt "$SWEEP_MAX_SECONDS" ]; do
+    delay=$((delay * 2))
+    n=$((n + 1))
+  done
+  [ "$delay" -gt "$SWEEP_MAX_SECONDS" ] && delay=$SWEEP_MAX_SECONDS
+  [ "$idle" -gt 0 ] && echo "[$(date +%H:%M:%S)] backlog empty ${idle}x — next sweep in ${delay}s" >> "$LOG"
+  sleep "$delay"
 done
