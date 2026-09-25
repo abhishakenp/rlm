@@ -1,5 +1,8 @@
 import { type Component, type Focusable, getKeybindings, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../../agent-connection/index.js";
+import { collectSubagentDescendantSummaries } from "../../agents-view/agents-view-state.js";
+import { type AgentRosterStatus, classifyAgentStatus } from "../../agents-view/agent-roster.js";
+import { classifySessionRosterStatus, type SessionSummary } from "../../agents-view/session-summary.js";
 import { theme } from "../theme/theme.js";
 import { keyText } from "./keybinding-hints.js";
 
@@ -10,29 +13,53 @@ export interface SubagentSummaryCounts {
 	inactive: number;
 }
 
-export function countDirectSubagentStatuses(
+export function classifySubagentSnapshotStatus(child: AgentConnectionRlmChildAgentSnapshot): AgentRosterStatus {
+	// Activity implies a live session; the in-process connection never stamps activeSessionId.
+	const resident = child.activeSessionId !== undefined || child.activity !== undefined;
+	const busy = child.status === "running" || child.status === "queued" || child.activity !== undefined;
+	return classifyAgentStatus({
+		resident,
+		queuedChild: !resident && busy,
+		busy,
+	});
+}
+
+/** Status counts over every snapshot descending from `parentId`; the recursive roster carries the whole subtree. */
+export function countSubtreeSubagentStatuses(
 	children: Iterable<AgentConnectionRlmChildAgentSnapshot>,
 	parentId: string | undefined,
-	activeHeartbeatSessionIds: ReadonlySet<string>,
 ): SubagentSummaryCounts {
-	let total = 0;
-	let running = 0;
-	let idle = 0;
-	for (const child of children) {
-		if (child.parentId !== parentId || child.status === "cancelled") continue;
-		total += 1;
-		const isRunning =
-			child.status === "running" ||
-			child.status === "queued" ||
-			child.activity !== undefined ||
-			(child.activeSessionId !== undefined && activeHeartbeatSessionIds.has(child.activeSessionId));
-		if (isRunning) {
-			running += 1;
-		} else if ((child.status === "done" || child.status === "error") && child.activeSessionId !== undefined) {
-			idle += 1;
+	const counts: SubagentSummaryCounts = { total: 0, running: 0, idle: 0, inactive: 0 };
+	const knownNodes = new Set<string | undefined>([parentId]);
+	const pending = [...children].filter((child) => child.status !== "cancelled");
+	let matched = true;
+	while (matched) {
+		matched = false;
+		for (let index = pending.length - 1; index >= 0; index--) {
+			const child = pending[index]!;
+			if (!knownNodes.has(child.parentId)) continue;
+			pending.splice(index, 1);
+			matched = true;
+			counts.total += 1;
+			counts[classifySubagentSnapshotStatus(child)] += 1;
+			knownNodes.add(child.id);
 		}
 	}
-	return { total, running, idle, inactive: total - running - idle };
+	return counts;
+}
+
+export function countRosterSubagentStatuses(
+	summaries: Iterable<SessionSummary>,
+	parent: { activeSessionId?: string | undefined; sessionId?: string | undefined; sessionFile?: string | undefined },
+): SubagentSummaryCounts {
+	const counts: SubagentSummaryCounts = { total: 0, running: 0, idle: 0, inactive: 0 };
+	// The daemon roster spans every tree: count live rows in this session's subtree, at any depth.
+	for (const child of collectSubagentDescendantSummaries(summaries, parent)) {
+		if (child.lifecycle !== "live") continue;
+		counts.total += 1;
+		counts[child.rosterStatus ?? classifySessionRosterStatus(child)] += 1;
+	}
+	return counts;
 }
 
 /** One-line entry into the current session's scoped agents view. */
@@ -49,7 +76,30 @@ export class SubagentSummaryLine implements Component, Focusable {
 		private readonly getLocationLabel: () => string | undefined = () => undefined,
 		private readonly getContextLabel: () => string | undefined = () => undefined,
 		private readonly getOverrideLabel: () => string | undefined = () => undefined,
+		private readonly getPickerOpen: () => boolean = () => false,
 	) {}
+
+	/**
+	 * Extra right-side segments (plugin status items: tokens/sec, …), rendered
+	 * after the context label in order. When the line is too narrow the last
+	 * segment is dropped first, before the left side is truncated.
+	 */
+	setStatusSegmentsSource(source: (() => string[]) | undefined): void {
+		this.getStatusSegments = source;
+	}
+
+	private getStatusSegments: (() => string[]) | undefined;
+
+	/**
+	 * One transient message (reload news) shown in the gap between the left
+	 * labels and the right-aligned context label. It takes whatever room is
+	 * left and is cut to fit; it never adds a line.
+	 */
+	setNoticeSource(source: (() => string | undefined) | undefined): void {
+		this.getNotice = source;
+	}
+
+	private getNotice: (() => string | undefined) | undefined;
 
 	setSubagentCounts(counts: SubagentSummaryCounts): void {
 		this.counts = counts;
@@ -60,7 +110,7 @@ export class SubagentSummaryLine implements Component, Focusable {
 	}
 
 	isSelectable(): boolean {
-		return this.counts.total > 0 && this.openable;
+		return !this.getPickerOpen() && this.counts.total > 0 && this.openable;
 	}
 
 	handleInput(data: string): void {
@@ -81,14 +131,15 @@ export class SubagentSummaryLine implements Component, Focusable {
 	}
 
 	render(width: number): string[] {
+		if (this.getPickerOpen()) return [];
 		const lines = this.renderInfoLine(width);
 		if (this.counts.total === 0) return lines;
 		if (width < 2) return lines;
 		const safeWidth = width;
 		const inner = safeWidth - 2;
-		const label = theme.fg("accent", "[1magents[22m");
+		const label = theme.fg("accent", "subagents");
 		const top = truncateToWidth(
-			`${theme.fg("border", "╭─ ")}${label}${theme.fg("border", ` ${"─".repeat(Math.max(0, inner - 9))}╮`)}`,
+			`${theme.fg("border", "╭─ ")}${label}${theme.fg("border", ` ${"─".repeat(Math.max(0, inner - 3 - visibleWidth(label)))}╮`)}`,
 			safeWidth,
 			"…",
 		);
@@ -127,16 +178,32 @@ export class SubagentSummaryLine implements Component, Focusable {
 		const locationLabel = this.getLocationLabel()?.trim();
 		const contextLabel = this.getContextLabel()?.trim();
 		const left = overrideLabel || locationLabel || "";
-		if (!left && !contextLabel) return [];
+		let segments: string[] = [];
+		try {
+			segments = (this.getStatusSegments?.() ?? []).map((s) => s.trim()).filter(Boolean);
+		} catch {}
+		if (!left && !contextLabel && segments.length === 0) return [];
 		const safeWidth = Math.max(1, width);
-		const right = contextLabel ?? "";
+		const joinRight = () => [contextLabel, ...segments].filter(Boolean).join(" · ");
+		let right = joinRight();
+		while (segments.length > 0 && visibleWidth(left) + (left && right ? 2 : 0) + visibleWidth(right) > safeWidth) {
+			segments = segments.slice(0, -1);
+			right = joinRight();
+		}
 		const gap = left && right ? 2 : 0;
 		const rightWidth = Math.min(visibleWidth(right), Math.max(0, safeWidth - gap));
 		const leftWidth = Math.max(0, safeWidth - rightWidth - gap);
 		const renderedLeft = truncateToWidth(left, leftWidth, "…");
 		const renderedRight = truncateToWidth(right, rightWidth, "…");
-		const padding = Math.max(0, safeWidth - visibleWidth(renderedLeft) - visibleWidth(renderedRight));
-		return [theme.fg("muted", `${renderedLeft}${" ".repeat(padding)}${renderedRight}`)];
+		let notice = "";
+		try {
+			notice = (!overrideLabel && this.getNotice?.()?.trim()) || "";
+		} catch {}
+		const room = safeWidth - visibleWidth(renderedLeft) - visibleWidth(renderedRight) - (renderedLeft ? 3 : 0) - 2;
+		const renderedNotice = notice && room >= 8 ? truncateToWidth(notice, room, "…") : "";
+		const leftPart = renderedNotice ? `${renderedLeft}${renderedLeft ? "   " : ""}${renderedNotice}` : renderedLeft;
+		const padding = Math.max(0, safeWidth - visibleWidth(leftPart) - visibleWidth(renderedRight));
+		return [theme.fg("muted", `${leftPart}${" ".repeat(padding)}${renderedRight}`)];
 	}
 
 	invalidate(): void {

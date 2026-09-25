@@ -1,6 +1,9 @@
-import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import * as Diff from "diff";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui/utils.js";
+import { createRequire } from "node:module";
 import { highlightCode, theme } from "../theme/theme.js";
+
+// Loaded on first render: core imports this file through the edit tool.
+const diffLib = (): typeof import("diff") => createRequire(import.meta.url)("diff");
 
 /**
  * Parse diff line to extract prefix, line number, and content.
@@ -25,7 +28,7 @@ function replaceTabs(text: string): string {
  * Strips leading whitespace from inverse to avoid highlighting indentation.
  */
 function renderIntraLineDiff(oldContent: string, newContent: string): { removedLine: string; addedLine: string } {
-	const wordDiff = Diff.diffWords(oldContent, newContent);
+	const wordDiff = diffLib().diffWords(oldContent, newContent);
 
 	let removedLine = "";
 	let addedLine = "";

@@ -1,18 +1,18 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { EditorTheme, MarkdownTheme, Rgb, SelectListTheme } from "@earendil-works/pi-tui";
+// From the module, not the package index: the index loads every TUI component,
+// and core (agent-session, extensions, resource-loader) imports this file, so a
+// headless session or daemon worker would pay for a UI it never draws.
 import {
 	bestAnsiColor,
 	blendColor,
-	type EditorTheme,
 	getDefaultTerminalColors,
 	getTerminalBackgroundKind,
 	isLightColor,
-	type MarkdownTheme,
 	onDefaultTerminalColorsChange,
-	type Rgb,
 	rgbTo256,
-	type SelectListTheme,
-} from "@earendil-works/pi-tui";
+} from "@earendil-works/pi-tui/terminal-colors.js";
 import chalk from "chalk";
 import type { Static, TProperties } from "typebox";
 import { Type } from "@earendil-works/pi-ai/typebox";

@@ -29,6 +29,24 @@ export interface StartupNoticeCheckOptions {
 	settingsManager: SettingsManager;
 }
 
+/**
+ * True the first time it is called in this process, false after. On globalThis
+ * so a hot-reloaded copy of this module shares the answer: chats re-created by
+ * a reload, or opened one after another from the agents view, must not repeat
+ * the notices.
+ */
+export function claimStartupNotices(): boolean {
+	const g = globalThis as { __rlmStartupNoticesClaimed?: boolean };
+	// rlm-host's execve-in-place keeps the pid and hands process.env to the next
+	// image, where globalThis starts empty; the pid in the environment carries
+	// the claim across it. A child process has another pid and is unaffected.
+	const pid = String(process.pid);
+	if (g.__rlmStartupNoticesClaimed || process.env.RLM_STARTUP_NOTICES_SHOWN === pid) return false;
+	g.__rlmStartupNoticesClaimed = true;
+	process.env.RLM_STARTUP_NOTICES_SHOWN = pid;
+	return true;
+}
+
 /** Run every startup check in parallel and collect the results. */
 export async function gatherStartupNotices(options: StartupNoticeCheckOptions): Promise<StartupNotices> {
 	const [newVersion, packageUpdates, tmuxWarning] = await Promise.all([

@@ -186,7 +186,7 @@ describe("InteractiveMode startup hints", () => {
 		expect(requestAgentsView).not.toHaveBeenCalled();
 	});
 
-	it("explains that the agents view needs the daemon for non-daemon chats", async () => {
+	it("explains that the agents view is not available when nothing can host it", async () => {
 		const showStatus = vi.fn();
 		const shutdown = vi.fn(async () => {});
 		const mode = Object.assign(createMode(false, false), {
@@ -197,7 +197,8 @@ describe("InteractiveMode startup hints", () => {
 
 		await Reflect.get(InteractiveMode.prototype, "requestAgentsView").call(mode);
 
-		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("needs the daemon"));
+		// The daemon went with ad11ef9; the message now names the mode, not the daemon.
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("not available"));
 		expect(shutdown).not.toHaveBeenCalled();
 	});
 

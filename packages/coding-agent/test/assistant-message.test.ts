@@ -122,6 +122,27 @@ describe("AssistantMessageComponent", () => {
 		expect(raw).toContain(theme.getFgAnsi("error"));
 	});
 
+	test("an error that is being retried is muted, not shown as the outcome", () => {
+		initTheme("dark");
+
+		const message = {
+			...createAssistantMessage([{ type: "text", text: "I'll spawn subagents." }]),
+			stopReason: "error" as const,
+			errorMessage: "Upstream dropped a tool call (MiniMaxAI/MiniMax-M2.7)",
+		};
+		const component = new AssistantMessageComponent(message);
+		expect(stripAnsi(component.render(120).join("\n"))).toContain(
+			"Error: Upstream dropped a tool call (MiniMaxAI/MiniMax-M2.7)",
+		);
+
+		component.markRetried();
+		const raw = component.render(120).join("\n");
+		const rendered = stripAnsi(raw);
+		expect(rendered).toContain("↻ Upstream dropped a tool call (MiniMaxAI/MiniMax-M2.7) — retried");
+		expect(rendered).not.toContain("Error:");
+		expect(raw).not.toContain(theme.getFgAnsi("error"));
+	});
+
 	test("renders collapsed multiline assistant errors as errors", () => {
 		initTheme("dark");
 

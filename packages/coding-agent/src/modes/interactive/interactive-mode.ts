@@ -165,6 +165,7 @@ import { getModelArgumentCompletions } from "../model-autocomplete.js";
 import {
 	checkForPackageUpdates,
 	checkTmuxKeyboardSetup,
+	claimStartupNotices,
 	formatPackageUpdateNotice,
 	formatUpdateAvailableNotice,
 } from "../shared/startup-notices.js";
@@ -217,7 +218,7 @@ import {
 	styleSlashCommandText,
 } from "./components/slash-command-message.js";
 import { SlashCommandResultMessageComponent } from "./components/slash-command-result-message.js";
-import { countDirectSubagentStatuses, SubagentSummaryLine } from "./components/subagent-summary-line.js";
+import { countSubtreeSubagentStatuses, SubagentSummaryLine } from "./components/subagent-summary-line.js";
 import { ThinkingSelectorComponent } from "./components/thinking-selector.js";
 import {
 	selectLatestToolExpandHint,
@@ -450,11 +451,36 @@ export class BrandSplashHeader implements Component {
 		this.logoCanvasWidth = this.logoRaw.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
 	}
 
+	// The logo is width math over block glyphs: ~11ms a frame (221ms worst)
+	// while scrolling, for output that only changes with these inputs.
+	private cachedKey?: string;
+	private cachedLines?: string[];
+
 	invalidate(): void {
 		// Render output is derived from current theme/session state.
+		this.cachedKey = undefined;
+		this.cachedLines = undefined;
 	}
 
 	render(width: number): string[] {
+		const key = JSON.stringify([
+			width,
+			this.getModelId() ?? null,
+			this.getCwd(),
+			this.options.getExtraMetadata?.() ?? [],
+			this.options.getHideStartHint?.() ?? false,
+			this.options.getStartHint?.() ?? null,
+		]);
+		// A copy, never the cache itself: the agents view appends its notices to
+		// the returned array, and handing out the cached one made every frame add
+		// another "Update available / tmux" pair until the list was pushed off screen.
+		if (this.cachedLines && this.cachedKey === key) return [...this.cachedLines];
+		this.cachedKey = key;
+		this.cachedLines = this.renderUncached(width);
+		return [...this.cachedLines];
+	}
+
+	private renderUncached(width: number): string[] {
 		const safeWidth = Math.max(1, width);
 		const paddingX = safeWidth > 1 ? 1 : 0;
 		const contentWidth = Math.max(1, safeWidth - paddingX * 2);
@@ -791,8 +817,11 @@ export interface InteractiveModeOptions {
 	bindLocalSessionExtensions?: boolean;
 	/** UI-local services used for settings, auth, resources, and rendering. Defaults to services from localSessionHost. */
 	uiServices?: InteractiveModeUiServices;
-	/** Extra cleanup for externally-owned UI service hosts. Runs after the connection is disposed and before process exit. */
-	onShutdown?: () => void | Promise<void>;
+	/**
+	 * Extra cleanup for externally-owned UI service hosts. Runs after the connection is disposed and before process exit.
+	 * `reason` is "agents_view" when the chat is handing the terminal back to the agents view rather than exiting.
+	 */
+	onShutdown?: (reason: "exit" | "agents_view") => void | Promise<void>;
 	/** Allow returning from a full session to the agents view without stopping the background agent. */
 	returnToAgentsView?: boolean;
 	/** Enter fullscreen regardless of the persisted fullscreen preference. */
@@ -821,6 +850,17 @@ export interface InteractiveModeRunResult {
 export function formatAgentDepthLabel(depth: number | undefined, hasChildren: boolean): string | undefined {
 	if (depth === undefined || (depth === 0 && !hasChildren)) return undefined;
 	return `depth ${depth}`;
+}
+
+/**
+ * Tell rlm-tui which session is on screen, for plugins that follow it (TPS,
+ * status segments). A module function rather than a method so upstream tests
+ * that call InteractiveMode methods on a partial `this` keep working.
+ */
+function publishDisplayedSessionEvent(mode: object, event: { type: string }): void {
+	try {
+		(globalThis as any).__rlmTui?.publishDisplayedSessionEvent?.(event, (mode as any).connectionState?.sessionId);
+	} catch {}
 }
 
 export class InteractiveMode {
@@ -994,6 +1034,8 @@ export class InteractiveMode {
 	private refineLoader: Loader | undefined = undefined;
 
 	private retryLoader: Loader | undefined = undefined;
+	/** The last assistant attempt that ended in an error, until a retry claims it. */
+	private lastErroredAssistant: AssistantMessageComponent | undefined = undefined;
 	private retryCountdown: CountdownTimer | undefined = undefined;
 	private traceUploadAllAbortController: AbortController | undefined = undefined;
 
@@ -1064,19 +1106,43 @@ export class InteractiveMode {
 		return undefined;
 	}
 
+	/**
+	 * Re-derive the context panel — at most once per event-loop turn. It is
+	 * asked for on every rlm-tui render callback and renderer event (every
+	 * context variable a subagent sets, every followup, every config change);
+	 * profiled at N=100 subagents, rebuilding it per request was ~10% of CPU.
+	 */
+	private rlmTuiPanelScheduled = false;
+	private rlmTuiPanelLastKey: string | undefined;
 	private renderRlmTuiPanel(): void {
+		if (this.rlmTuiPanelScheduled) return;
+		this.rlmTuiPanelScheduled = true;
+		setImmediate(() => {
+			this.rlmTuiPanelScheduled = false;
+			this.renderRlmTuiPanelNow();
+		});
+	}
+
+	private renderRlmTuiPanelNow(): void {
 		const tui: any = this.getRlmTui();
 		if (!tui || !this.rlmTuiPanelContainer) return;
 		try {
 			const comps: any[] = tui.getComponents?.() ?? [];
 			const panel: any = comps.find((c: any) => c.id === "context-panel");
 			if (!panel?.renderer) {
+				this.rlmTuiPanelLastKey = undefined;
 				this.rlmTuiPanelContainer.clear();
 				this.ui.requestRender();
 				return;
 			}
 			const width = this.ui.terminal?.columns ?? 80;
 			const lines: string[] | null = panel.renderer({ width, cwd: this.getCurrentCwd() });
+			// Unchanged lines keep their Text children, and with them each child's
+			// cached wrap; replacing them re-measured every line on the next frame.
+			const key = `${width}\u0000${(lines ?? []).join("\n")}`;
+			const shown = (this.rlmTuiPanelContainer as any).children?.length;
+			if (key === this.rlmTuiPanelLastKey && shown === (lines?.length ?? 0)) return;
+			this.rlmTuiPanelLastKey = key;
 			this.rlmTuiPanelContainer.clear();
 			if (!lines || lines.length === 0) {
 				this.ui.requestRender();
@@ -1396,6 +1462,8 @@ export class InteractiveMode {
 			() => this.getTrayContextLabel(),
 			() => this.getTrayOverrideLabel(),
 		);
+		this.subagentSummaryLine.setStatusSegmentsSource(() => this.getTrayStatusSegments());
+		this.subagentSummaryLine.setNoticeSource(() => this.getTrayNotice());
 		this.subagentSummaryLine.setOpenable(this.options.returnToAgentsView === true);
 		this.subagentSummaryLine.onOpen = () => void this.openScopedAgentsView();
 		this.subagentSummaryLine.onCancel = () => this.focusEditor();
@@ -1770,7 +1838,9 @@ export class InteractiveMode {
 		// showed them, skip the checks here entirely. (This is narrower than
 		// `returnToAgentsView`, which is also set for direct attaches that never
 		// rendered the agents view and still want the in-session fallback.)
-		const ownsGlobalStartupNotices = !this.options.agentsViewOwnsStartupNotices;
+		// Once per process: every chat opened from the agents view runs this, and a
+		// hot reload re-creates chats — neither should repeat "Update available".
+		const ownsGlobalStartupNotices = !this.options.agentsViewOwnsStartupNotices && claimStartupNotices();
 		const newVersionPromise = ownsGlobalStartupNotices ? checkForNewPiVersion(this.version) : undefined;
 		const packageUpdatesPromise = ownsGlobalStartupNotices
 			? checkForPackageUpdates({
@@ -5486,6 +5556,12 @@ export class InteractiveMode {
 					submissionOutcome = "lifecycle-cancelled";
 					return;
 				}
+				const graphs = (this as any).ctx?.get?.("rlmDelegate");
+				try {
+					const recorded = graphs?.intake?.(text, { source: "voice" });
+				} catch (intakeError) {
+					console.warn("intake failed:", intakeError);
+				}
 				try {
 					await this.agentConnection.prompt(text, {
 						streamingBehavior,
@@ -5541,6 +5617,7 @@ export class InteractiveMode {
 	}
 
 	private subscribeToAgent(): void {
+		publishDisplayedSessionEvent(this, { type: "session_attached" });
 		this.unsubscribe = this.agentConnection.subscribe(async (event) => {
 			try {
 				if (event.type === "session_event") {
@@ -5548,6 +5625,9 @@ export class InteractiveMode {
 					// Replacement advances the generation before entering this queue, which
 					// prevents already-queued source events from mutating the target UI.
 					const generation = this.sessionEventGeneration;
+					// Published on arrival, not from the render queue below: listeners
+					// time things (tokens/sec), and a slow render would bunch them up.
+					publishDisplayedSessionEvent(this, event.event as { type: string });
 					const run = this.sessionEventQueue.then(() =>
 						generation === this.sessionEventGeneration ? this.handleEvent(event.event) : undefined,
 					);
@@ -5563,6 +5643,7 @@ export class InteractiveMode {
 						this.resetCurrentSessionRenderState();
 						await this.rebindCurrentSession();
 						await this.renderInitialMessages();
+						publishDisplayedSessionEvent(this, { type: "session_attached" });
 						this.ui.requestRender();
 					});
 					this.sessionEventQueue = run.catch(() => {});
@@ -5998,7 +6079,9 @@ export class InteractiveMode {
 								: `Operation aborted${elapsedSuffix}`;
 						this.streamingMessage.errorMessage = errorMessage;
 					}
-					this.ensureAssistantStreamingComponent(event.message).updateContent(this.streamingMessage);
+					const finishedComponent = this.ensureAssistantStreamingComponent(event.message);
+					finishedComponent.updateContent(this.streamingMessage);
+					this.lastErroredAssistant = this.streamingMessage.stopReason === "error" ? finishedComponent : undefined;
 
 					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
 						if (!errorMessage) {
@@ -6147,11 +6230,17 @@ export class InteractiveMode {
 			}
 
 			case "auto_retry_start": {
+				// The failed attempt is being retried: mute it rather than show it as the outcome.
+				this.lastErroredAssistant?.markRetried();
+				this.lastErroredAssistant = undefined;
 				this.stopWorkingLoader();
 				this.statusContainer.clear();
 				this.retryCountdown?.dispose();
+				const outage = (event as { outage?: { elapsedMs: number; patienceMs: number } }).outage;
 				const retryMessage = (seconds: number) =>
-					`Retrying (${event.attempt}/${event.maxAttempts}) in ${seconds}s... (${keyText("app.clear")} to cancel)`;
+					outage
+						? `Model endpoint unreachable — retrying in ${seconds}s (waiting ${Math.round(outage.elapsedMs / 1000)}s of ${Math.round(outage.patienceMs / 60_000)}m, ${keyText("app.clear")} to cancel)`
+						: `Retrying (${event.attempt}/${event.maxAttempts}) in ${seconds}s... (${keyText("app.clear")} to cancel)`;
 				this.retryLoader = new Loader(
 					this.ui,
 					(spinner) => theme.fg("muted", spinner),
@@ -6405,7 +6494,33 @@ export class InteractiveMode {
 			const previous = this.subagentSnapshots.get(child.id);
 			this.subagentSnapshots.set(child.id, previous ? mergeSubagentSnapshot(previous, child) : child);
 		}
+		this.scheduleSubagentSummaryRefresh();
+	}
+
+	private subagentSummaryRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+
+	/**
+	 * Recount the tray at most every 50 ms instead of once per child update.
+	 *
+	 * Every subagent emits an update per status/activity change and the recount
+	 * walks the whole subtree, rescopes heartbeats and re-renders, so at 200
+	 * subagents the per-event refresh was O(N²) and froze the TUI while they were
+	 * being created (measured: 43 s at 500). The snapshot above is recorded
+	 * immediately; only the derived line waits for the next tick.
+	 */
+	private scheduleSubagentSummaryRefresh(): void {
+		// Leading edge, then at most one trailing refresh per 50 ms: a single
+		// change still shows at once, a burst of 500 costs one recount per tick.
+		if (this.subagentSummaryRefreshTimer) {
+			(this as any).subagentSummaryRefreshPending = true;
+			return;
+		}
 		this.refreshSubagentSummary();
+		(this as any).subagentSummaryRefreshPending = false;
+		this.subagentSummaryRefreshTimer = setTimeout(() => {
+			this.subagentSummaryRefreshTimer = undefined;
+			if ((this as any).subagentSummaryRefreshPending) this.scheduleSubagentSummaryRefresh();
+		}, 50);
 	}
 
 	private refreshSubagentSummary(): void {
@@ -6418,13 +6533,9 @@ export class InteractiveMode {
 	}
 
 	private updateSubagentSummaryLine(): void {
-		const activeHeartbeatSessionIds = new Set(
-			this.heartbeatCatalog
-				.filter((heartbeat) => heartbeat.job.status === "active")
-				.map((heartbeat) => heartbeat.job.activeSessionId),
-		);
+		// prime-agent counts the whole subtree: the recursive roster carries every depth.
 		this.subagentSummaryLine.setSubagentCounts(
-			countDirectSubagentStatuses(this.subagentSnapshots.values(), this.rlmNodeId, activeHeartbeatSessionIds),
+			countSubtreeSubagentStatuses(this.subagentSnapshots.values(), this.rlmNodeId),
 		);
 		if (!this.subagentSummaryLine.isSelectable() && this.subagentSummaryLine.focused) this.focusEditor();
 	}
@@ -6511,6 +6622,38 @@ export class InteractiveMode {
 		return [agentsHint, depthLabel, modelLabel, shortcutsHint]
 			.filter((label): label is string => label !== undefined)
 			.join("  ");
+	}
+
+	/** rlm-tui's one transient notice (reload news): the latest message only. */
+	private getTrayNotice(): string | undefined {
+		try {
+			return (globalThis as any).__rlmTui?.getNotice?.()?.text || undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
+	 * Right-side tray segments after the context label: rlm-tui status bar
+	 * items (in their `order`), then extension statuses set with
+	 * ctx.ui.setStatus(). rlm-tui items are also mirrored into the extension
+	 * statuses as `tui:<id>`; those copies are skipped here.
+	 */
+	private getTrayStatusSegments(): string[] {
+		const segments: string[] = [];
+		try {
+			const tui = (globalThis as any).__rlmTui;
+			for (const item of tui?.getStatusBarItems?.() ?? []) {
+				try {
+					const text = item.renderer({ width: this.ui.terminal.columns, cwd: this.getCurrentCwd() });
+					if (text) segments.push(text);
+				} catch {}
+			}
+		} catch {}
+		for (const [key, text] of this.footerDataProvider.getExtensionStatuses()) {
+			if (!key.startsWith("tui:") && text) segments.push(text);
+		}
+		return segments;
 	}
 
 	private getShortcutsTrayHint(): string | undefined {
@@ -7274,7 +7417,7 @@ export class InteractiveMode {
 		try {
 			await this.agentConnection.dispose();
 		} finally {
-			await this.options.onShutdown?.();
+			await this.options.onShutdown?.("exit");
 		}
 		const resumeHint = formatResumeHint(sessionStats);
 		if (resumeHint) {
@@ -7329,7 +7472,7 @@ export class InteractiveMode {
 			try {
 				await this.agentConnection.dispose();
 			} finally {
-				await this.options.onShutdown?.();
+				await this.options.onShutdown?.("agents_view");
 				this.onInputCallback?.(undefined);
 				handoffComplete = true;
 			}
@@ -9239,7 +9382,7 @@ export class InteractiveMode {
 			this.stop();
 			await this.agentConnection.dispose().catch(() => undefined);
 			try {
-				await this.options.onShutdown?.();
+				await this.options.onShutdown?.("exit");
 			} catch {
 				// The update already completed; do not block relaunch on local teardown.
 			}

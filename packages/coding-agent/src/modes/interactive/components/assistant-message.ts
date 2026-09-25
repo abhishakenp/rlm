@@ -47,6 +47,28 @@ function getThinkingMarkdownTheme(baseTheme: MarkdownTheme): MarkdownTheme {
 	};
 }
 
+/**
+ * Raw `<think>`/`</think>` delimiters are stripped from thinking blocks where
+ * every provider streams (AssistantMessageEventStream), but a session saved
+ * before that, or one a route wrote verbatim, can still carry them. The block
+ * is already the reasoning, so the delimiters are dropped for display — on a
+ * copy, never on the transcript itself.
+ */
+const THINK_TAG = /<\/?(?:think|thinking|reasoning)\s*>/gi;
+export function withoutThinkTags(message: AssistantMessage): AssistantMessage {
+	const content = message?.content;
+	if (!Array.isArray(content)) return message;
+	let copy: AssistantMessage["content"] | undefined;
+	content.forEach((block, i) => {
+		if (block?.type !== "thinking" || typeof block.thinking !== "string" || !block.thinking.includes("<")) return;
+		const cleaned = block.thinking.replace(THINK_TAG, "");
+		if (cleaned === block.thinking) return;
+		copy ??= content.slice();
+		copy[i] = { ...block, thinking: cleaned.replace(/^\s*\n/, "") };
+	});
+	return copy ? { ...message, content: copy } : message;
+}
+
 /** Single collapsed-thinking row that truncates the recap to the render width instead of wrapping. */
 class CollapsedThinkingRow implements Component {
 	constructor(
@@ -55,16 +77,27 @@ class CollapsedThinkingRow implements Component {
 		private readonly hint: string,
 	) {}
 
+	// Its inputs never change, and a long session holds dozens of these that
+	// every frame used to re-truncate: ~16ms a frame on a 1,800-line transcript.
+	private cachedWidth?: number;
+	private cachedLines?: string[];
+
 	render(width: number): string[] {
+		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
 		const safeWidth = Math.max(1, width);
 		const separator = theme.fg("dim", " · ");
 		const fixedWidth = visibleWidth(` ${this.label}${separator} ${this.hint}`);
 		const recapWidth = Math.max(8, safeWidth - fixedWidth);
 		const recap = theme.fg("thinkingText", truncateToWidth(this.recap, recapWidth));
-		return [truncateToWidth(` ${this.label}${separator}${recap} ${this.hint}`, safeWidth, "")];
+		this.cachedWidth = width;
+		this.cachedLines = [truncateToWidth(` ${this.label}${separator}${recap} ${this.hint}`, safeWidth, "")];
+		return this.cachedLines;
 	}
 
-	invalidate(): void {}
+	invalidate(): void {
+		this.cachedWidth = undefined;
+		this.cachedLines = undefined;
+	}
 }
 
 /**
@@ -119,6 +152,8 @@ export class AssistantMessageComponent extends Container {
 	private hasToolCalls = false;
 	private expanded = false;
 	private dirty = false;
+	/** This attempt failed and the session is retrying it: not the final word. */
+	private retried = false;
 	private lastSignature?: string;
 	private blockMarkdowns = new Map<number, Markdown>();
 	private lastBlockTexts = new Map<number, string>();
@@ -190,7 +225,18 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	updateContent(message: AssistantMessage): void {
-		this.lastMessage = message;
+		this.lastMessage = withoutThinkTags(message);
+		this.dirty = true;
+	}
+
+	/**
+	 * The error on this attempt is being retried. It stays in the transcript,
+	 * muted, instead of reading as the turn's outcome; if every retry fails the
+	 * retry loop reports that separately.
+	 */
+	markRetried(): void {
+		if (this.retried) return;
+		this.retried = true;
 		this.dirty = true;
 	}
 
@@ -223,6 +269,7 @@ export class AssistantMessageComponent extends Container {
 			`expanded:${this.expanded}`,
 			`stop:${message.stopReason ?? ""}`,
 			`error:${message.errorMessage ?? ""}`,
+			`retried:${this.retried}`,
 		);
 		return parts.join("|");
 	}
@@ -336,7 +383,11 @@ export class AssistantMessageComponent extends Container {
 		} else if (!hasToolCalls && message.stopReason === "error") {
 			const errorMsg = message.errorMessage || "Unknown error";
 			this.contentContainer.addChild(new Spacer(1));
-			this.contentContainer.addChild(this.createErrorComponent(errorMsg, "Error"));
+			this.contentContainer.addChild(
+				this.retried
+					? new Text(theme.fg("muted", `↻ ${summarizeErrorDetails(errorMsg)} — retried`), 1, 0)
+					: this.createErrorComponent(errorMsg, "Error"),
+			);
 		}
 
 		if (hasToolCalls && (hasVisibleContent || message.stopReason === "aborted" || !this.precededByToolActivity)) {
