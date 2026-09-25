@@ -1,0 +1,15 @@
+{
+  "name": "@rlm/host",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/shell.ts",
+  "types": "src/shell.ts",
+  "exports": {
+    ".": "./src/shell.ts",
+    "./surface": "./src/surface.ts"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/cordis-plugin-loader": "*"
+  }
+}
