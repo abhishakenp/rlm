@@ -111,6 +111,9 @@ jobs:
           mkdir -p "$RUNNER_WORKSPACE"
           echo "$RUNNER_WORKSPACE" >> "$GITHUB_PATH"
 
+      - name: Raise FD limit
+        run: ulimit -n 65536
+
       - name: Execute agent task
         uses: actions/github-script@v7
         with:
