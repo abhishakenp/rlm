@@ -74,6 +74,17 @@ export interface InProcessHeadlessExtensionOptions {
 	shutdownHandler?: () => void;
 }
 
+export interface InProcessAgentConnectionOptions {
+	/** Stable id the agents view addresses this runtime by. */
+	activeSessionId?: string;
+	/**
+	 * Dispose the runtime with the connection. Default true. The agents view
+	 * attaches with false: closing a chat detaches from a session that keeps
+	 * running, the way a daemon client detaches from a daemon-hosted one.
+	 */
+	disposeRuntime?: boolean;
+}
+
 export class InProcessAgentConnection implements AgentConnection {
 	private readonly listeners = new Set<AgentConnectionEventListener>();
 	private readonly beforeSessionInvalidateListeners = new Set<AgentConnectionBeforeSessionInvalidateListener>();
@@ -82,7 +93,10 @@ export class InProcessAgentConnection implements AgentConnection {
 	private headlessExtensionOptions: InProcessHeadlessExtensionOptions | undefined;
 	private unsubscribeSessionEvents: (() => void) | undefined;
 
-	constructor(private readonly runtimeHost: AgentSessionRuntime) {
+	constructor(
+		private readonly runtimeHost: AgentSessionRuntime,
+		private readonly connectionOptions: InProcessAgentConnectionOptions = {},
+	) {
 		this.bindCurrentSessionEvents();
 		if (typeof this.runtimeHost.setBeforeSessionInvalidate === "function") {
 			this.runtimeHost.setBeforeSessionInvalidate(() => {
@@ -99,7 +113,7 @@ export class InProcessAgentConnection implements AgentConnection {
 			}
 			await this.emit({
 				type: "session_replaced",
-				state: createAgentConnectionState(this.runtimeHost),
+				state: createAgentConnectionState(this.runtimeHost, this.connectionOptions.activeSessionId),
 				messages: this.runtimeHost.session.messages,
 			});
 		});
@@ -125,11 +139,11 @@ export class InProcessAgentConnection implements AgentConnection {
 	}
 
 	async getState(): Promise<AgentConnectionState> {
-		return createAgentConnectionState(this.runtimeHost);
+		return createAgentConnectionState(this.runtimeHost, this.connectionOptions.activeSessionId);
 	}
 
 	async getInitialSnapshot(): Promise<AgentConnectionSnapshot> {
-		return createAgentConnectionSnapshot(this.runtimeHost);
+		return createAgentConnectionSnapshot(this.runtimeHost, this.connectionOptions.activeSessionId);
 	}
 
 	async getRlmChildSnapshots(): Promise<AgentConnectionRlmChildAgentSnapshot[]> {
@@ -620,6 +634,7 @@ export class InProcessAgentConnection implements AgentConnection {
 			this.runtimeHost.setBeforeSessionInvalidate(undefined);
 		}
 		this.runtimeHost.setRebindSession(undefined);
+		if (this.connectionOptions.disposeRuntime === false) return;
 		await this.runtimeHost.dispose();
 	}
 

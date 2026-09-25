@@ -1,3 +1,4 @@
+import type { SessionUsageSummary } from "../../core/usage.js";
 import type { AgentEvent, AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, ImageContent, Model, ServiceTier, TextContent, Transport, Usage } from "@earendil-works/pi-ai";
 import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
@@ -105,7 +106,7 @@ export interface AgentConnectionSavedSessionState {
 
 export interface AgentConnectionAgentStatus {
 	summary: string;
-	taskState?: "needs_input" | "completed";
+	taskState?: "needs_input" | "completed" | "error";
 	basedOnMessageCount: number;
 }
 
@@ -132,6 +133,9 @@ export interface AgentConnectionSavedSessionInfo {
 	firstMessage: string;
 	allMessagesText: string;
 	agentStatus?: AgentConnectionAgentStatus;
+	usage?: SessionUsageSummary;
+	/** Last recorded provider/model selector; absent for sessions that never ran a model. */
+	model?: { provider: string; modelId: string };
 }
 
 export type AgentConnectionSessionListProgress = (loaded: number, total: number) => void;

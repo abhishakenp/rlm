@@ -3,6 +3,14 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-services.js";
 import type { SessionActionSnapshot } from "../../core/session-action-store.js";
 import type { AgentTaskState } from "../../core/session-manager.js";
+import type { SessionUsageSummary } from "../../core/usage.js";
+import type { AgentRosterStatus } from "./agent-roster.js";
+
+// prime-agent's `daemon/daemon-session-list.ts` session shape (v0.9.6). rlm has
+// no daemon, so the shape lives with the agents view that consumes it.
+
+export { classifySessionRosterStatus, isSessionSummaryBusy } from "./agent-roster.js";
+export type { AgentRosterStatus as SessionRosterStatus } from "./agent-roster.js";
 
 // Durable lifecycle; decides agents-view visibility. Only "live" is shown.
 // "draft" = no message sent yet (discarded on close); "archived" = ctrl+x'd,
@@ -12,7 +20,6 @@ export type SessionLifecycle = "draft" | "live" | "archived";
 // Heuristic activity of a live session. Classification-in-flight counts as
 // "working" so the view never sees an unlabeled idle session.
 export type SessionActivity = "working" | "idle";
-export type SessionRosterStatus = "running" | "idle" | "inactive";
 
 // Lightweight session shape used by the agents view and session listing.
 export interface SessionSummary {
@@ -41,9 +48,12 @@ export interface SessionSummary {
 	isCompacting: boolean;
 	isBashRunning?: boolean;
 	hasRunningRlmChildren?: boolean;
+	usage?: SessionUsageSummary;
 	/** True while the agent is streaming with tool calls pending; drives the "running tools" label. */
 	isRunningTools?: boolean;
 	attachedClients: number;
+	/** Clients attached over the direct worker transport; the supervisor adds these to its own count. */
+	directAttachedClients?: number;
 	messageCount: number;
 	unfinishedActionCount?: number;
 	sessionActions: SessionActionSnapshot;
@@ -65,6 +75,10 @@ export interface SessionSummary {
 	summary?: string;
 	/** Completion verdict for an idle session; absent while working or unjudged. */
 	taskState?: AgentTaskState;
+	rosterStatus?: AgentRosterStatus;
+	statusLabel?: "queued" | "recovering" | "failed";
+	/** Set while the owning worker has been silent past the staleness threshold. */
+	lastHeardFromAt?: string;
 	/** Resident session-host process state. */
 	workerState?: "starting" | "ready" | "recovering" | "stopping" | "failed";
 	/** Diagnostic process identity; clients must not use this as a stable session identifier. */
@@ -82,14 +96,4 @@ export function resolveAttachModelFallbackMessage(
 		return summary.modelFallbackMessage;
 	}
 	return summary.model ? undefined : startupModelFallbackMessage;
-}
-
-export function classifySessionRosterStatus(summary: SessionSummary): SessionRosterStatus {
-	if (!summary.activeSessionId) return "inactive";
-	if (summary.hasActiveHeartbeat || summary.activity === "working" || isSessionSummaryBusy(summary)) return "running";
-	return "idle";
-}
-
-export function isSessionSummaryBusy(summary: SessionSummary): boolean {
-	return summary.isSessionActive || summary.hasRunningRlmChildren === true;
 }

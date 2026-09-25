@@ -49,7 +49,11 @@ export {
 	type UnifiedSessionHeartbeat,
 	type UnifiedSessionIndex,
 	type UnifiedSessionRecord,
+	type AgentsViewRecursiveRollup,
+	computeRecursiveRollups,
+	isEmptyAgentsViewSession,
 } from "./agents-view/agents-view-state.js";
+export { type AgentsViewModeOptions, runAgentsViewMode } from "./agents-view/agents-view-mode.js";
 export type { SessionActivity, SessionLifecycle, SessionSummary } from "./agents-view/session-summary.js";
 export { resolveAttachModelFallbackMessage } from "./agents-view/session-summary.js";
 export {
