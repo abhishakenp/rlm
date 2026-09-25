@@ -32,6 +32,13 @@ export interface RlmCodeConfig {
 	timeout?: number;
 	cwd?: string;
 	maxOutputChars?: number;
+	/**
+	 * Extra globals injected into the VM sandbox. Resolved lazily if the
+	 * values are functions or Proxies — the host (e.g. iris-code) passes
+	 * a bridge that resolves `ctx.commands.run` at call time, so commands
+	 * registered after the VM boots are still reachable.
+	 */
+	globals?: Record<string, unknown>;
 }
 
 /** Same shape as prime-agent's kernel ExecuteResult. */
@@ -50,7 +57,15 @@ export class RlmCodeService extends Service {
 	static provide = "rlmCode" as const;
 
 	declare config: RlmCodeConfig;
+	/** Default shared context — used when no taskId is provided (backward compat). */
 	private context: vm.Context | null = null;
+	/** Per-task contexts — each task/session gets its own VM isolation. */
+	private readonly taskContexts = new Map<string, vm.Context>();
+	/** Track global names per-context so vars() filtering is correct. */
+	private readonly taskGlobalNames = new Map<string, Set<string>>();
+	private readonly globalNames = new Set<string>();
+	/** Max number of task contexts to retain (LRU-like eviction). */
+	private readonly maxTaskContexts = 64;
 
 	constructor(ctx: any, config: RlmCodeConfig = {}) {
 		// Cordis passes (ctx, config) to class plugins, but Service expects (ctx, name).
@@ -67,7 +82,44 @@ export class RlmCodeService extends Service {
 	}
 
 	/** Create a fresh vm context with all builtins exposed. */
-	resetContext() {
+	resetContext(taskId?: string): vm.Context {
+		const ctx = this.createContext();
+		if (taskId) {
+			this.taskContexts.set(taskId, ctx);
+			this.taskGlobalNames.set(taskId, new Set(this.globalNames));
+		} else {
+			this.context = ctx;
+		}
+		return ctx;
+	}
+
+	/** Get or create the context for a specific task. */
+	private getTaskContext(taskId: string): vm.Context {
+		let ctx = this.taskContexts.get(taskId);
+		if (!ctx) {
+			ctx = this.createContext();
+			this.taskContexts.set(taskId, ctx);
+			this.taskGlobalNames.set(taskId, new Set());
+			// Evict oldest if over limit
+			if (this.taskContexts.size > this.maxTaskContexts) {
+				const oldest = this.taskContexts.keys().next().value;
+				if (oldest) {
+					this.taskContexts.delete(oldest);
+					this.taskGlobalNames.delete(oldest);
+				}
+			}
+		}
+		return ctx;
+	}
+
+	/** Dispose a task's context — call when the task/session completes. */
+	disposeTaskContext(taskId: string): void {
+		this.taskContexts.delete(taskId);
+		this.taskGlobalNames.delete(taskId);
+	}
+
+	/** Build a fresh vm context with all builtins. Does not store it. */
+	private createContext(): vm.Context {
 		const cwd = this.config.cwd ?? process.cwd();
 
 		// stdout/stderr capture — same as kernel kernel capturing print output.
@@ -144,10 +196,29 @@ export class RlmCodeService extends Service {
 			__outputCapture: outputCapture,
 		};
 
-		this.context = vm.createContext(sandbox, {
+		// Inject host-provided globals (e.g. the iris.run bridge from iris-code).
+		// These are spread after builtins so a host can override defaults if needed.
+		// Names are tracked so vars() doesn't list them as user-defined.
+		const localGlobalNames = new Set<string>();
+		if (this.config.globals) {
+			for (const [key, value] of Object.entries(this.config.globals)) {
+				sandbox[key] = value;
+				localGlobalNames.add(key);
+			}
+		}
+
+		const ctx = vm.createContext(sandbox, {
 			name: "rlm-code",
 			codeGeneration: { strings: false, wasm: false },
 		});
+
+		// Store global names for this context
+		// For the default context, use this.globalNames; for task contexts, taskGlobalNames
+		// is set by the caller (resetContext/getTaskContext).
+		// We stash the names on the context itself so vars() can access them.
+		(ctx as any).__globalNames = localGlobalNames;
+
+		return ctx;
 	}
 
 	/**
@@ -198,15 +269,22 @@ export class RlmCodeService extends Service {
 	 * - `var`/`globalThis.x` persist across calls
 	 * - `console.log()` captured as stdout
 	 * - Last expression value captured as result
+	 *
+	 * @param taskId - optional task/session ID for per-task VM isolation.
+	 *   When provided, each task gets its own VM context so concurrent
+	 *   tasks cannot observe each other's variables. When omitted, uses
+	 *   the shared default context (backward compatible).
 	 */
-	async execute(code: string): Promise<CodeResult> {
-		if (!this.context) this.resetContext();
+	async execute(code: string, taskId?: string): Promise<CodeResult> {
+		const ctx: vm.Context = taskId
+			? this.getTaskContext(taskId)
+			: (this.context ?? this.resetContext());
 		const timeout = this.config.timeout ?? 30000;
 		const maxChars = this.config.maxOutputChars ?? 65536;
 		const started = Date.now();
 
 		// Reset output capture for this cell.
-		const capture = (this.context as any).__outputCapture;
+		const capture = (ctx as any).__outputCapture;
 		capture.stdout.length = 0;
 		capture.stderr.length = 0;
 
@@ -223,7 +301,7 @@ export class RlmCodeService extends Service {
 			const withReturn = captureLastExpression(finalCode);
 			const wrapped = `(async () => {\n${withReturn}\n})()`;
 
-			const result = vm.runInContext(wrapped, this.context!, {
+			const result = vm.runInContext(wrapped, ctx, {
 				timeout: timeout / 1000, // vm timeout is in seconds
 				displayErrors: true,
 			});
@@ -281,28 +359,35 @@ export class RlmCodeService extends Service {
 		}
 	}
 
-	/** Get a variable from the persistent context. */
-	get(name: string): any {
-		if (!this.context) return undefined;
-		return (this.context as any)[name];
+	/** Get a variable from the persistent context (default or task-scoped). */
+	get(name: string, taskId?: string): any {
+		const ctx = taskId ? this.taskContexts.get(taskId) : this.context;
+		if (!ctx) return undefined;
+		return (ctx as any)[name];
 	}
 
-	/** Set a variable in the persistent context. */
-	set(name: string, value: any): void {
-		if (!this.context) this.resetContext();
-		(this.context as any)[name] = value;
+	/** Set a variable in the persistent context (default or task-scoped). */
+	set(name: string, value: any, taskId?: string): void {
+		const ctx = taskId
+			? this.getTaskContext(taskId)
+			: (this.context ?? this.resetContext());
+		(ctx as any)[name] = value;
 	}
 
-	/** List all user-defined variables in the context. */
-	vars(): string[] {
-		if (!this.context) return [];
-		return Object.getOwnPropertyNames(this.context).filter(
-			(k) => !k.startsWith("__") && !BUILTINS.has(k),
+	/** List all user-defined variables in the context (default or task-scoped). */
+	vars(taskId?: string): string[] {
+		const ctx = taskId ? this.taskContexts.get(taskId) : this.context;
+		if (!ctx) return [];
+		const globalNames = (ctx as any).__globalNames as Set<string> ?? this.globalNames;
+		return Object.getOwnPropertyNames(ctx).filter(
+			(k) => !k.startsWith("__") && !BUILTINS.has(k) && !globalNames.has(k),
 		);
 	}
 
 	async [Symbol.dispose]() {
 		this.context = null;
+		this.taskContexts.clear();
+		this.taskGlobalNames.clear();
 	}
 }
 
