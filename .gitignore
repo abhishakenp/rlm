@@ -45,4 +45,8 @@ __pycache__/
 *.pyc
 
 # Local tool state, not part of the app.
+.pixel/
 .gitpixel/
+
+# Written by cordis-shell.mjs when a row will not import and the host boots without it.
+*.degraded.yml
