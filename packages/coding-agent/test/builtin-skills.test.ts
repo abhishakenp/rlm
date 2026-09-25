@@ -292,7 +292,6 @@ describe("builtin skills", () => {
 	// Verify every shipping path includes bundled skills; source-only success would hide a release packaging regression.
 	describe("packaging ships bundled skills", () => {
 		const packageRoot = join(__dirname, "..");
-		const repoRoot = join(packageRoot, "..", "..");
 
 		it("npm build (copy-assets) copies skills into dist", () => {
 			const pkg = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf-8")) as {
@@ -304,14 +303,8 @@ describe("builtin skills", () => {
 			expect(pkg.files).toContain("skills");
 		});
 
-		it("binary release script copies skills next to the executable", () => {
-			const script = readFileSync(join(repoRoot, "scripts", "build-binaries.sh"), "utf-8");
-			expect(script).toMatch(/cp -r skills binaries\/\$platform\//);
-		});
-
-		it("release packer includes skills in the packed package", () => {
-			const script = readFileSync(join(repoRoot, "scripts", "pack-prime-agent-release.mjs"), "utf-8");
-			expect(script).toContain('"skills"');
-		});
+		// The binary release script and the release packer were removed with the
+		// rest of the prime-agent release tooling in ad11ef9; npm is the only
+		// shipping path left, and the test above covers it.
 	});
 });
