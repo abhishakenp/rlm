@@ -37,22 +37,18 @@
  *
  * ## Why the guard protects itself
  *
- * `packages/rlm-guard/src/**` is on the list whatever the config says, and so
- * is `cordis.yml`. Without the first, the shortest path through the door is to
- * edit the door: delete a line from the protected list, or make `inspectCell`
- * return null, and then edit capacity.ts freely. Without the second, delete the
- * `guard` row from the composition and the door is not there at all. Neither is
- * a hypothetical — they are the first two things anything competent would try,
- * and they are cheaper than the thing they bypass.
+ * `packages/rlm-guard/src/**` is on the list whatever the config says. Without
+ * it, the shortest path through the door is to edit the door: delete a line
+ * from the protected list, or make `inspectCell` return null, and then edit
+ * capacity.ts freely.
  *
- * `cordis.yml` being protected costs nothing rlm needs. rlm changes itself
- * through `~/.rlm/cordis.patch.yml`, the overlay, which `rlm-compose` writes and
- * `rlm-boot` layers on top — so self-extension is untouched. **And that overlay
- * is the honest remaining hole**: a row that can write it can set
- * `disabled: true` on `guard`, and the guard cannot protect the overlay without
- * taking self-extension with it. Layer 1 refuses an overlay write that also
- * names this row, which is a heuristic and is named as one here so nobody reads
- * this comment and believes the hole is closed.
+ * `cordis.yml` is deliberately NOT protected (Abhi, 2026-09-26): rlm writes to
+ * itself and hot reloads at runtime, and the composition is part of itself. The
+ * cost is named here so nobody believes otherwise: a row that can write
+ * `cordis.yml` — or the overlay at `~/.rlm/cordis.patch.yml` — can remove or
+ * disable the `guard` row. Layer 1 refuses an overlay write that also names this
+ * row, which is a heuristic and is named as one here so nobody reads this
+ * comment and believes the hole is closed.
  *
  * ## Authorisation
  *
@@ -92,8 +88,8 @@ export interface RlmGuardConfig {
 	 * Extra paths or globs to protect, on top of the ones that are not optional.
 	 *
 	 * Configurable so the overlay can extend the list without a code edit. It
-	 * cannot *shrink* it: the guard's own source and `cordis.yml` are added
-	 * regardless — see the header.
+	 * cannot *shrink* it: the guard's own source is added regardless — see the
+	 * header.
 	 */
 	protect?: string[];
 	/** One sentence explaining the configured entries, used in refusals. */
@@ -149,16 +145,11 @@ const PATH_WHY =
  */
 const INHERENT_PATH_DIRS = ["~/.local/bin", "/opt/homebrew/bin"];
 
-const COMPOSITION_WHY =
-	"cordis.yml is the composition — the list of rows rlm boots, including this one. Deleting a row from it " +
-	"removes the code that would have refused the next edit. rlm changes itself through the overlay at " +
-	"~/.rlm/cordis.patch.yml, which is not protected, so nothing rlm legitimately does needs this file.";
 
 /** The list nothing in config can shorten. */
 const inherentSpecs = (unlockFile: string): ProtectSpec[] => [
 	{ pattern: "packages/rlm-guard/src/**", why: GUARD_WHY, inherent: true },
 	{ pattern: "packages/rlm-guard/package.json", why: GUARD_WHY, inherent: true },
-	{ pattern: "cordis.yml", why: COMPOSITION_WHY, inherent: true },
 	{
 		pattern: unlockFile,
 		why:

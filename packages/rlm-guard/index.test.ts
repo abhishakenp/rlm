@@ -355,6 +355,94 @@ t("two directories overwritten in the same instant are both put back", () => {
 	fs.rmSync(home, { recursive: true, force: true });
 });
 
+t("a symlink a package manager moved is accepted, not reverted to a dangling link", () => {
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "guard-pathdir-"));
+	const dir = path.join(home, "bin");
+	fs.mkdirSync(dir);
+	fs.mkdirSync(path.join(home, "old"));
+	fs.writeFileSync(path.join(home, "old", "codex"), "old\n");
+	fs.symlinkSync("../old/codex", path.join(dir, "codex"));
+	const [protectedDir] = resolvePathDirs([{ dir, why: "on PATH" }]);
+	const baseline = readDirBaseline(protectedDir as never, 256 * 1024);
+	// bun add -g: the package moves, the link follows it.
+	fs.mkdirSync(path.join(home, "new"));
+	fs.writeFileSync(path.join(home, "new", "codex"), "new\n");
+	fs.rmSync(path.join(home, "old"), { recursive: true });
+	fs.unlinkSync(path.join(dir, "codex"));
+	fs.symlinkSync("../new/codex", path.join(dir, "codex"));
+	const seen: PathIncident[] = [];
+	sweepDir(baseline, 256 * 1024, false, (i) => seen.push(i));
+	sweepDir(baseline, 256 * 1024, false, (i) => seen.push(i));
+	eq(fs.readlinkSync(path.join(dir, "codex")), "../new/codex", "the moved link was reverted:");
+	eq(seen.map((i) => i.action).join(","), "path-entry-accepted-moved", "incidents:");
+	fs.rmSync(home, { recursive: true, force: true });
+});
+
+t("a restore that cannot succeed is reported once, not every sweep", () => {
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "guard-pathdir-"));
+	const dir = path.join(home, "bin");
+	fs.mkdirSync(dir);
+	fs.symlinkSync("/usr/bin/true", path.join(dir, "linked"));
+	const [protectedDir] = resolvePathDirs([{ dir, why: "on PATH" }]);
+	const baseline = readDirBaseline(protectedDir as never, 256 * 1024);
+	fs.unlinkSync(path.join(dir, "linked"));
+	fs.symlinkSync("/usr/bin/false", path.join(dir, "linked"));
+	fs.chmodSync(dir, 0o555); // the restore cannot write here
+	const seen: PathIncident[] = [];
+	for (let i = 0; i < 5; i++) sweepDir(baseline, 256 * 1024, false, (x) => seen.push(x));
+	fs.chmodSync(dir, 0o755);
+	eq(seen.filter((i) => i.action === "path-entry-unrestorable").length, 1, "unrestorable reports:");
+	// Once the directory is writable and the entry changes again, it is defended again.
+	fs.unlinkSync(path.join(dir, "linked"));
+	fs.symlinkSync("/bin/echo", path.join(dir, "linked"));
+	sweepDir(baseline, 256 * 1024, false, (x) => seen.push(x));
+	eq(fs.readlinkSync(path.join(dir, "linked")), "/usr/bin/true", "not defended after the entry changed:");
+	fs.rmSync(home, { recursive: true, force: true });
+});
+
+t("a brew upgrade that relinks before removing the old keg is accepted, not reverted", () => {
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "guard-pathdir-"));
+	const dir = path.join(home, "bin");
+	fs.mkdirSync(dir);
+	const keg = (v: string) => {
+		fs.mkdirSync(path.join(home, "Cellar", "cliproxyapi", v, "bin"), { recursive: true });
+		fs.writeFileSync(path.join(home, "Cellar", "cliproxyapi", v, "bin", "cliproxyapi"), `${v}\n`);
+	};
+	keg("6.9.0");
+	fs.symlinkSync("../Cellar/cliproxyapi/6.9.0/bin/cliproxyapi", path.join(dir, "cliproxyapi"));
+	const [protectedDir] = resolvePathDirs([{ dir, why: "on PATH" }]);
+	const baseline = readDirBaseline(protectedDir as never, 256 * 1024);
+	// brew upgrade: new keg, relink — the old keg is still there during this sweep.
+	keg("7.3.15");
+	fs.unlinkSync(path.join(dir, "cliproxyapi"));
+	fs.symlinkSync("../Cellar/cliproxyapi/7.3.15/bin/cliproxyapi", path.join(dir, "cliproxyapi"));
+	const seen: PathIncident[] = [];
+	sweepDir(baseline, 256 * 1024, false, (i) => seen.push(i));
+	fs.rmSync(path.join(home, "Cellar", "cliproxyapi", "6.9.0"), { recursive: true }); // brew cleanup
+	sweepDir(baseline, 256 * 1024, false, (i) => seen.push(i));
+	eq(fs.readlinkSync(path.join(dir, "cliproxyapi")), "../Cellar/cliproxyapi/7.3.15/bin/cliproxyapi", "upgrade reverted:");
+	eq(seen.map((i) => i.action).join(","), "path-entry-accepted-moved", "incidents:");
+	fs.rmSync(home, { recursive: true, force: true });
+});
+
+t("a retarget that is not a version bump is still put back", () => {
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "guard-pathdir-"));
+	const dir = path.join(home, "bin");
+	fs.mkdirSync(dir);
+	for (const pkg of ["cliproxyapi", "evil"]) {
+		fs.mkdirSync(path.join(home, "Cellar", pkg, "1.0.0", "bin"), { recursive: true });
+		fs.writeFileSync(path.join(home, "Cellar", pkg, "1.0.0", "bin", "cliproxyapi"), `${pkg}\n`);
+	}
+	fs.symlinkSync("../Cellar/cliproxyapi/1.0.0/bin/cliproxyapi", path.join(dir, "cliproxyapi"));
+	const [protectedDir] = resolvePathDirs([{ dir, why: "on PATH" }]);
+	const baseline = readDirBaseline(protectedDir as never, 256 * 1024);
+	fs.unlinkSync(path.join(dir, "cliproxyapi"));
+	fs.symlinkSync("../Cellar/evil/1.0.0/bin/cliproxyapi", path.join(dir, "cliproxyapi"));
+	sweepDir(baseline, 256 * 1024, false, () => {});
+	eq(fs.readlinkSync(path.join(dir, "cliproxyapi")), "../Cellar/cliproxyapi/1.0.0/bin/cliproxyapi", "hijack accepted:");
+	fs.rmSync(home, { recursive: true, force: true });
+});
+
 console.log(`\n${pass} passed, ${fail} failed`);
 
 process.exit(fail ? 1 : 0);

@@ -67,7 +67,14 @@ const posix = (p: string): string => p.split(sep).join("/");
 /** Every file git knows about, relative to the repo root. Empty when git cannot answer. */
 export const trackedFiles = (root: string): string[] => {
 	try {
-		return execFileSync("git", ["ls-files"], { cwd: root, encoding: "utf8", maxBuffer: 64e6 })
+		// stderr swallowed: outside a repo git prints "not a git repository",
+		// and the empty list is already the answer.
+		return execFileSync("git", ["ls-files"], {
+			cwd: root,
+			encoding: "utf8",
+			maxBuffer: 64e6,
+			stdio: ["ignore", "pipe", "ignore"],
+		})
 			.split("\n")
 			.filter(Boolean);
 	} catch {

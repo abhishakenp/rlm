@@ -171,7 +171,7 @@ const WRITE_BINS = new Set([
 	"unlink",
 ]);
 
-/** `git <sub>` that puts bytes on disk. `reset` is gitpixel's to refuse; named here too. */
+/** `git <sub>` that puts bytes on disk. `reset` is pixel's to refuse; named here too. */
 const GIT_WRITES = new Set(["checkout", "restore", "apply", "reset", "clean", "stash", "rm", "mv"]);
 
 /**

@@ -72,6 +72,7 @@
  */
 import { createHash } from "node:crypto";
 import {
+	existsSync,
 	lstatSync,
 	readdirSync,
 	readFileSync,
@@ -85,7 +86,7 @@ import {
 	type FSWatcher,
 } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, isAbsolute, resolve, sep } from "node:path";
+import { delimiter, dirname, isAbsolute, resolve, sep } from "node:path";
 
 const posix = (p: string): string => p.split(sep).join("/");
 
@@ -329,7 +330,8 @@ export type PathIncidentAction =
 	| "path-entry-restored"
 	| "path-entry-arrived"
 	| "path-entry-unrestorable"
-	| "path-entry-accepted-under-unlock";
+	| "path-entry-accepted-under-unlock"
+	| "path-entry-accepted-moved";
 
 export interface PathIncident {
 	at: number;
@@ -357,6 +359,13 @@ export interface PathDirBaseline {
 	entries: Map<string, EntrySnapshot>;
 	/** Entries seen arriving after boot, so each is only reported once. */
 	arrived: Set<string>;
+	/**
+	 * Entries whose restore failed, keyed to the state that could not be put
+	 * back. Without this a failed restore was retried and re-reported by every
+	 * 15 s sweep for as long as rlm ran — 20 identical EPERM warnings for one
+	 * `~/.bun/bin/codex` on 2026-09-07. Reported again only if the entry changes.
+	 */
+	failed?: Map<string, string>;
 }
 
 const hashOf = (content: Buffer): string => createHash("sha1").update(content).digest("hex");
@@ -386,7 +395,7 @@ export const readDirBaseline = (dir: ProtectedPathDir, maxBytes: number): PathDi
 	} catch {
 		// The directory may not exist on this machine. It is still protected at
 		// the door — a cell that creates it is exactly what this is here for.
-		return { dir, entries, arrived: new Set() };
+		return { dir, entries, arrived: new Set(), failed: new Map() };
 	}
 	for (const name of names) {
 		const abs = `${dir.abs}/${name}`;
@@ -408,7 +417,7 @@ export const readDirBaseline = (dir: ProtectedPathDir, maxBytes: number): PathDi
 			/* raced with a removal; the next sweep sees it as gone */
 		}
 	}
-	return { dir, entries, arrived: new Set() };
+	return { dir, entries, arrived: new Set(), failed: new Map() };
 };
 
 /** What the entry is now, in the same terms the snapshot used. */
@@ -422,6 +431,53 @@ export const currentEntryHash = (abs: string, maxBytes: number): string => {
 	} catch {
 		return "";
 	}
+};
+
+/** Resolve a link target the way the kernel would: relative to the link's own directory. */
+const linkResolves = (linkAbs: string, target: string): boolean => existsSync(resolve(dirname(linkAbs), target));
+
+/**
+ * The boot snapshot was a symlink, it is still a symlink, its boot target no
+ * longer exists and its new target does. That is the shape of `bun add -g`,
+ * `brew upgrade` and friends moving a package; a hijack that wants to run its
+ * own program has no reason to delete the real one first.
+ */
+export const packageMoved = (snapshot: EntrySnapshot): boolean => {
+	if (snapshot.kind !== "symlink" || snapshot.target === undefined) return false;
+	let now: string;
+	try {
+		if (!lstatSync(snapshot.abs).isSymbolicLink()) return false;
+		now = readlinkSync(snapshot.abs);
+	} catch {
+		return false;
+	}
+	if (!linkResolves(snapshot.abs, now)) return false;
+	return !linkResolves(snapshot.abs, snapshot.target) || versionBumped(snapshot.target, now);
+};
+
+/** Directories package managers keep one sub-directory per installed version in. */
+const VERSIONED_ROOTS = new Set(["Cellar", "Caskroom", "installs", "versions", "node-versions", "toolchains"]);
+const VERSION = /^v?\d+(\.\d+)*([._+-][0-9A-Za-z.+-]*)?$/;
+
+/**
+ * The link moved from one version directory of a package to another, with the
+ * rest of the path unchanged: `../Cellar/cliproxyapi/6.9.0/bin/cliproxyapi` →
+ * `../Cellar/cliproxyapi/7.3.15/bin/cliproxyapi`.
+ *
+ * `packageMoved` alone waits for the old target to disappear, but `brew
+ * upgrade` relinks before it cleans up the old keg, so for one sweep the old
+ * target still resolved and the guard put an upgrade back (cliproxyapi, Sep 25
+ * 18:44:38, accepted 22s later once brew deleted 6.9.0).
+ */
+export const versionBumped = (before: string, after: string): boolean => {
+	const a = before.split("/");
+	const b = after.split("/");
+	if (a.length !== b.length) return false;
+	const differing = a.flatMap((part, i) => (part === b[i] ? [] : [i]));
+	if (differing.length !== 1) return false;
+	const i = differing[0];
+	// <root>/<package>/<version>/… — the version segment sits two below a known root.
+	return i >= 2 && VERSIONED_ROOTS.has(a[i - 2]) && VERSION.test(a[i]) && VERSION.test(b[i]);
 };
 
 export const restoreEntry = (snapshot: EntrySnapshot): PathIncident => {
@@ -497,8 +553,29 @@ export const sweepDir = (
 		return;
 	}
 
+	const failed = (baseline.failed ??= new Map());
 	for (const [name, snapshot] of baseline.entries) {
-		if (currentEntryHash(snapshot.abs, maxBytes) === snapshot.hash) continue;
+		const now = currentEntryHash(snapshot.abs, maxBytes);
+		if (now === snapshot.hash) {
+			failed.delete(name);
+			continue;
+		}
+		if (failed.get(name) === now) continue;
+		if (!unlocked && packageMoved(snapshot)) {
+			// A package manager moved the package: the link now points at a real
+			// file and the boot target no longer exists. Putting it back would
+			// write a dangling link over working software — which is what the
+			// guard tried, 20 times, when bun moved `codex` to `@openai/codex`.
+			const fresh = readDirBaseline(baseline.dir, maxBytes).entries.get(name);
+			if (fresh) baseline.entries.set(name, fresh);
+			onIncident({
+				at: Date.now(),
+				rel: snapshot.abs,
+				action: "path-entry-accepted-moved",
+				detail: `symlink retargeted from ${snapshot.target} (gone) to ${fresh?.target ?? "?"} (exists) — accepted as a package update`,
+			});
+			continue;
+		}
 		if (unlocked) {
 			// Abhi is installing something. What is there when the unlock lapses is
 			// what gets defended, exactly as restore.ts does it.
@@ -513,7 +590,9 @@ export const sweepDir = (
 			});
 			continue;
 		}
-		onIncident(restoreEntry(snapshot));
+		const incident = restoreEntry(snapshot);
+		if (incident.action === "path-entry-unrestorable") failed.set(name, currentEntryHash(snapshot.abs, maxBytes));
+		onIncident(incident);
 	}
 
 	for (const name of present) {
