@@ -112,7 +112,8 @@ export async function disconnectFleetHost(hostname: string): Promise<OperationRe
 	if (!host) {
 		return { success: false, message: `Host "${hostname}" not found in fleet.` };
 	}
-	await disconnectHost(host.address);
+	const sshTarget = host.user ? `${host.user}@${host.address}` : host.address;
+	await disconnectHost(sshTarget);
 	await updateFleetHostStatus(hostname, "disconnected");
 	return { success: true, message: `Disconnected "${hostname}".`, host };
 }
@@ -128,7 +129,11 @@ export interface HostStatusResult extends OperationResult {
 export async function checkFleetHostStatus(hostname: string): Promise<HostStatusResult> {
 	const host = await getFleetHost(hostname);
 	const address = host?.address ?? hostname;
-	const status = await checkHostStatus(address);
+	// Include the user in the SSH target — without it, SSH uses the current
+	// user's username, which fails on Tailscale hosts that only accept a
+	// specific user (e.g. livio@a2, not abhi@a2).
+	const sshTarget = host?.user ? `${host.user}@${address}` : address;
+	const status = await checkHostStatus(sshTarget);
 
 	const online = status.online;
 	const piInstalled = status.piInstalled;
