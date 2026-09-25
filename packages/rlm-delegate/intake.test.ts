@@ -32,11 +32,17 @@ const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), "rlm-intake-"));
 const REQUEST = "six jobs, please:\n1 fix the notch\n2 the dirsize command\n3 the wake word\n4 the log\n5 the tests\n6 the readme";
 
+// The repo root, so a relative path in a request resolves the same wherever
+// the suite is launched from. Without it the file criterion below only passed
+// when run from the root: from inside this package `packages/rlm-log/...`
+// resolved to nothing, and the request fell through to `unstated`.
+const ROOT = path.resolve(import.meta.dir, "../..");
+
 const boot = async (stateDir: string, print: { run: (o: any) => Promise<number> }) => {
 	const root: any = new Context();
 	root.provide("rlmPrint");
 	root.set("rlmPrint", print);
-	const delegate = root.plugin(RlmDelegateService, { dir: stateDir });
+	const delegate = root.plugin(RlmDelegateService, { dir: stateDir, cwd: ROOT });
 	const modes = root.plugin(RlmModesService, {});
 	await wait(350);
 	return { root, delegate, modes };
@@ -311,6 +317,38 @@ console.log("\nnothing rests in a state that reads like success");
 		store.ended(receipt.id, "d", "done", { at: "now", ok: true, detail: "ok", proof: "passed" }, { result: "ok" });
 		ok(store.prune(-1).includes(receipt.id), "the receipt was kept");
 	});
+}
+
+console.log("\nthe turn answering a request is not told to ask about it");
+{
+	// "Reply with exactly: pong" through --print came back as "How will we know
+	// ... is done?": the floor recorded the request before the prompt was built,
+	// so that same request sat in the owed list as a question, and a headless
+	// run ended on a question nobody could answer.
+	const stateDir = path.join(DIR, "in-flight");
+	let during = "";
+	let root: any;
+	({ root } = await boot(stateDir, {
+		run: async () => {
+			during = root.rlmDelegate.owedFragment();
+			return 0;
+		},
+	}));
+	const graphs = root.rlmDelegate;
+	graphs.intake("an older thing nobody said how to check", { source: "voice" });
+	const older = new Store(stateDir).ids()[0];
+	graphs.close(older, "the-request", { ok: true });
+
+	await root.rlmModes.dispatch(["--print", "Reply with exactly: pong"]);
+
+	t("the request in flight is not in its own prompt", () => ok(!during.includes("pong"), during));
+	t("older owed work still is", () => ok(during.includes("an older thing"), during));
+	t("a headless run is told to answer, not ask", () => {
+		ok(during.includes("Nobody is reading this run live"), during);
+		ok(!during.includes("Ask — being asked"), during);
+	});
+	t("once the turn ends, the request is owed like anything else", () =>
+		ok(graphs.owedFragment().includes("Reply with exactly: pong"), "the closed request vanished"));
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

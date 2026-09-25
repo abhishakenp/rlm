@@ -388,7 +388,7 @@ export const programOf = (words: string[]): string | null => {
  * **Through the symlink, always.** A sealed directory full of symlinks seals
  * nothing, and that is not hypothetical here: `/opt/homebrew/bin/rlm` is a
  * symlink to `/Users/abhi/proj/rlm/cordis-shell.mjs` and
- * `/opt/homebrew/bin/gitpixel` to a build artifact in another checkout. Both
+ * `/opt/homebrew/bin/pixel` to a build artifact in another checkout. Both
  * sit in the directory the guard protects and both are one `ln -s` away from
  * whatever the fleet likes. Stopping at the link would have called the single
  * most forgeable oracle on the machine sound — measured, on this tree, before

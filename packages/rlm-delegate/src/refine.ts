@@ -364,8 +364,19 @@ export const refineOne = async (
 	// down, in the reason and in every attempt that failed, so it costs nothing
 	// to carry and everything to omit: without it the planner produces the same
 	// plan that already did not work.
+	//
+	// The me-2 review reason is included here because it is the one piece of
+	// diagnosis the planner cannot get from the attempts alone: the criterion
+	// passed, the agent said it was done, and me-2 looked at the result and
+	// said no. Without the review reason the planner sees a task that "reported
+	// done" and has no idea why that was not enough, so it writes the same
+	// criterion and the same approach and the cycle repeats.
+	const reviewNote = task.review?.verdict === "rejected" && task.review.reason
+		? `\n  me-2 rejected it: ${task.review.reason.slice(0, 400)}\n`
+		: "";
 	const history = task.attempts?.length
 		? `\n\nThis has been tried ${task.attempts.length} time(s) and is stuck${task.reason ? `, currently: ${task.reason.split("\n")[0]}` : ""}.\n` +
+			reviewNote +
 			task.attempts
 				.slice(-3)
 				.map((a, i) => `  attempt ${task.attempts.length - Math.min(3, task.attempts.length) + i + 1}: ${a.ok ? "reported done" : "failed"} — ${String(a.detail ?? "").slice(0, 300)}`)

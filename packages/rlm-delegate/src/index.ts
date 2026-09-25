@@ -22,6 +22,7 @@
  * runtime on purpose — a pasted copy teaches a flow that no longer exists.
  */
 import { Service } from "@deepseek-ai/cordis";
+import type { ElekshaSession } from "./eleksha.ts";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -106,6 +107,12 @@ export interface RlmDelegateConfig {
 	review?: boolean;
 	reviewModel?: string;
 	reviewMaxTokens?: number;
+	/** The most tasks that may wait for a worker at once. */
+	queueLimit?: number;
+	/** How often a pooled worker says it is still alive. */
+	workerHeartbeatMs?: number;
+	/** No word from a pooled worker for this long and it is treated as dead. */
+	workerHeartbeatTimeoutMs?: number;
 }
 
 export const configFields = [
@@ -138,6 +145,27 @@ export const configFields = [
 		type: "number",
 		default: 0.2,
 		description: "Below this much headroom on any one signal, drop to one task at a time. Twenty percent is the point at which the laptop starts to lag.",
+	},
+	{
+		key: "queueLimit",
+		type: "number",
+		default: 64,
+		description:
+			"The most tasks that may sit waiting for a pooled worker at once. There was no bound here at all, which is a memory leak with a queue's name on it: every waiting task holds its prompt, its graph and its closures in the host's heap for as long as the fleet takes. Sixty-four is well past anything the machine will admit at once and far short of a number that matters. Over it, the task is refused with a sentence rather than accepted and forgotten — the graph on disk still owes it either way.",
+	},
+	{
+		key: "workerHeartbeatMs",
+		type: "number",
+		default: 5000,
+		description:
+			"How often a pooled worker says it is still alive. A pid that exists is not a worker that works: wedged in a native call, swapping, or spinning inside a tool that never returns, it holds its tasks and answers nothing, and the only bound on that used to be the forty-five-minute per-attempt timeout — a number sized for a real agent turn, not for a corpse. 0 switches the heartbeat off.",
+	},
+	{
+		key: "workerHeartbeatTimeoutMs",
+		type: "number",
+		default: 15000,
+		description:
+			"Silence this long from a pooled worker and it is killed and its task handed to another one, exactly as if it had crashed. Three missed beats by default. Set it below twice the heartbeat interval and it will be raised to that, because a bound tighter than the thing it measures fires on healthy workers.",
 	},
 	{
 		key: "maxAttempts",
@@ -282,7 +310,22 @@ export class RlmDelegateService extends Service {
 	 * outlives the row that made it is 143 MB of nothing.
 	 */
 	private pool: AgentPool | null = null;
+	/** So "no rlmAgent, so no pool" is said once a sweep rather than once a task. */
+	private saidNoAgent = false;
 	private teardowns = new Set<() => void>();
+	/**
+	 * Requests this process recorded at the door and is answering right now.
+	 *
+	 * Kept out of the owed list while the turn runs. The floor records the
+	 * request before the model sees it, so without this the prompt for the turn
+	 * that is supposed to answer "Reply with exactly: pong" listed that same
+	 * request as waiting on a sentence from him — and the model, told to ask,
+	 * asked instead of answering. It is still on disk the whole time; `close()`
+	 * lets it back into the list with whatever it ended as.
+	 */
+	private inFlight = new Set<string>();
+	/** Set when a request arrived with nobody reading the run live (`--print`). */
+	private headless = false;
 
 	constructor(ctx: any, config: RlmDelegateConfig = {}) {
 		super(ctx, undefined as any);
@@ -305,9 +348,25 @@ export class RlmDelegateService extends Service {
 				// started it — `driveGraphs` is an async call already in the air.
 				// Closing outright took the pool out from under a live drive and
 				// every task it submitted afterwards was refused "the pool is
-				// closed". `closeWhenIdle()` gives the memory back the moment the
-				// work in flight is done and not a task sooner.
-				pool?.closeWhenIdle();
+				// closed". So the work in flight is given its own per-attempt bound
+				// to finish in and not a task sooner — and then the workers do go,
+				// because "wait until it is idle" with no bound on it is how an
+				// unloaded row leaves 143 MB children behind for ever. Detaching
+				// `this.pool` first is what makes that safe: a sweep still in the
+				// air resolves its pool per task and builds a fresh one, so nothing
+				// can submit to this object again.
+				if (pool) {
+					const bound = this.config.attemptTimeoutMs ?? 2_700_000;
+					void pool.drain(bound).then(
+						(how) =>
+							this.ctx.logger?.info?.(
+								how === "drained"
+									? "rlm-delegate: the pool went with the row — everything in flight finished first"
+									: `rlm-delegate: the pool went with the row — work was still in flight after ${bound}ms and the workers were killed`,
+							),
+						(error: any) => this.ctx.logger?.warn?.(`rlm-delegate: the pool would not drain: ${error?.message ?? error}`),
+					);
+				}
 				for (const off of this.teardowns) {
 					try {
 						off();
@@ -328,10 +387,36 @@ export class RlmDelegateService extends Service {
 		if (typeof reattach === "function") this.teardowns.add(reattach);
 
 		try {
+			// A graph that began and then lost whoever was driving it never records a
+			// terminal event, so it is neither finished nor actionable — it just sits in
+			// the store forever: prune() only reclaims settled journals, and open() below
+			// keeps counting its tasks as owed. Reconciling first ends those stranded
+			// tasks with a recorded reason, which both stops them inflating the "still
+			// owed" figure and makes the journal reclaimable by the prune() immediately
+			// after — in this same sweep rather than the next one.
+			const lost = this.store.reconcile();
+			if (lost.length) {
+				const tasks = lost.reduce((n, g) => n + g.tasks.length, 0);
+				this.ctx.logger?.info?.(
+					`rlm-delegate: gave up on ${tasks} task(s) across ${lost.length} abandoned graph(s) — nothing has touched them since they were begun`,
+				);
+			}
+		} catch {
+			/* reconciling is housekeeping; never let it stop the row starting */
+		}
+
+		try {
 			const gone = this.store.prune();
 			if (gone.length) this.ctx.logger?.info?.(`rlm-delegate: forgot ${gone.length} finished journal(s)`);
 		} catch {
 			/* pruning is housekeeping; never let it stop the row starting */
+		}
+
+		try {
+			const quarantined = this.store.quarantine();
+			if (quarantined.length) this.ctx.logger?.info?.(`rlm-delegate: quarantined ${quarantined.length} stuck graph(s) — nothing actionable, moved out of the active queue`);
+		} catch {
+			/* quarantine is housekeeping; never let it stop the row starting */
 		}
 
 		const open = this.open();
@@ -538,12 +623,43 @@ export class RlmDelegateService extends Service {
 			priority: 70,
 			claims: (argv: string[]) => argv.includes("--pool-worker"),
 			run: async (argv: string[]) => {
-				const at = argv.indexOf("--slots");
-				const asked = at === -1 ? Number.NaN : Number(argv[at + 1]);
+				const number = (flag: string) => {
+					const at = argv.indexOf(flag);
+					return at === -1 ? Number.NaN : Number(argv[at + 1]);
+				};
+				const asked = number("--slots");
+				const beat = number("--heartbeat-ms");
+				// The service, not the factory.
+				//
+				// This said `agent: rlmAgent` — the `(options) => Runner` factory from
+				// `agent.ts`, whose whole job is to *spawn another process*. The worker
+				// calls `agent.createRuntime({ sessionManager })`, which a `Runner` does
+				// not have, so every pooled task would have died on
+				// `agent.createRuntime is not a function`. The types agreed because
+				// `PoolWorkerOptions.agent` was also declared `Runner`; correcting that
+				// declaration is what made this line visible.
+				const agent = this.ctx.get("rlmAgent") as
+					| { createRuntime?: (opts: { sessionManager?: any }) => Promise<any> }
+					| undefined;
+				if (typeof agent?.createRuntime !== "function") {
+					// Refused rather than run half-built. A worker that boots without an
+					// agent answers every task with the same internal error while the
+					// parent counts it as a live worker and keeps feeding it — which is
+					// worse than no pool at all. The parent's own guard (see `workers()`)
+					// keeps it from building a pool in this composition in the first
+					// place, so this is the second line of the same defence.
+					const why =
+						"rlm-delegate: --pool-worker needs the rlmAgent service and this composition has none — refusing to boot a worker that could not run a task";
+					this.ctx.logger?.error?.(why);
+					console.error(`[rlm] ${why}`);
+					return 78;
+				}
 				const { runPoolWorker } = await import("./pool-worker.ts");
 				return await runPoolWorker(this.ctx, {
 					...(Number.isFinite(asked) && asked > 0 ? { slots: asked } : {}),
+					...(Number.isFinite(beat) && beat >= 0 ? { heartbeatMs: beat } : {}),
 					cwd: this.config.cwd ?? process.cwd(),
+					agent: agent as never,
 				});
 			},
 		});
@@ -607,8 +723,8 @@ export class RlmDelegateService extends Service {
 
 	/** What is still owed, read from disk every time the prompt is built. */
 	owedFragment(): string {
-		const open = this.open();
-		const questions = this.questions();
+		const open = this.open().filter((graph) => !this.inFlight.has(graph.id));
+		const questions = this.questions().filter((q) => !this.inFlight.has(q.graph));
 		if (!open.length && !questions.length) return "";
 
 		const all = open.flatMap((graph) => graph.tasks.map((task) => ({ graph, task })));
@@ -646,9 +762,18 @@ export class RlmDelegateService extends Service {
 						"",
 						`### ${questions.length} waiting on one sentence from him`,
 						"",
-						"Nothing could be read out of the request that a machine could check. Ask — being asked",
-						"ten times is better than finding out tomorrow that everything stopped. Then record the",
-						"answer with `answer(graphId, taskId, proof)`.",
+						...(this.headless
+							? [
+									"Nobody is reading this run live, so nobody can answer a question put in the reply.",
+									"Do what this run was asked first and end on the answer, never on one of these. They",
+									"are already on disk and in QUESTIONS.md, where he reads them; if you can derive a",
+									"criterion yourself, record it with `answer(graphId, taskId, proof)`.",
+								]
+							: [
+									"Nothing could be read out of the request that a machine could check. Ask — being asked",
+									"ten times is better than finding out tomorrow that everything stopped. Then record the",
+									"answer with `answer(graphId, taskId, proof)`.",
+								]),
 						"",
 						...questions.slice(0, 10).map((q) => `  ${q.graph}/${q.task.id} — ${q.question}`),
 					]
@@ -719,8 +844,12 @@ export class RlmDelegateService extends Service {
 	 * with real criteria; until something does, the request ends `unproven`,
 	 * which is a wound with a record rather than a wound without one.
 	 */
-	intake(request: string, options: { source?: string; taskId?: string } = {}): { graph: Graph; taskId: string } | null {
+	intake(
+		request: string,
+		options: { source?: string; taskId?: string; priority?: number; headless?: boolean } = {},
+	): { graph: Graph; taskId: string } | null {
 		if (this.config.enabled === false) return null;
+		if (options.headless) this.headless = true;
 		// An attempt the drive is making is already journalled against the task
 		// it belongs to. Recording it again here as a fresh top-level request
 		// would mean working the backlog lengthens it, once per attempt, without
@@ -752,8 +881,16 @@ export class RlmDelegateService extends Service {
 			note: `nobody has said how to tell this is finished${options.source ? `; it arrived from ${options.source}` : ""}`,
 		};
 
+		// Priority from the caller, or from the env var Iris sets when she
+		// spawns this child. Direct wake-word requests get 10; recall/missed
+		// gets 1; anything that does not say gets 0 (the default, which means
+		// FIFO among unspecified tasks). The drive sorts by priority before
+		// picking what to run, so higher-priority tasks jump the queue.
+		const priority = options.priority ?? (Number(process.env.IRIS_DELEGATE_PRIORITY) || 0);
+
 		try {
-			const graph = this.store.create(text, [{ id: taskId, title, prompt: text, proof }]);
+			const graph = this.store.create(text, [{ id: taskId, title, prompt: text, proof, priority }]);
+			this.inFlight.add(graph.id);
 			this.ctx.emit?.("rlm/delegate-intake", {
 				graph: graph.id,
 				source: options.source,
@@ -799,6 +936,7 @@ export class RlmDelegateService extends Service {
 	 * attached.
 	 */
 	close(graphId: string, taskId: string, outcome: { ok: boolean; detail?: string }): Graph | null {
+		this.inFlight.delete(graphId);
 		const graph = this.store.load(graphId);
 		const task = graph?.tasks.find((t) => t.id === taskId);
 		if (!graph || !task) return null;
@@ -896,6 +1034,165 @@ export class RlmDelegateService extends Service {
 		const open = this.open();
 		if (!open.length) return "nothing outstanding";
 		return open.map(render).join("\n\n");
+	}
+
+	// ─── The public delegation API ───────────────────────────────────────────
+
+	/**
+	 * One request in, one answer out, with the journal underneath it.
+	 *
+	 * The seam an HTTP caller — Iris, over `POST /v1/delegate` — needs, and
+	 * deliberately not a second delegation engine. It is `intake()` and
+	 * `drive()`, which are the two halves that already exist and are already the
+	 * only things that write to the journal: the request is recorded before
+	 * anybody works it, so a caller that disconnects, a process that dies, or a
+	 * timeout that fires leaves the work *still owed* on disk rather than gone.
+	 * That is the whole reason this row exists and an API that bypassed it would
+	 * be the pre-journal loop with a port number.
+	 *
+	 * `timeout` stops this call, not the work: it is an `AbortSignal` handed to
+	 * the drive's own `Stop`, which is what a `drive stop` writes on disk, so the
+	 * sweep unwinds the way it does for a person. The task stays owed and the
+	 * next sweep picks it up.
+	 */
+	async delegate(opts: {
+		prompt: string;
+		/** An existing graph to add this to, so the work has somewhere to belong. */
+		session?: string;
+		/** Give up waiting after this long. The task stays owed either way. */
+		timeout?: number;
+		/** Who asked, stamped on every attempt. */
+		source?: string;
+	}): Promise<{ ok: boolean; output: string; ms: number; events: string[]; graph?: string; task?: string }> {
+		const began = Date.now();
+		const events: string[] = [];
+		const answer = (ok: boolean, output: string, extra: { graph?: string; task?: string } = {}) => ({
+			ok,
+			output,
+			ms: Date.now() - began,
+			events,
+			...extra,
+		});
+
+		const prompt = String(opts?.prompt ?? "").trim();
+		if (!prompt) return answer(false, "a delegation needs a prompt");
+		if (this.config.enabled === false) return answer(false, "rlm-delegate is switched off");
+		const halted = this.stopped();
+		if (halted) return answer(false, `the drive is stopped — ${halted}`);
+
+		let graphId: string;
+		let taskId: string;
+		if (opts.session) {
+			const existing = this.get(opts.session);
+			if (!existing) return answer(false, `no such session: ${opts.session}`);
+			graphId = existing.id;
+			taskId = `ask-${mintId()}`;
+			try {
+				this.add(graphId, [
+					{
+						id: taskId,
+						title: (prompt.split("\n").find((l) => l.trim()) ?? prompt).trim().slice(0, 140),
+						prompt,
+						proof: { kind: "unstated", note: `it arrived from ${opts.source ?? "the delegate API"}` },
+					},
+				]);
+			} catch (error: any) {
+				return answer(false, `could not add to ${graphId}: ${error?.message ?? error}`, { graph: graphId });
+			}
+		} else {
+			// `intake()` and not `store.create()`: it reads a criterion out of the
+			// request before settling for "nobody said", refuses to record an
+			// attempt a delegated child is already journalling, and is the one place
+			// the intake event is emitted from.
+			const recorded = this.intake(prompt, { source: opts.source ?? "the delegate API" });
+			if (!recorded) {
+				return answer(
+					false,
+					process.env.RLM_DELEGATE_CHILD
+						? "this process is itself a delegated child — its attempt is already journalled against the task it belongs to"
+						: "the request could not be recorded, so it was not started",
+				);
+			}
+			graphId = recorded.graph.id;
+			taskId = recorded.taskId;
+		}
+
+		// The caller's bound, expressed the way the drive already understands one.
+		// `Stop` is re-read live by the sweep, so this reaches queued work as well
+		// as work in the air — which a plain `Promise.race` would not.
+		const stop = new Stop({
+			file: this.config.stopFile,
+			...(opts.timeout && opts.timeout > 0 ? { signal: AbortSignal.timeout(opts.timeout) } : {}),
+		});
+
+		let report: DriveReport | null = null;
+		try {
+			report = await this.drive({
+				only: [graphId],
+				stop,
+				executor: opts.source ?? "the delegate API",
+				onEvent: (event, data) => {
+					events.push(`${event} ${JSON.stringify(data)}`.slice(0, 500));
+					(this.ctx.emit as unknown as (n: string, d: unknown) => void)?.(event, data);
+				},
+			});
+		} catch (error: any) {
+			return answer(false, `the drive would not run: ${error?.message ?? error}`, { graph: graphId, task: taskId });
+		}
+		// How the sweep itself ended is part of the account: "stopped" and
+		// "settled" are different answers to a caller whose timeout may have been
+		// the thing that stopped it.
+		events.push(`drive/ended ${JSON.stringify({ ended: report.ended, sweeps: report.sweeps, stoppedBy: report.stoppedBy })}`);
+
+		// What the journal says, not what the drive said on the way out. The two
+		// are different questions and only the first one is durable.
+		const graph = this.get(graphId);
+		const task = graph?.tasks.find((t) => t.id === taskId);
+		if (!task) return answer(false, `the task went missing from ${graphId}`, { graph: graphId, task: taskId });
+		const last = task.attempts?.[task.attempts.length - 1];
+		const text = task.result ?? last?.detail ?? "";
+		if (task.state === "done" || task.state === "unproven") {
+			return answer(true, text || "(the agent said nothing)", { graph: graphId, task: taskId });
+		}
+		// Refined into children: the parent is the sum of them and has no answer of
+		// its own. Say what happened rather than reporting an empty success.
+		const owed = graph ? outstanding(graph.tasks).length : 0;
+		const why = task.reason ?? (owed ? `still owed — ${owed} task(s) outstanding in ${graphId}` : `it ended ${task.state}`);
+		return answer(false, text ? `${why}\n\n${text}` : why, { graph: graphId, task: taskId });
+	}
+
+	/**
+	 * Every graph that still owes something, as data rather than as a screen.
+	 *
+	 * A "session" over HTTP is a graph: it is the thing that holds a run's tasks,
+	 * survives the process, and can be added to. Nothing new is invented for the
+	 * API to have a noun.
+	 */
+	sessions(): Array<{ id: string; goal: string; status: string; tasks: Array<{ id: string; state: string; title: string }> }> {
+		return this.open().map((graph) => ({
+			id: graph.id,
+			goal: graph.goal,
+			status: outstanding(graph.tasks).length ? "owed" : "settled",
+			tasks: graph.tasks.map((t) => ({ id: t.id, state: t.state, title: t.title })),
+		}));
+	}
+
+	/**
+	 * Stop caring about everything a graph still owes.
+	 *
+	 * Every unsettled task is closed as failed with the reason on it — which is
+	 * what `close()` is for — rather than deleted. The journal is the point of
+	 * this row: a cancelled task is a task with a recorded ending, and a task
+	 * with no record is the bug the journal was written to remove.
+	 */
+	cancel(graphId: string, why = "cancelled through the delegate API"): { ok: boolean; cancelled: string[] } {
+		const graph = this.get(graphId);
+		if (!graph) return { ok: false, cancelled: [] };
+		const cancelled: string[] = [];
+		for (const task of outstanding(graph.tasks)) {
+			if (this.close(graphId, task.id, { ok: false, detail: why })) cancelled.push(task.id);
+		}
+		return { ok: true, cancelled };
 	}
 
 	// ─── Working it ──────────────────────────────────────────────────────────
@@ -1030,6 +1327,8 @@ export class RlmDelegateService extends Service {
 					childRuntimeFlags?: () => string[];
 					childRuntime?: () => { command: string; kind: "node" | "bun" };
 					childPoolSlots?: () => number;
+					childHeartbeatMs?: () => number;
+					childHeartbeatTimeoutMs?: () => number;
 			  }
 			| undefined;
 		// What *runs* an unwatched child, asked of the same row and for the same
@@ -1065,9 +1364,34 @@ export class RlmDelegateService extends Service {
 		 * a live one is built, so no caller can be left holding a dead one.
 		 */
 		const poolNow = (): AgentPool | null => {
-			if (slots <= 1) return null;
+			// `0` is still the whole of the switch: no headless row, no pool. `1`
+			// used to mean the same thing, and that was a real defect once slots
+			// became resource-based — a tight machine would answer "one task per
+			// worker", which is the moment pooling matters most, and be read as
+			// "spawn a fresh 143 MB process per task" instead.
+			if (slots < 1) return null;
+			// A pool with no agent behind it is a fleet of workers that answer every
+			// task with the same internal error. Refuse to build one and let the
+			// one-shot path stand — that path spawns `cordis-shell.mjs`, which
+			// composes its own agent, so it works in compositions this does not.
+			if (typeof (this.ctx.get("rlmAgent") as any)?.createRuntime !== "function") {
+				if (!this.saidNoAgent) {
+					this.saidNoAgent = true;
+					const why =
+						"rlm-delegate: no rlmAgent service in this composition — children stay one process per task instead of pooling";
+					this.ctx.logger?.warn?.(why);
+					console.log(`  ${why}`);
+				}
+				return null;
+			}
 			if (this.pool?.isClosed()) this.pool = null;
-			return this.workers(slots, childFlags, runtime);
+			return this.workers(slots, childFlags, runtime, {
+				// The headless row owns "what an unwatched child costs", and how
+				// often one is expected to speak is part of that. This row's own
+				// config stands in when there is no headless row to ask.
+				every: headless?.childHeartbeatMs?.() ?? this.config.workerHeartbeatMs ?? 5_000,
+				dead: headless?.childHeartbeatTimeoutMs?.() ?? this.config.workerHeartbeatTimeoutMs ?? 15_000,
+			});
 		};
 		const pool = poolNow();
 		// Said out loud on the way in, beside the me-2 line, for the same reason:
@@ -1083,10 +1407,14 @@ export class RlmDelegateService extends Service {
 		// which was doing all of the actual spawning — was not, and one claim
 		// covering both paths reported the half that was true. A line that can
 		// be checked against `ps` has to name the path it is talking about.
-		const ceiling = Math.max(1, Math.ceil(this.capacity().limit / slots));
+		// One place computes it, three lines say it. It used to be computed three
+		// times from the same expression, which is three chances for the log and
+		// the pool to disagree about the number the log exists to make checkable.
+		const ceiling = this.workerCeiling(slots)();
+		const atMost = ceiling >= Number.MAX_SAFE_INTEGER ? "as many as the machine will carry" : `at most ${ceiling}`;
 		console.log(
 			pool
-				? `  runners are pooled on ${runtime.kind} — ${slots} task(s) per worker, at most ${ceiling} worker(s)`
+				? `  runners are pooled on ${runtime.kind} — ${slots} task(s) per worker, ${atMost} worker(s)`
 				: `  runners are one ${runtime.kind} process each — no headless row asked for a pool`,
 		);
 
@@ -1136,7 +1464,7 @@ export class RlmDelegateService extends Service {
 			!pool
 				? `  planners are one ${runtime.kind} process each — no headless row asked for a pool`
 				: bound
-					? `  planners are pooled on ${runtime.kind} in their own sandbox-exec workers — ${slots} plan(s) per worker, at most ${ceiling} worker(s), writes bound to ~/.plans`
+					? `  planners are pooled on ${runtime.kind} in their own sandbox-exec workers — ${slots} plan(s) per worker, ${atMost} worker(s), writes bound to ~/.plans`
 					: `  planners are pooled on ${runtime.kind} and UNCONFINED — sandbox-exec is not on this machine, so they share the runners' workers and the runners' reach`,
 		);
 		// The planner is pooled too, and this is where the whole cost was.
@@ -1314,13 +1642,30 @@ export class RlmDelegateService extends Service {
 		return () => {
 			const now = Date.now();
 			if (held && now - held.at < 3000) return held.n;
-			const n = Math.max(1, Math.ceil(this.capacity().limit / Math.max(1, slots)));
+			// `capacity()` pinned to a number is still the fleet-wide budget and
+			// still outranks everything else. What changed is what happens when it
+			// is *not* pinned: `capacity().limit` is itself a live reading, so
+			// dividing it by a slot count that is now also live produced a ceiling
+			// derived from two moving numbers and meaning neither. Unpinned, the
+			// pool asks its own memory question — one worker while the machine is
+			// tight, uncapped while it is not — and the OS refuses the rest.
+			if (typeof this.config.concurrency === "number") {
+				const n = Math.max(1, Math.ceil(this.config.concurrency / Math.max(1, slots)));
+				held = { at: now, n };
+				return n;
+			}
+			const n = Number.MAX_SAFE_INTEGER;
 			held = { at: now, n };
 			return n;
 		};
 	}
 
-	private workers(slots: number, childFlags: string[], runtime: { command: string; kind: "node" | "bun" }): AgentPool {
+	private workers(
+		slots: number,
+		childFlags: string[],
+		runtime: { command: string; kind: "node" | "bun" },
+		beats: { every: number; dead: number } = { every: 5_000, dead: 15_000 },
+	): AgentPool {
 		if (this.pool) return this.pool;
 		this.pool = new AgentPool({
 			entry: this.config.entry ?? process.argv[1],
@@ -1330,15 +1675,27 @@ export class RlmDelegateService extends Service {
 			runtime: runtime.kind,
 			nodeFlags: childFlags,
 			slots,
-			// Read on every hiring decision, not once here. `capacity()` shells
-			// out to `ps`, and `pump()` is hot, so it is held for three seconds —
-			// long enough that a burst of tasks does not run `ps` twenty times,
-			// short enough that the pool follows the machine.
+			// Read on every hiring decision, not once here. Held for three seconds
+			// inside `workerCeiling` — long enough that a burst of tasks does not
+			// re-measure twenty times, short enough that the pool follows the
+			// machine.
 			maxWorkers: this.workerCeiling(slots),
+			// The admission rule's own floor, and deliberately the same number
+			// `capacity()` uses: two floors that disagree is how a fleet ends up
+			// throttled by whichever one nobody remembered.
+			memoryFloor: this.config.headroomFloor ?? 0.2,
+			// The pool asks `capacity.ts` how much memory there is rather than
+			// `freemem()`, because on darwin `freemem()` counts only wholly free
+			// pages and a healthy machine reads one percent.
+			freeFraction: () => this.capacity().readings.find((r) => r.name === "memory")?.headroom ?? 1,
+			queueLimit: this.config.queueLimit ?? 64,
+			heartbeatMs: beats.every,
+			heartbeatTimeoutMs: beats.dead,
 			log: (line) => this.ctx.logger?.info?.(line),
 		});
+		const ceiling = this.workerCeiling(slots)();
 		this.ctx.logger?.info?.(
-			`rlm-delegate: pooling children — ${slots} task(s) per worker, at most ${Math.max(1, Math.ceil(this.capacity().limit / slots))} worker(s)`,
+			`rlm-delegate: pooling children — ${slots} task(s) per worker, ${ceiling >= Number.MAX_SAFE_INTEGER ? "as many as the machine will carry" : `at most ${ceiling}`} worker(s)`,
 		);
 		return this.pool;
 	}
@@ -1448,3 +1805,7 @@ export { nextAttempt } from "./scheduler.ts";
 export { me2, type Me2Options } from "./me2.ts";
 export { askModel, route as modelRoute, type AskOptions, type Route } from "./ask.ts";
 export { load as loadLessons, add as addLesson, brief as lessonBrief, SEED as LESSONS, type Lesson } from "./lessons.ts";
+
+
+export type { ElekshaSession, ElekshaConnectionOptions } from "./eleksha.ts";
+export { connectToEleksha, canConnectToEleksha, sendToEleksha, disconnectFromEleksha } from "./eleksha.ts";
