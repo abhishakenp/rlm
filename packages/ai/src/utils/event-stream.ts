@@ -1,3 +1,4 @@
+import { sanitizeThinkingBlocks, stripThinkTags } from "../providers/inline-think.js";
 import type { AssistantMessage, AssistantMessageEvent } from "../types.js";
 
 export class EventStream<T, R = T> implements AsyncIterable<T> {
@@ -75,6 +76,28 @@ export class AssistantMessageEventStream extends EventStream<AssistantMessageEve
 				throw new Error("Unexpected event type for final result");
 			},
 		);
+	}
+
+	// Every provider emits through here, so this is where raw <think>/</think>
+	// delimiters are taken out of thinking blocks, whichever route sent them.
+	override push(event: AssistantMessageEvent): void {
+		switch (event.type) {
+			case "thinking_start":
+			case "thinking_delta":
+				sanitizeThinkingBlocks(event.partial);
+				break;
+			case "thinking_end":
+				sanitizeThinkingBlocks(event.partial);
+				if (event.content.includes("<")) (event as { content: string }).content = stripThinkTags(event.content);
+				break;
+			case "done":
+				sanitizeThinkingBlocks(event.message);
+				break;
+			case "error":
+				sanitizeThinkingBlocks(event.error);
+				break;
+		}
+		super.push(event);
 	}
 }
 

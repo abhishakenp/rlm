@@ -37,7 +37,27 @@ import { parseStreamingJson } from "../utils/json-parse.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
+import { INLINE_THINK_SIGNATURE, type InlineThinkSegment, InlineThinkSplitter } from "./inline-think.js";
 import { buildBaseOptions } from "./simple-options.js";
+
+/**
+ * A stream that ends `stop` with no tool call after this many empty deltas in a
+ * row lost a tool call upstream: the route's tool-call parser buffered the call
+ * (emitting `{}` per token) and then failed to parse it. Measured on
+ * dahl/MiniMax-M2.7: healthy responses end with at most 9 empty deltas in a row,
+ * the dropped call ended with 107.
+ */
+const DROPPED_TOOL_CALL_EMPTY_DELTAS = 16;
+/**
+ * Mid-stream, this many empty deltas in a row with tools in the request means
+ * the call is already lost: stop reading instead of waiting the generation out.
+ * Measured over 52 captured responses: every healthy tool call (29) had at most
+ * 9 in a row before its tool_calls began; dropped calls ran 107, 125, 1,968 and
+ * 2,146 — the last two cost 64s and 150s of waiting each before this cut-off.
+ * OmniRoute cuts these itself at 24 (toolCallGuard.ts); this is the backstop
+ * for any other OpenAI-compatible route.
+ */
+const DROPPED_TOOL_CALL_ABORT_DELTAS = 32;
 import { transformMessages } from "./transform-messages.js";
 
 /**
@@ -73,6 +93,75 @@ function isToolCallBlock(block: { type: string }): block is ToolCall {
 
 function isImageContentBlock(block: { type: string }): block is ImageContent {
 	return block.type === "image";
+}
+
+/**
+ * MiniMax M2.x behind some routes answers, then opens a fresh `<think>` and
+ * answers again with the same text. Drop that trailing repeat (and the inline
+ * thinking right before it) so the reply is not printed twice.
+ */
+const LOOP_WINDOW = 480;
+const LOOP_MAX_PERIOD = 48;
+
+/**
+ * Where a degenerate repetition loop starts in `text`, or -1. Detected when the
+ * last LOOP_WINDOW characters are one fragment of at most LOOP_MAX_PERIOD
+ * characters repeated end to end (at least 10 times); the start is walked back
+ * to the first character that still follows the period.
+ */
+export function degenerateLoopStart(text: string): number {
+	if (text.length < LOOP_WINDOW) return -1;
+	const end = text.length;
+	for (let period = 1; period <= LOOP_MAX_PERIOD; period++) {
+		if (LOOP_WINDOW / period < 10) break;
+		let periodic = true;
+		for (let i = end - LOOP_WINDOW + period; i < end; i++) {
+			if (text.charCodeAt(i) !== text.charCodeAt(i - period)) {
+				periodic = false;
+				break;
+			}
+		}
+		if (!periodic) continue;
+		let start = end - LOOP_WINDOW;
+		while (start - period >= 0 && text.charCodeAt(start - 1) === text.charCodeAt(start - 1 + period)) start--;
+		return start;
+	}
+	return -1;
+}
+
+/**
+ * After the model answered and started over (see InlineThinkSplitter
+ * `startedOver`), everything inline it produced past the answer is its own
+ * deliberation — kept as thinking by the splitter, and dropped here so the
+ * reply ends at the answer and history never replays thinking after it. Tool
+ * calls it made are real actions and stay.
+ */
+function dropRestartedTail(blocks: { type: string }[]) {
+	const firstAnswer = blocks.findIndex(
+		(block, index) =>
+			isTextContentBlock(block) &&
+			block.text.trim() !== "" &&
+			blocks.slice(0, index).some((b) => isThinkingContentBlock(b) && b.thinkingSignature === INLINE_THINK_SIGNATURE),
+	);
+	if (firstAnswer === -1) return;
+	for (let i = blocks.length - 1; i > firstAnswer; i--) {
+		const block = blocks[i]!;
+		if (isThinkingContentBlock(block) && block.thinkingSignature === INLINE_THINK_SIGNATURE) blocks.splice(i, 1);
+	}
+}
+
+function dropRepeatedTrailingAnswer(blocks: { type: string }[]) {
+	const last = blocks[blocks.length - 1];
+	if (!last || !isTextContentBlock(last)) return;
+	const answer = last.text.trim();
+	if (!answer) return;
+	const earlier = blocks.slice(0, -1);
+	if (!earlier.some((block) => isTextContentBlock(block) && block.text.trim() === answer)) return;
+	blocks.pop();
+	const before = blocks[blocks.length - 1];
+	if (before && isThinkingContentBlock(before) && before.thinkingSignature === INLINE_THINK_SIGNATURE) {
+		blocks.pop();
+	}
 }
 
 const REASONING_DETAILS_SIGNATURE_TYPE = "openai-completions.reasoning_details.v1";
@@ -258,6 +347,47 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				}
 				return thinkingBlock;
 			};
+			// Reasoning some routes inline in `content` as <think>...</think>.
+			const inlineThink = new InlineThinkSplitter();
+			let inlineThinkBlock: ThinkingContent | null = null;
+			let trailingEmptyDeltas = 0;
+			let droppedToolCallAt = 0;
+			let contentDeltas = 0;
+			let degenerateLoopCut = false;
+			const applyInlineSegments = (segments: InlineThinkSegment[]) => {
+				for (const segment of segments) {
+					if (segment.kind === "thinking") {
+						if (!inlineThinkBlock) {
+							// Text after this thinking run starts a new block, keeping order.
+							textBlock = null;
+							inlineThinkBlock = { type: "thinking", thinking: "", thinkingSignature: INLINE_THINK_SIGNATURE };
+							blocks.push(inlineThinkBlock);
+							stream.push({
+								type: "thinking_start",
+								contentIndex: getContentIndex(inlineThinkBlock),
+								partial: output,
+							});
+						}
+						inlineThinkBlock.thinking += segment.text;
+						stream.push({
+							type: "thinking_delta",
+							contentIndex: getContentIndex(inlineThinkBlock),
+							delta: segment.text,
+							partial: output,
+						});
+					} else {
+						inlineThinkBlock = null;
+						const block = ensureTextBlock();
+						block.text += segment.text;
+						stream.push({
+							type: "text_delta",
+							contentIndex: getContentIndex(block),
+							delta: segment.text,
+							partial: output,
+						});
+					}
+				}
+			};
 			const ensureToolCallBlock = (toolCall: StreamingToolCallDelta) => {
 				const streamIndex = typeof toolCall.index === "number" ? toolCall.index : undefined;
 				let block = streamIndex !== undefined ? toolCallBlocksByIndex.get(streamIndex) : undefined;
@@ -327,19 +457,44 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				}
 
 				if (choice.delta) {
+					// `{}` mid-stream: the route withheld a token. Inside an inline
+					// <think> that token was the swallowed `</think>`.
+					if (!choice.finish_reason && Object.keys(choice.delta).length === 0) {
+						trailingEmptyDeltas++;
+						if (inlineThink.insideThink) applyInlineSegments(inlineThink.implicitClose());
+						if (trailingEmptyDeltas >= DROPPED_TOOL_CALL_ABORT_DELTAS && (context.tools?.length ?? 0) > 0) {
+							// Retryable: the agent's auto-retry asks again.
+							droppedToolCallAt = trailingEmptyDeltas;
+							(openaiStream as { controller?: AbortController }).controller?.abort();
+							break;
+						}
+					} else if (!choice.finish_reason) {
+						trailingEmptyDeltas = 0;
+					}
+
 					if (
 						choice.delta.content !== null &&
 						choice.delta.content !== undefined &&
 						choice.delta.content.length > 0
 					) {
-						const block = ensureTextBlock();
-						block.text += choice.delta.content;
-						stream.push({
-							type: "text_delta",
-							contentIndex: getContentIndex(block),
-							delta: choice.delta.content,
-							partial: output,
-						});
+						applyInlineSegments(inlineThink.push(choice.delta.content));
+						// A model stuck repeating a short fragment (`✓ — ✓ — …` for five
+						// minutes, live) never finishes on its own: cut it, keep what
+						// came before the loop, and end the message normally.
+						if (++contentDeltas % 8 === 0) {
+							const last = blocks[blocks.length - 1];
+							const field = last?.type === "text" ? "text" : last?.type === "thinking" ? "thinking" : undefined;
+							if (field) {
+								const value = (last as any)[field] as string;
+								const loopAt = degenerateLoopStart(value);
+								if (loopAt !== -1) {
+									(last as any)[field] = value.slice(0, loopAt).trimEnd();
+									degenerateLoopCut = true;
+									(openaiStream as { controller?: AbortController }).controller?.abort();
+									break;
+								}
+							}
+						}
 					}
 
 					// Some endpoints return reasoning in reasoning_content (llama.cpp),
@@ -446,6 +601,26 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 						}
 					}
 				}
+			}
+
+			if (degenerateLoopCut) {
+				output.stopReason = blocks.some((block) => block.type === "toolCall") ? "toolUse" : "stop";
+			} else {
+				applyInlineSegments(inlineThink.flush());
+			}
+			if (inlineThink.startedOver) dropRestartedTail(blocks);
+			if (inlineThink.active) dropRepeatedTrailingAnswer(blocks);
+			if (
+				droppedToolCallAt > 0 ||
+				(output.stopReason === "stop" &&
+					trailingEmptyDeltas >= DROPPED_TOOL_CALL_EMPTY_DELTAS &&
+					(context.tools?.length ?? 0) > 0 &&
+					!blocks.some((block) => block.type === "toolCall"))
+			) {
+				// Retryable: the agent's auto-retry asks again instead of ending the turn.
+				const upstream = output.responseModel ? ` (${output.responseModel})` : "";
+				output.stopReason = "error";
+				output.errorMessage = `Upstream dropped a tool call${upstream}`;
 			}
 
 			for (const block of blocks) {
@@ -887,7 +1062,29 @@ export function convertMessages(
 							text: sanitizeSurrogates(block.text),
 						}) satisfies ChatCompletionContentPartText,
 				);
-			const assistantText = assistantTextParts.map((part) => part.text).join("");
+			let assistantText = assistantTextParts.map((part) => part.text).join("");
+
+			// Reasoning that arrived inline goes back the way the model wrote it:
+			// <think>...</think> before the text it preceded (MiniMax asks for the
+			// thinking to stay in history). It is not a provider field.
+			const hasInlineThinking = msg.content.some(
+				(block) => isThinkingContentBlock(block) && block.thinkingSignature === INLINE_THINK_SIGNATURE,
+			);
+			if (hasInlineThinking) {
+				assistantText = msg.content
+					.map((block) => {
+						if (isTextContentBlock(block)) return sanitizeSurrogates(block.text);
+						if (
+							isThinkingContentBlock(block) &&
+							block.thinkingSignature === INLINE_THINK_SIGNATURE &&
+							block.thinking.trim().length > 0
+						) {
+							return `<think>${sanitizeSurrogates(block.thinking)}</think>\n\n`;
+						}
+						return "";
+					})
+					.join("");
+			}
 
 			const replayReasoningDetails = msg.content
 				.filter(isThinkingContentBlock)
@@ -899,6 +1096,7 @@ export function convertMessages(
 			const nonEmptyThinkingBlocks = msg.content
 				.filter(isThinkingContentBlock)
 				.filter((block) => decodeReasoningDetails(block.thinkingSignature) === undefined)
+				.filter((block) => block.thinkingSignature !== INLINE_THINK_SIGNATURE)
 				.filter((block) => block.thinking.trim().length > 0);
 			if (nonEmptyThinkingBlocks.length > 0) {
 				if (compat.requiresThinkingAsText) {
