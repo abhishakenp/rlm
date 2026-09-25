@@ -1,0 +1,12 @@
+{
+  "name": "@rlm/thinking-steps",
+  "version": "1.0.11",
+  "description": "pi-thinking-steps (crustyhacker/pi-thinking-steps v1.0.11) as an rlm row: three-mode thinking-step rendering.",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/row.ts",
+  "exports": { ".": "./src/row.ts" },
+  "scripts": {
+    "test": "node --import tsx --test test/thinking-steps.test.ts test/summarizer-challenger.test.ts"
+  }
+}
