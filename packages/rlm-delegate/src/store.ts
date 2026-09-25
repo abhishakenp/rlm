@@ -14,13 +14,14 @@
  * kept next to the work would be deleted along with it, which is the same bug
  * wearing a different hat.
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { appendLine, closeAppend, HOT_APPEND_BYTES } from "../../rlm-persist/src/durable.ts";
+import { appendLine, closeAppend, HOT_APPEND_BYTES, writeAtomic } from "../../rlm-persist/src/durable.ts";
 import {
 	declare,
 	findCycle,
+	isFinished,
 	owed,
 	settle,
 	type Attempt,
@@ -50,6 +51,124 @@ export const defaultDir = (): string =>
 export const mintId = (now = new Date()): string => {
 	const stamp = now.toISOString().replace(/[-:T.]/g, "").slice(0, 14);
 	return `g-${stamp}-${Math.random().toString(36).slice(2, 6)}`;
+};
+
+/**
+ * How long a graph that ended badly is kept before its journal is reclaimed.
+ *
+ * A fortnight is the right life for a receipt and the wrong life for evidence,
+ * so this is a second, much longer clock rather than a second use of the first.
+ * The number matters because without one nothing was ever reclaimed at all:
+ * 731 journals were sitting in quarantine, 607 of them graphs that had already
+ * reached a terminal outcome that was not `done` — rejected, failed, unproven,
+ * unreachable — and `prune` deleted a graph only when every task was proven
+ * done, which was 14 of them. A store that keeps 98% of its history for ever is
+ * one nobody can read, and an unreadable record is the same as no record.
+ *
+ * Ninety days, because a wound is worth going back to for about a quarter and
+ * the lessons drawn from one (see lessons.ts) outlive the journal anyway.
+ */
+export const spentTtlMs = (): number =>
+	Number(process.env.RLM_DELEGATE_SPENT_TTL_MS) || 90 * 24 * 60 * 60 * 1000;
+
+/**
+ * How long a graph may sit with work owed and nothing touching it before the
+ * reconciler calls it abandoned.
+ *
+ * Twelve hours is longer than any single delegated turn and shorter than a
+ * night, so a graph that crosses it was not slow — nothing is coming back for
+ * it. `recover` already handles the narrower case of a task a dead process was
+ * holding; this is the wider one, where the process that would have called
+ * `recover` is itself gone.
+ */
+export const lostAfterMs = (): number =>
+	Number(process.env.RLM_DELEGATE_LOST_AFTER_MS) || 12 * 60 * 60 * 1000;
+
+/**
+ * One entry, one line. Refused here rather than discovered later.
+ *
+ * The journal is a fold over lines, and `load` skips a line it cannot parse
+ * because the only line that should ever be unparseable is the one a crash
+ * interrupted. That tolerance is exactly what makes a multi-line record
+ * invisible instead of loud: every line of a pretty-printed object fails to
+ * parse on its own, the fold sees nothing, and the graph silently stops
+ * existing. Two journals in quarantine are in precisely that state, written by
+ * an agent that hand-rolled `JSON.stringify(graph, null, 2)` into the delegate
+ * directory instead of going through this class.
+ *
+ * `JSON.stringify` cannot produce a raw newline on its own — it escapes them
+ * inside strings — so this cannot fire for a well-formed `Entry` today. That
+ * is the point: it is the guard that makes adding an indent argument, or
+ * writing a pre-serialised line, fail at the write instead of at the next read
+ * of a graph nobody can see any more.
+ */
+export const oneLine = (line: string): string => {
+	const at = line.search(/[\n\r]/);
+	if (at === -1) return line;
+	throw new Error(
+		`delegate journal: an entry must be one line, and this one breaks at character ${at}: ` +
+			`${JSON.stringify(line.slice(0, 120))}`,
+	);
+};
+
+/** A duration a person can read, for the reasons `reclaimable` gives. */
+const days = (ms: number): string => `${Math.floor(ms / (24 * 60 * 60 * 1000))}d`;
+
+const tryParse = (line: string): unknown | undefined => {
+	try {
+		return JSON.parse(line);
+	} catch {
+		return undefined;
+	}
+};
+
+/**
+ * Split a file into the whole JSON values it is made of, or nothing.
+ *
+ * `JSON.parse` cannot do this — it demands the whole string be one value — so
+ * the values are found by scanning for balanced braces outside of strings.
+ * Returning `undefined` on anything left over is the important half: it is
+ * what keeps `repair` from inventing a journal out of a file it did not
+ * actually understand.
+ */
+const parseStream = (raw: string): unknown[] | undefined => {
+	const out: unknown[] = [];
+	let depth = 0;
+	let start = -1;
+	let inString = false;
+	let escaped = false;
+	for (let i = 0; i < raw.length; i++) {
+		const c = raw[i];
+		if (inString) {
+			if (escaped) escaped = false;
+			else if (c === "\\") escaped = true;
+			else if (c === '"') inString = false;
+			continue;
+		}
+		if (c === '"') {
+			inString = true;
+			continue;
+		}
+		if (c === "{" || c === "[") {
+			if (depth === 0) start = i;
+			depth++;
+			continue;
+		}
+		if (c === "}" || c === "]") {
+			depth--;
+			if (depth !== 0) continue;
+			const value = tryParse(raw.slice(start, i + 1));
+			if (value === undefined) return undefined;
+			out.push(value);
+			start = -1;
+			continue;
+		}
+		// Anything outside a value that is not whitespace means this file is
+		// not the thing we think it is, and it must not be rewritten.
+		if (depth === 0 && c.trim()) return undefined;
+	}
+	if (depth !== 0 || inString) return undefined;
+	return out.length ? out : undefined;
 };
 
 export class Store {
@@ -86,7 +205,7 @@ export class Store {
 		// The 64 KB scratch buffer rather than the 4 KB default: this journal is
 		// written on every task transition of every graph, and at that rate the
 		// larger buffer halves the per-line cost for sixteen times a buffer.
-		appendLine(this.path(graphId), JSON.stringify(entry), HOT_APPEND_BYTES);
+		appendLine(this.path(graphId), oneLine(JSON.stringify(entry)), HOT_APPEND_BYTES);
 	}
 
 	/** Every graph id on disk, newest first. */
@@ -409,23 +528,113 @@ export class Store {
 	}
 
 	/**
-	 * Forget the noise, never the wounds.
+	 * When the graph was last written to, in epoch milliseconds.
 	 *
-	 * A journal whose every task is proven done, and which nothing has touched
-	 * in a fortnight, is a receipt. Anything else is evidence and stays whatever
-	 * its age — `unproven` included, and `unproven` especially: a turn nobody
-	 * could check is the thing to go and look at, not the thing to tidy away.
+	 * From the journal, deliberately, and never from `task.updatedAt`. A task's
+	 * `updatedAt` is partly derived: `settle` stamps it with the time of the
+	 * *load* every time it moves a state, so a graph whose edges are re-derived
+	 * on every read looks freshly touched for ever and can never age out of
+	 * anything. Three of the abandoned graphs in quarantine report an
+	 * `updatedAt` of "now" and have not actually been written to since the 5th.
+	 * Only what somebody wrote down can say how old a graph is.
+	 *
+	 * The file's mtime is the fallback, for a journal whose entries are all
+	 * unparseable — there is nothing else left to ask.
 	 */
-	prune(maxAgeMs = 14 * 24 * 60 * 60 * 1000): string[] {
-		const cutoff = Date.now() - maxAgeMs;
-		const removed: string[] = [];
+	private touchedAt(graphId: string): number {
+		const file = this.path(graphId);
+		let newest = 0;
+		try {
+			for (const line of readFileSync(file, "utf8").split("\n")) {
+				if (!line.trim()) continue;
+				try {
+					const at = Date.parse(JSON.parse(line).at);
+					if (at > newest) newest = at;
+				} catch {
+					/* a torn or hand-written line says nothing about the age */
+				}
+			}
+		} catch {
+			return 0;
+		}
+		if (newest) return newest;
+		try {
+			return statSync(file).mtimeMs;
+		} catch {
+			return 0;
+		}
+	}
+
+	/**
+	 * Every journal that can be let go of, and the reason it can be.
+	 *
+	 * Split out from `prune` so a caller can look before it deletes. Deleting
+	 * from a store whose whole purpose is that nothing is forgotten is the one
+	 * operation here that cannot be undone, and it should be possible to read
+	 * the list first.
+	 */
+	reclaimable(
+		maxAgeMs = 14 * 24 * 60 * 60 * 1000,
+		spentMs = spentTtlMs(),
+	): Array<{ id: string; kind: "receipt" | "spent"; why: string }> {
+		const now = Date.now();
+		const out: Array<{ id: string; kind: "receipt" | "spent"; why: string }> = [];
 		for (const id of this.ids()) {
 			const graph = this.load(id);
-			if (!graph) continue;
-			const keep =
-				graph.tasks.some((t) => t.state !== "done") ||
-				graph.tasks.some((t) => Date.parse(t.updatedAt) >= cutoff);
-			if (keep) continue;
+			// A journal nothing can be folded out of is kept, always. 104 of the
+			// 731 in quarantine are like this — entries with no `declared` to
+			// fold them onto — and not one of them can say what its outcome was.
+			// A deletion has to be justified by a terminal state the graph
+			// itself recorded, and an unreadable journal has recorded none.
+			if (!graph || !graph.tasks.length) continue;
+			const age = now - this.touchedAt(id);
+			if (graph.tasks.every((t) => t.state === "done")) {
+				if (age >= maxAgeMs) out.push({ id, kind: "receipt", why: `every task proven done, untouched for ${days(age)}` });
+				continue;
+			}
+			// Terminal-but-not-done: every task has reached an outcome nothing
+			// will move again on its own — `failed`, `rejected`, `unproven`,
+			// `unreachable`. `isFinished` is the graph's own definition of that,
+			// borrowed rather than restated so the two cannot drift apart.
+			if (!isFinished(graph.tasks)) continue;
+			if (age < spentMs) continue;
+			const states = [...new Set(graph.tasks.filter((t) => t.state !== "done").map((t) => t.state))].sort();
+			out.push({ id, kind: "spent", why: `ended ${states.join(", ")}, untouched for ${days(age)}` });
+		}
+		return out;
+	}
+
+	/**
+	 * Forget the noise, never the wounds — but stop keeping the noise for ever.
+	 *
+	 * A journal whose every task is proven done, and which nothing has touched
+	 * in a fortnight, is a receipt. A journal that reached an outcome and the
+	 * outcome was bad is evidence, and evidence is kept far longer — but not
+	 * without end, which is what it used to be. `prune` deleted only receipts,
+	 * a graph reached one 2% of the time, and 607 spent graphs had accumulated
+	 * in quarantine with no way out of it. Kept for ever and kept where nobody
+	 * looks are the same thing.
+	 *
+	 * The two clocks are separate on purpose, so raising the life of evidence
+	 * cannot shorten the life of anything and `prune(0)` still means "receipts
+	 * only". Anything still owing work is kept whatever its age; that is
+	 * unchanged, and `reconcile` is what turns a graph nobody is coming back
+	 * for into something with a recorded outcome rather than deleting it here.
+	 *
+	 * `dryRun` returns exactly what a real run would remove, without removing
+	 * it. Use `reclaimable` for the reasons.
+	 */
+	prune(
+		maxAgeMs = 14 * 24 * 60 * 60 * 1000,
+		spentMs = spentTtlMs(),
+		options: { dryRun?: boolean } = {},
+	): string[] {
+		const removed: string[] = [];
+		for (const { id } of this.reclaimable(maxAgeMs, spentMs)) {
+			if (options.dryRun) {
+				removed.push(id);
+				continue;
+			}
 			try {
 				// Let go of the descriptor first. A held fd follows the inode, so
 				// an append after the unlink would succeed, write into an orphan
@@ -438,6 +647,143 @@ export class Store {
 			}
 		}
 		return removed;
+	}
+
+	/**
+	 * Close the graphs nobody is coming back for, out loud.
+	 *
+	 * These are the ones that are neither finished nor alive: a graph left at
+	 * `began` or `refined` with no terminal event and nothing written to it
+	 * since. Nine of them were sitting in quarantine, invisible in both
+	 * directions — not owed, because quarantine is where the sweep stops
+	 * looking, and not prunable either, because a task that never ended is not
+	 * a terminal state. A record that is neither acted on nor readable is the
+	 * failure this package exists to prevent, so it is resolved rather than
+	 * left: every task that has not reached an outcome gets an `ended` entry
+	 * saying it was abandoned and when it was last touched.
+	 *
+	 * `failed` and not `unreachable`, and that is not a judgement call:
+	 * `unreachable` is derived by `settle` from the state of what a task needs,
+	 * so a task marked unreachable whose dependencies are intact would be moved
+	 * straight back to `ready` by the next load and the mark would not stick.
+	 * `failed` is one of the states `settle` will not recompute, because
+	 * something happened to it. Something did: it was given up on, and the
+	 * journal now says so.
+	 *
+	 * This is the wider sibling of `recover`, which puts back what a dead
+	 * process was holding. `recover` needs somebody alive to call it; this is
+	 * for the graphs where nobody was.
+	 */
+	reconcile(
+		staleMs = lostAfterMs(),
+		options: { dryRun?: boolean } = {},
+	): Array<{ graph: string; tasks: string[]; since: string }> {
+		const cutoff = Date.now() - staleMs;
+		const out: Array<{ graph: string; tasks: string[]; since: string }> = [];
+		for (const id of this.ids()) {
+			const graph = this.load(id);
+			if (!graph || isFinished(graph.tasks)) continue;
+			const touched = this.touchedAt(id);
+			if (!touched || touched >= cutoff) continue;
+			const since = new Date(touched).toISOString();
+			const stranded = graph.tasks.filter((t) => t.state !== "done" && !isFinished([t]));
+			if (!stranded.length) continue;
+			out.push({ graph: id, tasks: stranded.map((t) => t.id), since });
+			if (options.dryRun) continue;
+			const at = new Date().toISOString();
+			const why = `abandoned: nothing has touched this graph since ${since}`;
+			for (const task of stranded) {
+				this.append(id, {
+					k: "ended",
+					at,
+					id: task.id,
+					state: "failed",
+					attempt: {
+						// The last thing written to the journal is the last moment
+						// anybody can prove the work was still in hand, so that is
+						// where the abandoned attempt is dated from.
+						at: since,
+						endedAt: at,
+						ok: false,
+						detail: why,
+						shape: "abandoned",
+						executor: "reconcile",
+					},
+					reason: why,
+				});
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * Rewrite a journal that was written as pretty-printed JSON back into one
+	 * line per record, keeping every record.
+	 *
+	 * Not a nicety: a multi-line record is a graph that does not exist. `load`
+	 * parses line by line and skips what will not parse, so a sixteen-line
+	 * object folds to nothing and the request it recorded is gone without an
+	 * error anywhere. Two journals in quarantine are in that state.
+	 *
+	 * It refuses to guess. The file is re-parsed as a stream of whole JSON
+	 * values, and if what comes back does not account for every byte of it
+	 * beyond whitespace, nothing is written — a journal that is merely damaged
+	 * in some other way must stay damaged and readable rather than become
+	 * tidy and wrong. Returns the number of records rewritten, and 0 when the
+	 * file was already one line per entry, in which case it is not touched.
+	 */
+	repair(graphId: string): number {
+		const file = this.path(graphId);
+		const raw = readFileSync(file, "utf8");
+		const lines = raw.split("\n").filter((l) => l.trim());
+		if (lines.every((l) => tryParse(l) !== undefined)) return 0;
+
+		const records = parseStream(raw);
+		if (!records) throw new Error(`cannot repair ${graphId}: it is not a sequence of whole JSON values`);
+
+		// Let go of the descriptor before replacing the file, or the appends
+		// that follow go into the inode this is about to orphan.
+		closeAppend(file);
+		writeAtomic(file, records.map((r) => `${oneLine(JSON.stringify(r))}\n`));
+		return records.length;
+	}
+
+	/**
+	 * Move graphs that have no actionable work out of the active queue.
+	 *
+	 * Unlike `prune`, which deletes only fully-done graphs, this moves graphs
+	 * whose tasks are all in terminal or stuck states (`rejected`, `unproven`,
+	 * `failed`, `unreachable`, `done`) to a quarantine directory. They stay on
+	 * disk â nothing is ever thrown away â but they stop clogging the
+	 * active queue and the drive's sweep.
+	 *
+	 * A graph is quarantinable when every task is in a state that will never
+	 * produce runnable work on its own: `done`, `rejected`, `unproven`,
+	 * `failed`, and `unreachable`. `blocked` and `ready` are excluded because
+	 * they can still be worked â `blocked` may be waiting for a criterion
+	 * answer, and `ready` is actively runnable.
+	 */
+	quarantine(): string[] {
+		const quarantined: string[] = [];
+		const qDir = join(this.dir, "quarantine");
+		if (!existsSync(qDir)) mkdirSync(qDir, { recursive: true });
+		const stuck: ReadonlySet<Task["state"]> = new Set(["done", "rejected", "unproven", "failed", "unreachable"]);
+		for (const id of this.ids()) {
+			const graph = this.load(id);
+			// A graph that cannot be loaded is also garbage — an old format,
+			// a torn write, a corrupted file. It stays on disk in quarantine
+			// but stops appearing in the active queue.
+			if (graph && !graph.tasks.every((t) => stuck.has(t.state))) continue;
+			try {
+				closeAppend(this.path(id));
+				const dest = join(qDir, `${id}.jsonl`);
+				renameSync(this.path(id), dest);
+				quarantined.push(id);
+			} catch {
+				/* somebody else may have taken it, or the rename failed */
+			}
+		}
+		return quarantined;
 	}
 }
 
