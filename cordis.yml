@@ -9,7 +9,7 @@
 #   Reload         timer, hmr, rlm-hmr
 #   Foundation     config, context, tui, prompt
 #   Self-extension compose, plugins, self  rlm's hands on this file
-#   Core           session, tools, refine, code, workflow, learn, gitpixel
+#   Core           session, tools, refine, code, workflow, learn, pixel
 #   Agent          agent                   the LLM loop
 #   Presentation   renderer, print, sdk, modes
 #
@@ -123,13 +123,16 @@
   name: './packages/rlm-hmr/src/official.ts'
   config:
     root: ['packages']
-    ignored: ['**/node_modules', '**/dist', '**/.*']
+    # packages/rlm-host reloads itself (shell.ts adopts the live Context);
+    # a second reloader re-importing it could re-run the bootstrap.
+    ignored: ['**/node_modules', '**/dist', '**/.*', '**/rlm-host/**']
     debounce: 100
 
 - id: rlm-hmr
   name: './packages/rlm-hmr/src/index.ts'
   config:
     roots: ['packages']
+    ignored: ['/packages/rlm-host/']
     debounce: 100
 
 # ─── Foundation ──────────────────────────────────────────────────────────────
@@ -218,6 +221,30 @@
 - id: delegate
   name: './packages/rlm-delegate/src/index.ts'
 
+# rlm's own agent, over HTTP, for callers that are not rlm.
+#
+# Iris is the one this exists for: she contains no AI, so a skill that needs a
+# model or a job done asks this row instead of holding a provider key. It routes
+# `/v1/chat/completions` through rlm's model registry and hands `/v1/delegate`
+# to the row above, which records the job in a durable journal before anybody
+# runs it — so a caller that hangs up does not lose the work.
+#
+# 20130 and not 20129: the account provisioner already owns 20129 on this
+# machine, and two services that both believe they own a port is a bind error at
+# boot for whichever loses the race.
+- id: integration
+  name: './packages/rlm-integration/src/index.ts'
+  config:
+    port: 20130
+    # `loopback`, not `localhost`. `localhost` is a name with two addresses
+    # behind it and node binds only the one the resolver hands back first —
+    # measured here as `::1` alone, which left `127.0.0.1` refusing connections
+    # while `localhost` worked, so the seam was one resolver order away from
+    # reading as "rlm is down". `loopback` opens a socket on each, and neither
+    # is reachable off this machine.
+    host: loopback
+    enabled: true
+
 # The row that keeps the fleet from editing the thing that bounds the fleet.
 #
 # `capacity()` in the delegate row decides how many children may run at once,
@@ -230,9 +257,11 @@
 # a `tool_call` handler that refuses a cell writing a protected path, and a
 # watcher that puts back an unauthorised change however it got there.
 #
-# `protect` extends the list; it cannot shorten it. The guard's own source and
-# this file are protected whatever is written here, because otherwise the
-# shortest way through the door is to edit the door or delete this row.
+# `protect` extends the list; it cannot shorten it. The guard's own source is
+# protected whatever is written here, because otherwise the shortest way through
+# the door is to edit the door. This file is not: rlm writes to itself and hot
+# reloads at runtime (Abhi, 2026-09-26), so deleting this row is possible — see
+# the header of packages/rlm-guard/src/index.ts.
 #
 # Above `learn` in reading order only. Load order comes from `inject`.
 - id: guard
@@ -251,11 +280,28 @@
     reflectInterval: 60000
     maxLearningsBeforeReflect: 10
 
-- id: gitpixel
-  name: './packages/rlm-gitpixel/src/index.ts'
+- id: pixel
+  name: './packages/rlm-pixel/src/index.ts'
   config:
     cwd: .
     warmOnStart: true
+
+# Thinking rendered as steps — collapsed / summary / expanded (Alt+T, or
+# `/thinking-steps`). pi-thinking-steps v1.0.11 as a row: loaded natively so its
+# patch reaches the AssistantMessageComponent the TUI actually renders with.
+- id: thinking-steps
+  name: './packages/rlm-thinking-steps/src/row.ts'
+
+# Claude / Codex / Gemini subscriptions, served by CLIProxyAPI (launchd
+# `com.abhi.cliproxyapi`, config ~/.cli-proxy-api/config.yaml) and offered as
+# the `cliproxy` provider. The set follows what CLIProxyAPI lists, live; add a
+# subscription with `cliproxyapi -config ~/.cli-proxy-api/config.yaml -claude-login`.
+- id: cliproxy
+  name: './packages/rlm-cliproxy/src/index.ts'
+  config:
+    baseUrl: http://127.0.0.1:8317
+    apiKeyFile: ~/.cli-proxy-api/rlm-api-key
+    refreshMs: 60000
 
 
 # ─── Agent ───────────────────────────────────────────────────────────────────
