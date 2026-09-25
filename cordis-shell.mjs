@@ -222,12 +222,18 @@ async function main() {
 	try {
 		entry = await boot(composition);
 	} catch (error) {
-		broken = await unloadableRows(composition);
-		if (!broken.length) throw error;
+		const unloadable = await unloadableRows(composition);
+		if (!unloadable.length) throw error;
+		broken = unloadable.map((r) => r.id);
 		const reduced = await withoutRows(composition, broken);
 		degraded = true;
+		// One line per row, each naming the file and the first line of its own
+		// error. Distinct reasons are what tell "one missing package took seven
+		// rows with it" apart from "seven rows are each separately broken", and
+		// the first is a one-line fix while the second is an afternoon.
 		process.stderr.write(
 			`[rlm] ${broken.length} row(s) will not load and were left out of this boot: ${broken.join(", ")}\n` +
+				unloadable.map((r) => `[rlm]   ${r.id} (${r.name}): ${r.why}\n`).join("") +
 				`[rlm] ${String(error?.message ?? error).split("\n")[0]}\n`,
 		);
 		entry = await boot(reduced);
@@ -325,9 +331,18 @@ async function unloadableRows(composition) {
 		try {
 			const mod = await import(pathToFileURL(resolve(root, row.name)).href);
 			const plugin = mod.default ?? mod;
-			if (typeof plugin !== "function" && typeof plugin?.apply !== "function") broken.push(row.id);
-		} catch {
-			broken.push(row.id);
+			if (typeof plugin !== "function" && typeof plugin?.apply !== "function") {
+				broken.push({ id: row.id, name: row.name, why: `its default export is a ${typeof plugin}, not a plugin` });
+			}
+		} catch (error) {
+			// The reason was thrown away here, and that is the whole reason this
+			// took four thousand sweeps to find. Every one of the seven rows was
+			// failing on one line — an import of "@earendil-works/iris-attention",
+			// a scope that has never existed — and the only thing that reached the
+			// log was the id list plus cordis's own "loader entries failed to
+			// apply", which names nothing. A boot that degrades must say what it
+			// could not import, or the degradation is silent by construction.
+			broken.push({ id: row.id, name: row.name, why: String(error?.message ?? error).split("\n")[0] });
 		}
 	}
 	return broken;
