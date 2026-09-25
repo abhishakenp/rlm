@@ -29,7 +29,7 @@ import {
 	savePrimeCliApiKey,
 	savePrimeCliTeamSelection,
 } from "./prime-inference-auth.js";
-import { resolveConfigValue, resolveConfigValueUncached } from "./resolve-config-value.js";
+import { resolveConfigValue, resolveConfigValueRecent, resolveConfigValueUncached } from "./resolve-config-value.js";
 
 export type PrimeTeamCredential = {
 	teamId: string;
@@ -103,10 +103,55 @@ type AuthApiKeyResult = {
 export interface AuthStorageBackend {
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T;
 	withLockAsync<T>(fn: (current: string | undefined) => Promise<LockResult<T>>): Promise<T>;
+	/**
+	 * Read and write the record of credentials this machine has already watched
+	 * a provider reject. Kept beside the credentials rather than inside them so
+	 * a store that cannot hold it (or a backend that declines to implement it)
+	 * degrades to the previous in-memory-only behaviour instead of failing.
+	 *
+	 * The record never contains a credential, only the SHA-256 fingerprints the
+	 * staleness check already compares.
+	 */
+	readStaleAuthSources?(): string | undefined;
+	writeStaleAuthSources?(content: string): void;
 }
 
 export class FileAuthStorageBackend implements AuthStorageBackend {
 	constructor(private authPath: string = join(getAgentDir(), "auth.json")) {}
+
+	/**
+	 * Sibling of auth.json holding only fingerprints of credentials a provider
+	 * has already rejected. A separate file because it is derived, disposable
+	 * state: deleting it costs one more rejected request, whereas a bad merge
+	 * into auth.json would cost the credentials themselves.
+	 */
+	private stalePath(): string {
+		return join(dirname(this.authPath), "auth-stale.json");
+	}
+
+	readStaleAuthSources(): string | undefined {
+		try {
+			const path = this.stalePath();
+			if (!existsSync(path)) return undefined;
+			return readFileSync(path, "utf-8");
+		} catch {
+			// An unreadable record only means this process rediscovers a dead
+			// credential the slow way, which is what it did before this existed.
+			return undefined;
+		}
+	}
+
+	writeStaleAuthSources(content: string): void {
+		try {
+			this.ensureParentDir();
+			const path = this.stalePath();
+			writeFileSync(path, content, "utf-8");
+			chmodSync(path, 0o600);
+		} catch {
+			// Same trade as above: losing the note is recoverable, throwing here
+			// would turn a bookkeeping failure into a failed run.
+		}
+	}
 
 	private ensureParentDir(): void {
 		const dir = dirname(this.authPath);
@@ -223,6 +268,15 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 
 export class InMemoryAuthStorageBackend implements AuthStorageBackend {
 	private value: string | undefined;
+	private staleValue: string | undefined;
+
+	readStaleAuthSources(): string | undefined {
+		return this.staleValue;
+	}
+
+	writeStaleAuthSources(content: string): void {
+		this.staleValue = content;
+	}
 
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T {
 		const { result, next } = fn(this.value);
@@ -349,7 +403,7 @@ export class AuthStorage {
 	private getStoredCredentialValueMaterial(providerId: string, credential: AuthCredential): string | undefined {
 		if (credential.type === "api_key") {
 			if (credential.key.startsWith("!")) {
-				const resolvedKey = resolveConfigValueUncached(credential.key);
+				const resolvedKey = resolveConfigValueRecent(credential.key);
 				return resolvedKey === undefined ? undefined : `api_key:command:${credential.key}\0${resolvedKey}`;
 			}
 			return `api_key:${credential.key}\0${resolveConfigValue(credential.key) ?? ""}`;
@@ -583,6 +637,67 @@ export class AuthStorage {
 		return this.getAuthSourceTokenForCandidate(provider, candidate);
 	}
 
+	/**
+	 * Read back the credentials this machine has already watched a provider
+	 * reject.
+	 *
+	 * Staleness used to live only in this process's memory, which is why a dead
+	 * credential produced 117 separate dead sessions in ~/.rlm rather than one
+	 * refusal: every new run started with a clean slate, sent the same key, got
+	 * the same 401, and died on its own. Reloading the record turns the second
+	 * and every later attempt into the preflight failure the first one earned.
+	 */
+	private loadStaleAuthSources(): void {
+		this.staleAuthSources = new Map();
+		const raw = this.storage.readStaleAuthSources?.();
+		if (!raw) return;
+		try {
+			const parsed: unknown = JSON.parse(raw);
+			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+			for (const [provider, tokens] of Object.entries(parsed as Record<string, unknown>)) {
+				if (!Array.isArray(tokens)) continue;
+				const restored: AuthSourceToken[] = [];
+				for (const token of tokens) {
+					if (!token || typeof token !== "object") continue;
+					const candidate = token as Partial<AuthSourceToken>;
+					// A marker without a value fingerprint can never match a candidate,
+					// so keeping it would only block nothing while looking like it
+					// blocked something.
+					if (
+						typeof candidate.source !== "string" ||
+						typeof candidate.identityFingerprint !== "string" ||
+						typeof candidate.valueFingerprint !== "string"
+					) {
+						continue;
+					}
+					restored.push({
+						provider,
+						source: candidate.source as AuthSourceToken["source"],
+						identityFingerprint: candidate.identityFingerprint,
+						valueFingerprint: candidate.valueFingerprint,
+					});
+				}
+				if (restored.length > 0) this.staleAuthSources.set(provider, restored);
+			}
+		} catch {
+			// A corrupt record is discarded rather than repaired: the worst case is
+			// one more rejected request, and guessing at its contents is worse.
+		}
+	}
+
+	private persistStaleAuthSources(): void {
+		if (!this.storage.writeStaleAuthSources) return;
+		const serialized: Record<string, Array<Omit<AuthSourceToken, "provider">>> = {};
+		for (const [provider, tokens] of this.staleAuthSources) {
+			serialized[provider] = tokens.map((token) => ({
+				source: token.source,
+				identityFingerprint: token.identityFingerprint,
+				valueFingerprint: token.valueFingerprint,
+			}));
+		}
+		this.storage.writeStaleAuthSources(JSON.stringify(serialized, null, 2));
+	}
+
 	markAuthSourceStale(token: AuthSourceToken): boolean {
 		if (token.provider.length === 0) {
 			return false;
@@ -599,6 +714,7 @@ export class AuthStorage {
 			stale.push(token);
 		}
 		this.staleAuthSources.set(token.provider, stale);
+		this.persistStaleAuthSources();
 		return true;
 	}
 
@@ -613,6 +729,7 @@ export class AuthStorage {
 		} else {
 			this.staleAuthSources.set(provider, next);
 		}
+		this.persistStaleAuthSources();
 	}
 
 	private parseStorageData(content: string | undefined): AuthStorageData {
@@ -633,6 +750,7 @@ export class AuthStorage {
 				return { result: undefined };
 			});
 			this.data = this.parseStorageData(content);
+			this.loadStaleAuthSources();
 			this.loadError = null;
 		} catch (error) {
 			this.loadError = error as Error;
