@@ -15,7 +15,7 @@
  *
  * So the question is asked at the use site instead. No row present →
  * `ctx.get("rlmHeadless")` is `undefined` → nobody has an opinion → the row
- * does what it always did. That is the same shape `rlm-gitpixel` already uses
+ * does what it always did. That is the same shape `rlm-pixel` already uses
  * for its warm index and `rlm-delegate` for its child flags.
  *
  * ## The race the old comment was right about
