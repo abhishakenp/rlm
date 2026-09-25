@@ -10,7 +10,7 @@ A skill is a directory with a `SKILL.md` file (YAML frontmatter + markdown instr
 | Kind | What it is | When to use |
 |---|---|---|
 | markdown | `SKILL.md` plus optional scripts, references, and assets | Workflows, CLI recipes, domain knowledge, multi-step instructions |
-| JS | A markdown skill that also ships a JS module installed into the agent's persistent code kernel | Capabilities that are naturally one JS call: API wrappers, fetchers, converters, computations |
+| JS | A markdown skill that also ships a JS module installed into the agent's persistent code kernel. JS-backed skills are Cordis Service classes. | Capabilities that are naturally one JS call: API wrappers, fetchers, converters, computations |
 
 Before writing a JS-backed skill, read [references/JS-skills.md](references/JS-skills.md) for the package contract.
 
