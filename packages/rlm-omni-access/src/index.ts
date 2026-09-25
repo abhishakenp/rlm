@@ -22,7 +22,7 @@ export class OmniAccessService extends Service {
 
 	declare config: OmniAccessConfig;
 
-	private modelId = "auto/omni";
+	private modelId = "auto/best-free";
 	private baseUrl = "http://localhost:20128/v1";
 	private apiKey = "omniroute-local";
 
