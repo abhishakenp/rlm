@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { INTERNAL_RUNTIME_COMMAND_MARKER, parseArgs } from "../src/cli/args.js";
+import { APP_NAME } from "../src/config.js";
 
 describe("parseArgs", () => {
 	describe("--version flag", () => {
@@ -185,9 +186,11 @@ describe("parseArgs", () => {
 			expect(result.mode).toBe("json");
 		});
 
-		test("parses --mode rpc", () => {
-			const result = parseArgs(["--mode", "rpc"]);
-			expect(result.mode).toBe("rpc");
+		test("parses --mode json and ignores the removed rpc mode", () => {
+			// rpc (and acp/daemon) went with the prime-agent runtime in ad11ef9;
+			// rlm's modes are text and json.
+			expect(parseArgs(["--mode", "json"]).mode).toBe("json");
+			expect(parseArgs(["--mode", "rpc"]).mode).toBeUndefined();
 		});
 
 		test("parses --fork", () => {
@@ -202,7 +205,7 @@ describe("parseArgs", () => {
 			expect(result.messages).toEqual([]);
 			expect(result.diagnostics).toContainEqual({
 				type: "error",
-				message: '--export was removed. Use "prime-agent session export <file> [output]".',
+				message: `--export was removed. Use "${APP_NAME} session export <file> [output]".`,
 			});
 		});
 
@@ -217,7 +220,7 @@ describe("parseArgs", () => {
 			expect(result.messages).toEqual([]);
 			expect(result.diagnostics).toContainEqual({
 				type: "error",
-				message: '--list-models was removed. Use "prime-agent model list [search]".',
+				message: `--list-models was removed. Use "${APP_NAME} model list [search]".`,
 			});
 		});
 

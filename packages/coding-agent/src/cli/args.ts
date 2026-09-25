@@ -158,6 +158,9 @@ export function parseArgs(args: string[]): Args {
 			result.fork = args[++i];
 		} else if (arg === "--session-dir" && i + 1 < args.length) {
 			result.sessionDir = args[++i];
+		} else if (arg.startsWith("--session-dir=") && arg.length > "--session-dir=".length) {
+			// The `=` form, as `--resume=` has. rlm-iris launches with it.
+			result.sessionDir = arg.slice("--session-dir=".length);
 		} else if (arg === "--models" && i + 1 < args.length) {
 			result.models = args[++i].split(",").map((s) => s.trim());
 		} else if (arg === "--no-tools" || arg === "-nt") {

@@ -6,8 +6,7 @@
  */
 
 import { join, resolve } from "node:path";
-import { createInterface } from "node:readline";
-import { type Api, type ImageContent, type Model, modelsAreEqual } from "@earendil-works/pi-ai";
+import type { Api, ImageContent, Model } from "@earendil-works/pi-ai";
 import { registerBuiltinMcpOAuthProviders } from "@earendil-works/pi-ai/mcp";
 import chalk from "chalk";
 import { type Args, type Mode, parseArgs } from "./cli/args.js";
@@ -16,7 +15,14 @@ import { processFileArguments } from "./cli/file-processor.js";
 import { buildInitialMessage } from "./cli/initial-message.js";
 import { handlePublicCommand } from "./cli/public-command.js";
 import {
-	resolveSessionPath,
+	applyFleetArgsToEnv,
+	resolveRuntimeSessionOptions,
+	resourceLoaderOptionsFromConfig,
+	runtimeConfigFromArgs,
+	sessionOptionsFromConfig,
+} from "./cli/runtime-args.js";
+import { createSessionManager, validateForkFlags } from "./cli/session-startup.js";
+import {
 	SessionSelectorError,
 	SessionSelectorNotFoundError,
 } from "./cli/session-resolver.js";
@@ -42,8 +48,7 @@ import { formatNoModelsAvailableMessage } from "./core/auth-guidance.js";
 import { AuthStorage } from "./core/auth-storage.js";
 import type { ExtensionFactory } from "./core/extensions/types.js";
 import { installFileLogSink, setLogContext } from "./core/logging.js";
-import type { ModelRegistry } from "./core/model-registry.js";
-import { findInitialModel, resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.js";
+import { findInitialModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.js";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.js";
 import type { CreateAgentSessionOptions } from "./core/sdk.js";
 import {
@@ -61,7 +66,6 @@ import { runMigrations, showDeprecationWarnings } from "./migrations.js";
 import { runPrintMode } from "./modes/print-mode.js";
 import { initTheme, preloadCodeHighlighter, stopThemeWatcher } from "./modes/interactive/theme/theme.js";
 import { handleConfigCommand } from "./package-manager-cli.js";
-import { isLocalPath } from "./utils/paths.js";
 
 /**
  * Read all content from piped stdin.
@@ -163,274 +167,8 @@ async function prepareInitialMessage(
 	});
 }
 
-/** Prompt user for yes/no confirmation */
-async function promptConfirm(message: string): Promise<boolean> {
-	return new Promise((resolve) => {
-		const rl = createInterface({
-			input: process.stdin,
-			output: process.stdout,
-		});
-		rl.question(`${message} [y/N] `, (answer) => {
-			rl.close();
-			resolve(answer.toLowerCase() === "y" || answer.toLowerCase() === "yes");
-		});
-	});
-}
-
-function validateForkFlags(parsed: Args): void {
-	if (!parsed.fork) return;
-
-	const conflictingFlags = [
-		parsed.continue ? "--continue" : undefined,
-		parsed.resume ? "--resume" : undefined,
-		parsed.noSession ? "--no-session" : undefined,
-	].filter((flag): flag is string => flag !== undefined);
-
-	if (conflictingFlags.length > 0) {
-		console.error(chalk.red(`Error: --fork cannot be combined with ${conflictingFlags.join(", ")}`));
-		process.exit(1);
-	}
-}
-
-function forkSessionOrExit(sourcePath: string, cwd: string, sessionDir?: string): SessionManager {
-	try {
-		return SessionManager.forkFrom(sourcePath, cwd, sessionDir);
-	} catch (error: unknown) {
-		const message = error instanceof Error ? error.message : String(error);
-		console.error(chalk.red(`Error: ${message}`));
-		process.exit(1);
-	}
-}
-
-function getResumeSelector(parsed: Pick<Args, "resume">): string | undefined {
-	return typeof parsed.resume === "string" ? parsed.resume : undefined;
-}
-
-export async function createSessionManager(
-	parsed: Args,
-	cwd: string,
-	sessionDir: string | undefined,
-): Promise<SessionManager> {
-	const explicitCwdOverride = parsed.cwd ? cwd : undefined;
-
-	if (parsed.noSession) {
-		return SessionManager.inMemory();
-	}
-
-	if (parsed.fork) {
-		const resolved = await resolveSessionPath(parsed.fork, cwd, sessionDir);
-
-		switch (resolved.type) {
-			case "path":
-			case "local":
-			case "global":
-				return forkSessionOrExit(resolved.path, cwd, sessionDir);
-		}
-	}
-
-	const resumeSelector = getResumeSelector(parsed);
-	if (resumeSelector) {
-		const resolved = await resolveSessionPath(resumeSelector, cwd, sessionDir);
-
-		switch (resolved.type) {
-			case "path":
-			case "local":
-				return SessionManager.open(resolved.path, sessionDir, explicitCwdOverride);
-
-			case "global": {
-				console.log(chalk.yellow(`Session found in different project: ${resolved.cwd}`));
-				const shouldFork = await promptConfirm("Fork this session into current directory?");
-				if (!shouldFork) {
-					console.log(chalk.dim("Aborted."));
-					process.exit(0);
-				}
-				return forkSessionOrExit(resolved.path, cwd, sessionDir);
-			}
-		}
-	}
-
-	if (parsed.continue) {
-		return SessionManager.continueRecent(cwd, sessionDir);
-	}
-
-	return SessionManager.create(cwd, sessionDir);
-}
-
-function buildSessionOptions(
-	config: AgentSessionRuntimeConfig,
-	scopedModels: ScopedModel[],
-	hasExistingSession: boolean,
-	modelRegistry: ModelRegistry,
-	settingsManager: SettingsManager,
-): {
-	options: CreateAgentSessionOptions;
-	cliThinkingFromModel: boolean;
-	diagnostics: AgentSessionRuntimeDiagnostic[];
-} {
-	const options: CreateAgentSessionOptions = {};
-	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
-	let cliThinkingFromModel = false;
-
-	// Model from CLI
-	// - supports --provider <name> --model <pattern>
-	// - supports --model <provider>/<pattern>
-	if (config.model) {
-		const resolved = resolveCliModel({
-			cliProvider: config.provider,
-			cliModel: config.model,
-			modelRegistry,
-		});
-		if (resolved.warning) {
-			diagnostics.push({ type: "warning", message: resolved.warning });
-		}
-		if (resolved.error) {
-			diagnostics.push({ type: "error", message: resolved.error });
-		}
-		if (resolved.model) {
-			options.model = resolved.model;
-			// Allow "--model <pattern>:<thinking>" as a shorthand.
-			// Explicit --thinking still takes precedence (applied later).
-			if (!config.thinking && resolved.thinkingLevel) {
-				options.thinkingLevel = resolved.thinkingLevel;
-				cliThinkingFromModel = true;
-			}
-		}
-	}
-
-	if (!options.model && scopedModels.length > 0 && !hasExistingSession) {
-		// Check if saved default is in scoped models - use it if so, otherwise first scoped model
-		const savedProvider = settingsManager.getDefaultProvider();
-		const savedModelId = settingsManager.getDefaultModel();
-		const savedModel = savedProvider && savedModelId ? modelRegistry.find(savedProvider, savedModelId) : undefined;
-		const savedInScope = savedModel ? scopedModels.find((sm) => modelsAreEqual(sm.model, savedModel)) : undefined;
-
-		if (savedInScope) {
-			options.model = savedInScope.model;
-			// Use thinking level from scoped model config if explicitly set
-			if (!config.thinking && savedInScope.thinkingLevel) {
-				options.thinkingLevel = savedInScope.thinkingLevel;
-			}
-		} else {
-			options.model = scopedModels[0].model;
-			// Use thinking level from first scoped model if explicitly set
-			if (!config.thinking && scopedModels[0].thinkingLevel) {
-				options.thinkingLevel = scopedModels[0].thinkingLevel;
-			}
-		}
-	}
-
-	// Thinking level from CLI (takes precedence over scoped model thinking levels set above)
-	if (config.thinking) {
-		options.thinkingLevel = config.thinking;
-	}
-
-	// Scoped models for Ctrl+P cycling
-	// Keep thinking level undefined when not explicitly set in the model pattern.
-	// Undefined means "inherit current session thinking level" during cycling.
-	if (scopedModels.length > 0) {
-		options.scopedModels = scopedModels.map((sm) => ({
-			model: sm.model,
-			thinkingLevel: sm.thinkingLevel,
-		}));
-	}
-
-	// API key from CLI - set in authStorage
-	// (handled by caller before createAgentSession)
-
-	// Tools
-	if (config.noTools) {
-		options.noTools = "all";
-	} else if (config.noBuiltinTools) {
-		options.noTools = "builtin";
-	}
-	if (config.tools) {
-		options.tools = [...config.tools];
-	}
-	if (config.autonomous) {
-		options.autonomous = mergeAutonomousConfig(undefined, config.autonomous);
-	}
-
-	return { options, cliThinkingFromModel, diagnostics };
-}
-
-function resolveCliPaths(cwd: string, paths: string[] | undefined): string[] | undefined {
-	return paths?.map((value) => (isLocalPath(value) ? resolve(cwd, value) : value));
-}
-
-function runtimeAutonomousConfigFromArgs(parsed: Args): AgentSessionRuntimeConfig["autonomous"] {
-	const hasAutonomousOptions =
-		parsed.autonomous === true ||
-		parsed.autonomousGates !== undefined ||
-		parsed.autonomousGateRetries !== undefined ||
-		parsed.autonomousGateTimeoutMs !== undefined ||
-		parsed.autonomousMaxContinuations !== undefined ||
-		parsed.autonomousMaxTurns !== undefined ||
-		parsed.autonomousMaxTokens !== undefined ||
-		parsed.autonomousTimeoutMs !== undefined;
-	if (!hasAutonomousOptions) {
-		return undefined;
-	}
-	const hasGateOptions =
-		parsed.autonomousGates !== undefined ||
-		parsed.autonomousGateRetries !== undefined ||
-		parsed.autonomousGateTimeoutMs !== undefined;
-	return {
-		enabled: true,
-		maxContinuations: parsed.autonomousMaxContinuations,
-		maxTurns: parsed.autonomousMaxTurns,
-		maxTokens: parsed.autonomousMaxTokens,
-		timeoutMs: parsed.autonomousTimeoutMs,
-		gates: hasGateOptions
-			? {
-					commands: parsed.autonomousGates,
-					maxRetries: parsed.autonomousGateRetries,
-					timeoutMs: parsed.autonomousGateTimeoutMs,
-				}
-			: undefined,
-	};
-}
-
-function runtimeConfigFromArgs(
-	parsed: Args,
-	cwd: string,
-	agentDir: string,
-	sessionDir: string | undefined,
-	appMode: AppMode,
-	telemetryDisabled?: true,
-): AgentSessionRuntimeConfig {
-	return {
-		cwd,
-		agentDir,
-		sessionDir,
-		provider: parsed.provider,
-		model: parsed.model,
-		apiKey: parsed.apiKey,
-		systemPrompt: parsed.systemPrompt,
-		appendSystemPrompt: parsed.appendSystemPrompt,
-		thinking: parsed.thinking,
-		models: parsed.models,
-		tools: parsed.tools,
-		noTools: parsed.noTools,
-		noBuiltinTools: parsed.noBuiltinTools,
-		extensions: resolveCliPaths(cwd, parsed.extensions),
-		noExtensions: parsed.noExtensions,
-		skills: resolveCliPaths(cwd, parsed.skills),
-		noSkills: parsed.noSkills,
-		promptTemplates: resolveCliPaths(cwd, parsed.promptTemplates),
-		noPromptTemplates: parsed.noPromptTemplates,
-		themes: resolveCliPaths(cwd, parsed.themes),
-		noThemes: parsed.noThemes,
-		noContextFiles: parsed.noContextFiles,
-		autonomous: runtimeAutonomousConfigFromArgs(parsed),
-		extensionFlagValues: parsed.unknownFlags.size > 0 ? Object.fromEntries(parsed.unknownFlags.entries()) : undefined,
-		executionMode: appMode,
-		telemetryDisabled,
-		// Serialized refine for print/json: the client's appMode is NOT
-		// "interactive" here — it's "print" or "json".
-		serializedRefine: appMode !== "interactive",
-		initialGoal: parsed.goal ? { objective: parsed.goal, tokenBudget: parsed.goalTokenBudget } : undefined,
-	};
-}
+export { createSessionManager } from "./cli/session-startup.js";
+export { resolveRuntimeSessionOptions } from "./cli/runtime-args.js";
 
 interface PreparedRuntimeServices {
 	services: AgentSessionServices;
@@ -438,39 +176,6 @@ interface PreparedRuntimeServices {
 	sessionOptions: CreateAgentSessionOptions;
 	cliThinkingFromModel: boolean;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
-}
-
-export function resolveRuntimeSessionOptions(
-	sessionOptions: CreateAgentSessionOptions,
-	runtimeSessionOptions?: CreateAgentSessionOptions,
-): CreateAgentSessionOptions {
-	return {
-		model: runtimeSessionOptions?.model ?? sessionOptions.model,
-		thinkingLevel: runtimeSessionOptions?.thinkingLevel ?? sessionOptions.thinkingLevel,
-		serviceTier: runtimeSessionOptions?.serviceTier ?? sessionOptions.serviceTier,
-		scopedModels: runtimeSessionOptions?.scopedModels ?? sessionOptions.scopedModels,
-		tools: runtimeSessionOptions?.tools ?? sessionOptions.tools,
-		noTools: runtimeSessionOptions?.noTools ?? sessionOptions.noTools,
-		customTools: runtimeSessionOptions?.customTools ?? sessionOptions.customTools,
-		baseToolsOverride: runtimeSessionOptions?.baseToolsOverride ?? sessionOptions.baseToolsOverride,
-		initialActiveToolNames: runtimeSessionOptions?.initialActiveToolNames,
-		allowedToolNames: runtimeSessionOptions?.allowedToolNames,
-		includeGoals: runtimeSessionOptions?.includeGoals,
-		includeCompactSkill: runtimeSessionOptions?.includeCompactSkill,
-		rlmHeartbeatController: runtimeSessionOptions?.rlmHeartbeatController,
-		agentMessageController: runtimeSessionOptions?.agentMessageController,
-		agentObserveController: runtimeSessionOptions?.agentObserveController,
-		autonomous:
-			(runtimeSessionOptions?.rlmDepth ?? 0) > 0
-				? mergeAutonomousConfig(sessionOptions.autonomous, { ...runtimeSessionOptions?.autonomous, enabled: false })
-				: mergeAutonomousConfig(sessionOptions.autonomous, runtimeSessionOptions?.autonomous),
-		rlmDepth: runtimeSessionOptions?.rlmDepth,
-		rlmMaxDepth: runtimeSessionOptions?.rlmMaxDepth,
-		rlmSessionDir: runtimeSessionOptions?.rlmSessionDir,
-		rlmParentNodeId: runtimeSessionOptions?.rlmParentNodeId,
-		rlmParentAgent: runtimeSessionOptions?.rlmParentAgent,
-		subagentRuntimeHost: runtimeSessionOptions?.subagentRuntimeHost,
-	};
 }
 
 async function prepareRuntimeServices(options: {
@@ -496,17 +201,7 @@ async function prepareRuntimeServices(options: {
 		noBuiltinHerdrReporter: (options.sessionOptionsOverride?.rlmDepth ?? 0) > 0,
 		telemetryDisabled: config.telemetryDisabled,
 		resourceLoaderOptions: {
-			additionalExtensionPaths: config.extensions,
-			additionalSkillPaths: config.skills,
-			additionalPromptTemplatePaths: config.promptTemplates,
-			additionalThemePaths: config.themes,
-			noExtensions: config.noExtensions,
-			noSkills: config.noSkills,
-			noPromptTemplates: config.noPromptTemplates,
-			noThemes: config.noThemes,
-			noContextFiles: config.noContextFiles,
-			systemPrompt: config.systemPrompt,
-			appendSystemPrompt: config.appendSystemPrompt,
+			...resourceLoaderOptionsFromConfig(config),
 			extensionFactories: options.extensionFactories,
 		},
 	});
@@ -520,35 +215,18 @@ async function prepareRuntimeServices(options: {
 		})),
 	];
 
-	const modelPatterns = config.models ?? settingsManager.getEnabledModels();
-	const scopedModels =
-		modelPatterns && modelPatterns.length > 0 ? await resolveModelScope(modelPatterns, modelRegistry) : [];
-
 	const {
-		options: sessionOptions,
+		scopedModels,
+		sessionOptions,
 		cliThinkingFromModel,
 		diagnostics: sessionOptionDiagnostics,
-	} = buildSessionOptions(
+	} = await sessionOptionsFromConfig({
 		config,
-		scopedModels,
-		sessionManager.buildSessionContext().messages.length > 0,
-		modelRegistry,
-		settingsManager,
-	);
+		services: { settingsManager, modelRegistry, authStorage },
+		sessionManager,
+		sessionOptionsOverride: options.sessionOptionsOverride,
+	});
 	diagnostics.push(...sessionOptionDiagnostics);
-
-	const effectiveSessionModel = options.sessionOptionsOverride?.model ?? sessionOptions.model;
-	if (config.apiKey) {
-		if (!effectiveSessionModel) {
-			diagnostics.push({
-				type: "error",
-				message: "--api-key requires a model to be specified via --model, --provider/--model, or --models",
-			});
-		} else {
-			authStorage.setRuntimeApiKey(effectiveSessionModel.provider, config.apiKey);
-		}
-	}
-
 	return {
 		services,
 		scopedModels,
@@ -651,6 +329,14 @@ export interface MainOptions {
 
 export async function main(args: string[], options?: MainOptions) {
 	resetTimings();
+	// This is the *only* structured log of the standalone CLI host, and it
+	// stays. It used to be a second one: packages/rlm-log installed this same
+	// sink under the Cordis shell as well, so a host that already wrote
+	// ~/.rlm/agent/logs/rlm.jsonl also pointed pi-ai at agent.jsonl — a file
+	// nothing reads and which, once the daemon architecture went away, nothing
+	// meaningfully wrote either. rlm-log now folds pi-ai into its own recorder
+	// instead of forking it here, so each host has exactly one log. Do not
+	// re-add a call to this from a Cordis row.
 	installFileLogSink();
 	registerBuiltinMcpOAuthProviders();
 	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE);
@@ -684,11 +370,7 @@ export async function main(args: string[], options?: MainOptions) {
 	time("parseArgs");
 	const appMode = resolveAppMode(parsed, process.stdin.isTTY);
 
-	// Headless/fleet args: inject into env so AgentSession picks them up
-	if (parsed.rlmDepth !== undefined) process.env.RLM_DEPTH = String(parsed.rlmDepth);
-	if (parsed.parentAgentId) process.env.RLM_PARENT_NODE_ID = parsed.parentAgentId;
-	if (parsed.parentHost) process.env.RLM_PARENT_HOST = parsed.parentHost;
-	if (parsed.sessionId) process.env.PRIME_AGENT_SESSION_ID = parsed.sessionId;
+	applyFleetArgsToEnv(parsed);
 
 	if (shouldRejectNonInteractiveAttach(publicCommand.attachAgent, appMode)) {
 		console.error(chalk.red("Error: attach requires an interactive terminal"));
