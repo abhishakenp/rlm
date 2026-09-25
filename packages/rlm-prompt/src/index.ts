@@ -16,6 +16,7 @@
  */
 
 import { Service } from "@deepseek-ai/cordis";
+import { adopt, hotData } from "../../rlm-hmr/src/hot.ts";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -59,6 +60,33 @@ export class RlmPromptService extends Service {
 	}
 
 	async [Service.init]() {
+		// One registry for the life of the process. A swap used to install a new,
+		// EMPTY registry as `__rlmPrompt` while every other row's fragments stayed
+		// on the old one — the system prompt silently lost them. Every generation
+		// now shares the same maps (rlm-hmr hot.ts); the old handles' `dispose()`
+		// closures mutate those same maps, so they keep working.
+		const hot = hotData<{ fragments?: Map<string, PromptFragment>; handles?: Map<string, ExtensionHandle[]>; listeners?: Set<() => void>; auto?: number }>("rlm-prompt:state");
+		if (hot.fragments) {
+			this.fragments = hot.fragments;
+			this.handlesByPlugin = hot.handles!;
+			this.listeners = hot.listeners!;
+			this.autoIdCounter = hot.auto ?? 0;
+		} else {
+			hot.fragments = this.fragments;
+			hot.handles = this.handlesByPlugin;
+			hot.listeners = this.listeners;
+		}
+		(this.ctx as any).effect(() => () => {
+			hot.auto = this.autoIdCounter;
+		}, "rlm-prompt hand over counter");
+		// Removed for real: clear the registry and take the global back.
+		adopt(this.ctx as any, "rlm-prompt:registry", () => hot, (h) => {
+			const current = (globalThis as any).__rlmPrompt as RlmPromptService | undefined;
+			current?.clearAll();
+			delete h.fragments;
+			delete h.handles;
+			delete h.listeners;
+		});
 		(globalThis as any).__rlmPrompt = this;
 		this.ctx.logger?.info("rlm-prompt: ready (prompt contribution registry)");
 	}
@@ -219,7 +247,8 @@ export class RlmPromptService extends Service {
 		if (handles.length === 0) this.handlesByPlugin.delete(pluginId);
 	}
 
-	async [Symbol.dispose]() {
+	/** Drop every fragment and the global. Only when the row is removed (see init). */
+	clearAll() {
 		// Clear all fragments on shutdown — dispose handles without re-emitting per-fragment.
 		const pluginIds = [...this.handlesByPlugin.keys()];
 		for (const pid of pluginIds) {

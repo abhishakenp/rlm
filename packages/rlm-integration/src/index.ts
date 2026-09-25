@@ -89,7 +89,38 @@ export interface RlmIntegrationConfig {
 	enabled?: boolean;
 }
 
+
 export const name = "rlm-integration";
+
+/** How long a disposed fiber keeps the sockets open for a successor to take over. */
+const RELEASE_GRACE_MS = 3000;
+
+interface SharedSockets {
+	servers: Server[];
+	handler: Application | ((req: any, res: any) => void);
+	owner?: object;
+	closing?: ReturnType<typeof setTimeout>;
+}
+
+/**
+ * The listening sockets, per port and host, kept on `globalThis` so they outlive
+ * the module and the fiber: a hot reload evaluates this file again (a fresh
+ * module scope) and swaps the fiber, and both must find the sockets the
+ * previous generation opened rather than bind the port a second time.
+ */
+const sharedSockets = (port: number, host: string): SharedSockets => {
+	const all = ((globalThis as any).__rlmIntegrationSockets ??= new Map<string, SharedSockets>()) as Map<
+		string,
+		SharedSockets
+	>;
+	const key = `${host}:${port}`;
+	let entry = all.get(key);
+	if (!entry) {
+		entry = { servers: [], handler: (_req: any, res: any) => res.writeHead(503).end() };
+		all.set(key, entry);
+	}
+	return entry;
+};
 
 /** OpenAI-compatible chat completions request shape (subset). */
 export interface ChatCompletionRequest {
@@ -135,6 +166,12 @@ export class RlmIntegration extends Service {
 	 * IPv4 one and says so; the row does not fail to mount over it.
 	 */
 	private servers: Server[] = [];
+	/**
+	 * Who owns the shared sockets, by token rather than by `this`: cordis hands
+	 * callers a proxy of the service, so `this` inside a method reached through
+	 * it is not the object `start` stored.
+	 */
+	private readonly token = {};
 
 	/**
 	 * Cordis hands a row `(ctx, config)`, and this took only the first.
@@ -160,7 +197,6 @@ export class RlmIntegration extends Service {
 			enabled: raw.enabled ?? true,
 		};
 		this.app = express();
-		this.app.use(express.json({ limit: "10mb" }));
 	}
 
 	async [Service.init]() {
@@ -168,17 +204,34 @@ export class RlmIntegration extends Service {
 			console.error("[rlm] rlm-integration: disabled by config");
 			return;
 		}
+		// Cleanup used to live in `[Service.stop]`. Cordis 4 defines no such
+		// symbol, so that was a method named "undefined" that nothing ever called,
+		// and a swapped fiber kept :20130 bound with no way to hand it on. The
+		// effect's disposer is what cordis actually runs when the fiber goes.
+		(this.ctx as { effect: (fn: () => () => void) => void }).effect(() => () => void this.release("fiber disposed"));
 		await this.start();
 	}
 
-	async [Service.stop]() {
-		await this.stop("service_stop");
+	/**
+	 * A hot patch (rlm-hmr) replaced this class's methods in place. The routes
+	 * were registered at start with the old closures, so rebuild the app from the
+	 * new code and point the live sockets at it. The sockets never close: a
+	 * request in flight finishes on the app it started on, the next one lands on
+	 * the new one.
+	 */
+	[Symbol.for("rlm.hmr.patched")](): void {
+		const shared = sharedSockets(this.config.port, this.config.host);
+		if (shared.owner !== this.token) return;
+		shared.handler = this.buildApp();
 	}
 
-	/** Start the HTTP server. Idempotent. */
-	async start(): Promise<void> {
-		if (this.servers.length) return;
-		const { port, host } = this.config;
+	/**
+	 * Every route, on a fresh express app. Separate from `start` so a hot patch or
+	 * a swapped fiber can rebuild the handler without touching the sockets.
+	 */
+	private buildApp(): Application {
+		this.app = express();
+		this.app.use(express.json({ limit: "10mb" }));
 
 		this.app.get("/health", (_req: Request, res: Response) => {
 			// Whether the delegation routes can actually do anything is part of
@@ -256,13 +309,41 @@ export class RlmIntegration extends Service {
 		});
 
 		this.mountDelegation();
+		return this.app;
+	}
+
+	/** Start the HTTP server. Idempotent. */
+	async start(): Promise<void> {
+		if (this.servers.length) return;
+		const { port, host } = this.config;
+		const shared = sharedSockets(port, host);
+		const app = this.buildApp();
+
+		// A swapped fiber (or a second mount in this process) takes over the
+		// sockets the previous one opened instead of racing it for the port: the
+		// old fiber's release is deferred (see `release`), so for a swap the
+		// sockets are still open here, and nothing ever refuses a connection.
+		if (shared.servers.length) {
+			if (shared.closing) clearTimeout(shared.closing);
+			shared.closing = undefined;
+			shared.handler = app;
+			shared.owner = this.token;
+			this.servers = shared.servers;
+			this.ctx.logger?.info?.(`rlm-integration: took over the sockets on port ${port} — no rebind`);
+			this.ctx.emit("rlm/integration-started", { port });
+			return;
+		}
 
 		// `loopback` is a pair of addresses, not one. Anything else is taken
 		// literally, so a caller that really does want one interface still gets it.
 		const wanted = host === "loopback" ? ["127.0.0.1", "::1"] : [host];
+		// The sockets dispatch through `shared.handler`, looked up per request, so
+		// the app behind them can be replaced while they stay open.
+		const dispatch = (req: any, res: any) => (shared.handler as any)(req, res);
+		shared.handler = app;
 		const bind = (address: string) =>
 			new Promise<{ address: string; server: Server | null; error?: string }>((resolve) => {
-				const server = createServer(this.app);
+				const server = createServer(dispatch);
 				const failed = (error: any) => {
 					server.removeAllListeners();
 					try {
@@ -298,9 +379,21 @@ export class RlmIntegration extends Service {
 			// that reports itself started while nothing is listening is the failure
 			// mode this whole seam has to not have.
 			const why = outcomes.map((o) => `${o.address}: ${o.error}`).join("; ");
-			if (portHeldElsewhere) this.ctx.logger?.info?.(`rlm-integration: port ${port} already in use (another rlm instance) — ${why}`);
+			// Another process owning the port is the normal case for every rlm
+			// after the first, and not a failure of this one. It used to throw
+			// here, and a FAILED row kept the composition from settling — rlm-boot
+			// waits for it before layering the overlay — so every overlay row
+			// (tps, omni-access, eleksha, …) silently never mounted, and inside a
+			// daemon worker the throw aborted the whole boot. Stay mounted, idle,
+			// and say so where it can be read (`status.running` is false).
+			if (portHeldElsewhere) {
+				this.ctx.logger?.info?.(`rlm-integration: port ${port} is served by another process — this one stays idle (${why})`);
+				return;
+			}
 			throw new Error(`rlm-integration: nothing could be bound on port ${port} — ${why}`);
 		}
+		shared.servers = this.servers;
+		shared.owner = this.token;
 		this.ctx.emit("rlm/integration-started", { port });
 	}
 
@@ -509,11 +602,38 @@ export class RlmIntegration extends Service {
 		);
 	}
 
+	/**
+	 * The fiber is going. For a hot swap a successor mounts within milliseconds
+	 * and takes the sockets over in `start`; closing here would refuse every
+	 * connection in between. So the close is deferred by `RELEASE_GRACE_MS` and
+	 * cancelled by a successor. A row that is really removed closes after it.
+	 */
+	private release(reason: string): void {
+		const shared = sharedSockets(this.config.port, this.config.host);
+		if (shared.owner !== this.token) {
+			this.servers = [];
+			return;
+		}
+		if (shared.closing) clearTimeout(shared.closing);
+		shared.closing = setTimeout(() => {
+			shared.closing = undefined;
+			if (shared.owner === this.token) void this.stop(reason);
+		}, RELEASE_GRACE_MS);
+		shared.closing.unref?.();
+	}
+
 	/** Stop every socket the row opened. Idempotent. */
 	async stop(reason = "manual"): Promise<void> {
 		if (!this.servers.length) return;
 		const closing = this.servers;
 		this.servers = [];
+		const shared = sharedSockets(this.config.port, this.config.host);
+		if (shared.owner === this.token) {
+			shared.servers = [];
+			shared.owner = undefined;
+			if (shared.closing) clearTimeout(shared.closing);
+			shared.closing = undefined;
+		}
 		await Promise.all(closing.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
 		console.error(`[rlm] rlm-integration: stopped (${reason})`);
 		this.ctx.emit("rlm/integration-stopped", { reason });

@@ -41,8 +41,24 @@ export interface StatusBarItemExtension {
 	id: string;
 	/** Returns the text to display in the status bar, or null to hide. */
 	renderer: (context: TuiRenderContext) => string | null;
+	/**
+	 * Position among status items, lowest first. Items render on the right of
+	 * the prompt tray, after the context-usage label, and the item farthest
+	 * from it is the first dropped when the line runs out of room. Default 100.
+	 */
+	order?: number;
 	pluginId: string;
 }
+
+/**
+ * An event of the session the TUI is showing right now — the same
+ * AgentSessionEvent the chat renders (message_start/update/end, agent_end, …),
+ * plus `{ type: "session_attached" }` whenever the chat starts showing a
+ * session (a chat opening, or switching to another session). `sessionId` says
+ * which session it was, so per-session state can be kept apart.
+ */
+export type DisplayedSessionEvent = { type: string; [key: string]: unknown };
+export type DisplayedSessionListener = (event: DisplayedSessionEvent, sessionId: string | undefined) => void;
 
 export interface ComponentExtension {
 	id: string;
@@ -150,6 +166,12 @@ export class RlmTuiService extends Service {
 	private slashCommands: Map<string, SlashCommandExtension> = new Map();
 	/** Status bar items registered by plugins. */
 	private statusItems: Map<string, StatusBarItemExtension> = new Map();
+	/** Listeners for the displayed session's events, by handle id. */
+	private sessionListeners: Map<string, DisplayedSessionListener> = new Map();
+	private sessionListenerSeq = 0;
+	/** The one tray notice, see announce(). */
+	private notice: { text: string; level: "info" | "warn"; count: number; expiresAt: number } | undefined;
+	private noticeTimer: ReturnType<typeof setTimeout> | undefined;
 	/** Custom components registered by plugins. */
 	private components: Map<string, ComponentExtension> = new Map();
 	/** All extension handles by plugin — for cleanup on hot-swap. */
@@ -174,17 +196,79 @@ export class RlmTuiService extends Service {
 	}
 
 	async [Service.init]() {
+		// A hot swap of this row mounts a fresh instance with empty maps while
+		// every other row's registrations (the TPS item, the ctx: segment, slash
+		// commands, the chat's render callback) live on the previous one — and
+		// nothing re-runs those rows. So take the predecessor's state over, the
+		// same Map objects, so the handles its callers already hold keep working.
+		const prev = (globalThis as any).__rlmTui as RlmTuiService | undefined;
+		if (prev && prev !== this && typeof (prev as any).getStatusBarItems === "function") this.adopt(prev);
 		// Expose the service globally so the TUI (in the coding-agent bundle)
 		// can read extensions without importing this package directly.
 		(globalThis as any).__rlmTui = this;
+		installStderrGuard();
+		// Cordis 4 never calls `[Symbol.dispose]`; the effect's disposer is what
+		// it runs. Deferred, so a successor adopts the state before it is wiped.
+		(this.ctx as { effect: (fn: () => () => void) => void }).effect(() => () => this.retire());
 		this.ctx.logger?.info("rlm-tui: ready (extension points available)");
 	}
+
+	/** Fields that make up the registry, moved to a successor on a hot swap. */
+	private static readonly CARRIED = [
+		"slashCommands",
+		"statusItems",
+		"sessionListeners",
+		"sessionListenerSeq",
+		"notice",
+		"noticeTimer",
+		"components",
+		"handlesByPlugin",
+		"renderCallback",
+		"renderCallbackIsNoop",
+		"uiProviders",
+		"activeProviderKey",
+		"_followupQueue",
+		"_lastEnterAt",
+	] as const;
+
+	private retireTimer: ReturnType<typeof setTimeout> | undefined;
+
+	private adopt(prev: RlmTuiService): void {
+		const from = prev as any;
+		if (from.retireTimer) clearTimeout(from.retireTimer);
+		from.retireTimer = undefined;
+		for (const key of RlmTuiService.CARRIED) {
+			if (key in from) (this as any)[key] = from[key];
+		}
+		this.requestRender();
+	}
+
+	/** The fiber is going: wipe the registry only if no successor took it over. */
+	private retire(): void {
+		if (this.retireTimer) clearTimeout(this.retireTimer);
+		this.retireTimer = setTimeout(() => {
+			this.retireTimer = undefined;
+			if ((globalThis as any).__rlmTui === this) void this.wipe();
+		}, 3000);
+		(this.retireTimer as { unref?: () => void }).unref?.();
+	}
+
+	/**
+	 * Whether a chat is on screen: it registers a render callback when it starts
+	 * and swaps in a no-op when it stops.
+	 */
+	isTuiActive(): boolean {
+		return this.renderCallback !== null && !this.renderCallbackIsNoop && process.stdout.isTTY === true;
+	}
+
+	private renderCallbackIsNoop = false;
 
 	// ─── Render callback ──────────────────────────────────────────────────────
 
 	/** Called by the TUI to register a re-render callback. */
 	setRenderCallback(cb: () => void): void {
 		this.renderCallback = cb;
+		this.renderCallbackIsNoop = String(cb).replace(/\s/g, "") === "()=>{}";
 	}
 
 	private requestRender(): void {
@@ -270,9 +354,74 @@ export class RlmTuiService extends Service {
 		return handle;
 	}
 
-	/** Get all registered status bar items. */
+	/** Get all registered status bar items, in `order`. */
 	getStatusBarItems(): StatusBarItemExtension[] {
-		return [...this.statusItems.values()];
+		return [...this.statusItems.values()].sort((a, b) => (a.order ?? 100) - (b.order ?? 100));
+	}
+
+	// ─── Displayed session events ─────────────────────────────────────────────
+
+	/**
+	 * Listen to the events of whichever session the chat is showing. The chat
+	 * publishes them as it renders them, so a subagent opened from the agents
+	 * view is what a listener hears while it is open.
+	 */
+	onDisplayedSessionEvent(pluginId: string, listener: DisplayedSessionListener): ExtensionHandle {
+		const key = `session-events:${++this.sessionListenerSeq}`;
+		this.sessionListeners.set(key, listener);
+		const handle: ExtensionHandle = {
+			id: key,
+			dispose: () => {
+				this.sessionListeners.delete(key);
+				this.removeHandle(pluginId, handle);
+			},
+		};
+		this.addHandle(pluginId, handle);
+		return handle;
+	}
+
+	// ─── Tray notice ──────────────────────────────────────────────────────────
+
+	/**
+	 * One short, transient line of news for the prompt tray — "↻ reloaded
+	 * rlm-pixel", "⚠ tui.ts does not parse". There is only ever one: each
+	 * announcement replaces the last (`count` says how many arrived while it was
+	 * up), and it clears itself. Everything announced is also logged; nothing is
+	 * printed.
+	 */
+	announce(text: string, options: { level?: "info" | "warn"; ttlMs?: number } = {}): void {
+		const level = options.level ?? "info";
+		const now = Date.now();
+		// The latest message replaces whatever was showing: there is one slot.
+		const count = this.notice && this.notice.expiresAt > now ? this.notice.count + 1 : 1;
+		const ttl = options.ttlMs ?? (level === "warn" ? 8000 : 4000);
+		this.notice = { text, level, count, expiresAt: now + ttl };
+		try {
+			(globalThis as any).__rlmLog?.(level, "notice", text);
+		} catch {}
+		if (this.noticeTimer) clearTimeout(this.noticeTimer);
+		this.noticeTimer = setTimeout(() => {
+			this.noticeTimer = undefined;
+			this.requestRender();
+		}, ttl + 20);
+		(this.noticeTimer as { unref?: () => void }).unref?.();
+		this.requestRender();
+	}
+
+	/** The current notice, or undefined once it has expired. */
+	getNotice(): { text: string; level: "info" | "warn"; count: number } | undefined {
+		const n = this.notice;
+		if (!n || n.expiresAt <= Date.now()) return undefined;
+		return { text: n.text, level: n.level, count: n.count };
+	}
+
+	/** Called by the chat for every event of the session it is showing. */
+	publishDisplayedSessionEvent(event: DisplayedSessionEvent, sessionId?: string): void {
+		for (const listener of this.sessionListeners.values()) {
+			try {
+				listener(event, sessionId);
+			} catch {}
+		}
 	}
 
 	// ─── Custom components ────────────────────────────────────────────────────
@@ -645,7 +794,8 @@ export class RlmTuiService extends Service {
 		if (idx >= 0) handles.splice(idx, 1);
 	}
 
-	async [Symbol.dispose]() {
+	/** Removed for real (no successor adopted the registry): tear everything down. */
+	async wipe() {
 		// Deactivate active provider if any
 		const active = this.getActiveProvider();
 		if (active?.deactivate) {
@@ -707,3 +857,64 @@ export default RlmTuiService;
 export const name = "rlm-tui";
 export const inject = [] as const;
 export { RlmTuiService as RlmTui };
+
+/**
+ * rlm's own chatter (`[rlm] …` lines) written to stderr while a chat is on
+ * screen lands in the middle of it and pushes the tray around. While the TUI is
+ * up those lines are logged instead, and reload news among them becomes the
+ * tray's one transient notice. Anything else on stderr, and everything when no
+ * TUI is up, passes through untouched.
+ *
+ * Installed once per process and never removed: it consults the current
+ * `__rlmTui` on every write, so a hot swap of this row needs no reinstall.
+ */
+const RELOAD_NEWS = /\b(HMR|reload(ed)?|swapped|patched|hot[- ]?swap|resources changed|prompt updated)\b/i;
+
+/** Route one `[rlm] …` message while a chat is up. True when it was taken. */
+export function routeRlmChatter(text: string): boolean {
+	const g = globalThis as any;
+	const tui = g.__rlmTui;
+	if (!tui?.isTuiActive?.()) return false;
+	const plain = text.replace(/\x1b\[[0-9;]*m/g, "").trim();
+	if (!plain.startsWith("[rlm]")) return false;
+	const message = plain.replace(/^\[rlm\]\s*/, "").replace(/^HMR(\[bun\])?:\s*/, "");
+	const isError = /\b(fail(ed)?|error|does not parse)\b/i.test(message);
+	if (RELOAD_NEWS.test(plain)) {
+		tui.announce?.(`${isError ? "⚠" : "↻"} ${message}`, { level: isError ? "warn" : "info" });
+	} else {
+		g.__rlmLog?.(isError ? "warn" : "info", "stderr", message);
+	}
+	return true;
+}
+
+export function installStderrGuard(): void {
+	const g = globalThis as any;
+	if (g.__rlmStderrGuard) return;
+	const originalWrite = process.stderr.write.bind(process.stderr) as (...args: any[]) => boolean;
+	// Bun's console.error/warn write to fd 2 natively, not through
+	// process.stderr.write, so both are wrapped.
+	const originalError = console.error.bind(console);
+	const originalWarn = console.warn.bind(console);
+	g.__rlmStderrGuard = { originalWrite, originalError, originalWarn };
+	process.stderr.write = ((chunk: any, ...rest: any[]) => {
+		try {
+			const text = typeof chunk === "string" ? chunk : Buffer.isBuffer(chunk) ? chunk.toString("utf8") : "";
+			if (text && routeRlmChatter(text)) {
+				const cb = rest.find((r) => typeof r === "function");
+				if (cb) cb();
+				return true;
+			}
+		} catch {}
+		return originalWrite(chunk, ...rest);
+	}) as typeof process.stderr.write;
+	const wrap =
+		(original: (...args: any[]) => void) =>
+		(...args: any[]): void => {
+			try {
+				if (typeof args[0] === "string" && routeRlmChatter(args.map(String).join(" "))) return;
+			} catch {}
+			original(...args);
+		};
+	console.error = wrap(originalError);
+	console.warn = wrap(originalWarn);
+}

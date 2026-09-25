@@ -317,16 +317,100 @@ export function apply(ctx: any, config: RlmBootConfig = {}) {
 		}
 	};
 
-	const applyOverlay = () => {
-		const entry = tree?.ctx.fiber.entry;
-		if (!entry) return;
-		const patches = readOverlay();
-		entry
-			.update({ config: { ...entry.options.config, patches } }, false, true)
-			.then(() => info(patches ? `overlay applied: ${overlayPath}` : "overlay removed"))
-			.catch((error: any) => warn(`overlay failed: ${error?.message ?? error}`));
+	/**
+	 * Said where someone reads it. `ctx.logger` here reaches no sink anyone
+	 * watches, which is how a rolled-back overlay stayed invisible for weeks.
+	 */
+	const say = (level: "info" | "warn", message: string) => {
+		(level === "warn" ? warn : info)(message);
+		try {
+			(globalThis as any).__rlmLog?.(level, "boot", `boot: ${message}`);
+			if (level === "warn") (globalThis as any).__rlmTui?.announce?.(`⚠ ${message}`, { level: "warn" });
+		} catch {}
 	};
-	const reapplyOverlay = debounce(applyOverlay);
+
+	/** Module files of overlay rows left out, watched so a fix retries them. */
+	const unwatchDropped: (() => void)[] = [];
+	const watchDropped = (files: string[]) => {
+		for (const close of unwatchDropped.splice(0)) close();
+		for (const file of files) if (existsSync(file)) unwatchDropped.push(watchConfigFile(file, pollMs, () => reapplyOverlay()));
+	};
+	ctx.effect(() => () => watchDropped([]), "rlm-boot watch dropped overlay rows");
+
+	const rowFile = (row: any): string | undefined => {
+		if (typeof row?.name !== "string" || !tree) return undefined;
+		if (row.name.startsWith("/")) return row.name;
+		if (row.name.startsWith(".")) return join(dirname(tree.filename), row.name);
+		return undefined;
+	};
+
+	/**
+	 * Apply the overlay. The include applies patches as one transaction, so one
+	 * row that throws at init (a missing socket, a service provided twice) used
+	 * to roll back EVERY overlay row, silently. On failure this degrades: the
+	 * non-insert patches first, then each inserted row on top of what already
+	 * holds, leaving out only the rows that fail — the same bargain the shell
+	 * makes for the composition at boot. Left-out rows are named, and retried
+	 * whenever their file or the overlay changes.
+	 */
+	let applying: Promise<void> = Promise.resolve();
+	const applyOverlay = () => {
+		applying = applying.then(applyOverlayNow, applyOverlayNow);
+		return applying;
+	};
+	const applyOverlayNow = async () => {
+		const entry = tree?.ctx.fiber.entry;
+		if (!entry || disposed) return;
+		const patches = readOverlay();
+		const commit = (next: any) => entry.update({ config: { ...entry.options.config, patches: next } }, false, true);
+		try {
+			await commit(patches);
+			watchDropped([]);
+			say("info", patches ? `overlay applied: ${overlayPath}` : "overlay removed");
+			return;
+		} catch (error: any) {
+			if (!Array.isArray(patches)) {
+				say("warn", `overlay failed: ${error?.message ?? error}`);
+				return;
+			}
+		}
+		// Degraded path: build up from what holds.
+		let kept: any[] = patches.map((p: any) => (Array.isArray(p?.insert) ? { ...p, insert: [] } : p));
+		const dropped: { id: string; why: string; file?: string }[] = [];
+		try {
+			await commit(kept);
+		} catch (error: any) {
+			// Even the non-insert patches fail: fall back to none at all.
+			dropped.push({ id: "(non-insert patches)", why: String(error?.message ?? error).split("\n")[0] });
+			kept = [];
+			await commit(kept).catch(() => {});
+		}
+		let lastOk = true;
+		for (let g = 0; g < patches.length; g++) {
+			const rows = Array.isArray(patches[g]?.insert) ? patches[g].insert : [];
+			for (const row of rows) {
+				if (disposed) return;
+				const candidate = kept.map((p, i) => (i === g ? { ...p, insert: [...p.insert, row] } : p));
+				try {
+					await commit(candidate);
+					kept = candidate;
+					lastOk = true;
+				} catch (error: any) {
+					dropped.push({ id: String(row?.id ?? row?.name ?? "?"), why: String(error?.message ?? error).split("\n")[0], file: rowFile(row) });
+					lastOk = false;
+				}
+			}
+		}
+		// A failed update may leave the entry's recorded config at the failed
+		// candidate; end on the set that holds so later refreshes start from it.
+		if (!lastOk) await commit(kept).catch(() => {});
+		watchDropped(dropped.map((d) => d.file).filter((f): f is string => !!f));
+		say(
+			"warn",
+			`overlay applied without ${dropped.map((d) => d.id).join(", ")} — ${dropped.map((d) => `${d.id}: ${d.why}`).join("; ")}`,
+		);
+	};
+	const reapplyOverlay = debounce(() => void applyOverlay());
 
 	if (tree) {
 		ctx.effect(() => watchConfigFile(tree.filename, pollMs, refresh), "rlm-boot watch composition");
@@ -348,7 +432,7 @@ export function apply(ctx: any, config: RlmBootConfig = {}) {
 				} catch {
 					/* a tree that failed to load has nothing to patch */
 				}
-				if (!disposed) applyOverlay();
+				if (!disposed) void applyOverlay();
 			})();
 		}
 	} else {

@@ -81,6 +81,9 @@ export class RlmWorkflowService extends Service {
 	}
 
 	async [Service.init]() {
+		// Cordis never calls `[Symbol.dispose]`; the effect disposer is what runs when
+		// this fiber goes (swap or removal). See packages/rlm-hmr/src/hot.ts.
+		(this.ctx as any).effect(() => () => void this.retire(), "rlm-workflow retire");
 		const dir = this.getWorkflowsDir();
 		if (!existsSync(dir)) {
 			mkdirSync(dir, { recursive: true });
@@ -255,7 +258,8 @@ export class RlmWorkflowService extends Service {
 		throw new Error(`rlm-workflow: workflow file "${name}" not found in ${dir}`);
 	}
 
-	async [Symbol.dispose]() {
+	/** This generation ends: release what it registered. */
+	async retire() {
 		if (this.watcher) {
 			await this.watcher.close();
 			this.watcher = null;

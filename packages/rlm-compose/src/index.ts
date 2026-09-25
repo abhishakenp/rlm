@@ -283,9 +283,22 @@ export class RlmComposeService extends Service {
 
 	/** Mount a plugin that is not in the shipped composition. */
 	add(row: { id: string; plugin: string; config?: Record<string, unknown> }) {
+		// A row id is a name. `mount("always", { path })` once put the config
+		// object here, and since an object never equals the one read back, the
+		// "already exists" check below could not see it: nine copies of the same
+		// insert piled up in the overlay, one per retry.
+		if (typeof row.id !== "string" || !row.id.trim()) {
+			throw new Error(`row id must be a non-empty string, got ${JSON.stringify(row.id)} — config goes in \`config\``);
+		}
 		if (this.row(row.id)) throw new Error(`row "${row.id}" already exists`);
 		const rows = this.readOverlay();
 		const insert = rows.find((r) => r && Array.isArray(r.insert));
+		const already = insert?.insert.find(
+			(e: any) => e?.id === row.id || (e?.name === row.plugin && sameConfig(e.config, row.config)),
+		);
+		if (already) {
+			throw new Error(`${row.plugin} is already inserted as row ${JSON.stringify(already.id)} in the overlay`);
+		}
 		const entry: Record<string, unknown> = { id: row.id, name: row.plugin };
 		if (row.config) entry.config = row.config;
 		if (insert) insert.insert.push(entry);
@@ -305,6 +318,12 @@ export class RlmComposeService extends Service {
 		});
 		this.writeOverlay(rows, id, "reset to shipped default");
 	}
+}
+
+/** Two row configs are the same insert when they serialize the same; absent and `{}` agree. */
+function sameConfig(a: unknown, b: unknown): boolean {
+	const norm = (c: unknown) => JSON.stringify(c && typeof c === "object" && Object.keys(c).length ? c : {});
+	return norm(a) === norm(b);
 }
 
 export default RlmComposeService;

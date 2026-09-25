@@ -235,25 +235,9 @@ export class RlmGuardService extends Service {
 		// "." compared against absolute paths fails every comparison silently.
 		this.root = resolve(this.config.cwd ?? rlmConfig?.getSettingsManager?.()?.getCwd?.() ?? process.cwd());
 
-		const configured: ProtectSpec[] = (
-			this.config.protect ?? ["packages/rlm-delegate/src/capacity.ts"]
-		).map((pattern) => ({
-			pattern,
-			why: pattern.includes("capacity.ts") ? CAPACITY_WHY : (this.config.why ?? "Abhi put this path on the protected list."),
-		}));
-		this.files = resolveProtected(this.root, [...configured, ...inherentSpecs(this.unlockFile)]);
+		this.files = this.protectedList();
 
-		// Directories, by prefix. Derived from PATH rather than written down: the
-		// property that matters is "a name the shell will find", and that is what
-		// PATH means. See pathdir.ts for why this cannot reuse the file matcher.
-		this.pathDirs = resolvePathDirs([
-			...INHERENT_PATH_DIRS.map((dir) => ({ dir, why: PATH_WHY })),
-			...(this.config.protectPath === false ? [] : pathDirsFromEnv(process.env.PATH, this.root)).map((dir) => ({
-				dir,
-				why: PATH_WHY,
-			})),
-			...(this.config.protectPathDirs ?? []).map((dir) => ({ dir, why: PATH_WHY })),
-		]);
+		this.pathDirs = this.pathDirList();
 
 		// The door, first and always — a delegated child gets this and nothing
 		// else, and a child is exactly where it has to work.
@@ -406,26 +390,100 @@ export class RlmGuardService extends Service {
 
 	/* ───────────────────────────── layer 2 ───────────────────────────── */
 
+	/** The configured list plus the inherent one, resolved against the root. */
+	private protectedList(): ProtectedFile[] {
+		const configured: ProtectSpec[] = (
+			this.config.protect ?? ["packages/rlm-delegate/src/capacity.ts"]
+		).map((pattern) => ({
+			pattern,
+			why: pattern.includes("capacity.ts") ? CAPACITY_WHY : (this.config.why ?? "Abhi put this path on the protected list."),
+		}));
+		return resolveProtected(this.root, [...configured, ...inherentSpecs(this.unlockFile)]);
+	}
+
+	/**
+	 * Called by rlm-hmr after this class was patched in a running process
+	 * (`HMR_PATCHED` in packages/rlm-hmr/src/bun-reload.ts). The list and the
+	 * backstop were built at init by the old code; rebuild both from the new
+	 * code. Zero gap: the new backstop is watching before the old one stops, and
+	 * layer 1 reads `this.files`, which is swapped in one assignment.
+	 */
+	async [Symbol.for("rlm.hmr.patched")]() {
+		this.refreshPathDirs();
+		const next = this.protectedList();
+		const key = (list: ProtectedFile[]) => list.map((f) => `${f.rel}${f.watched ? "" : "(unwatched)"}`).join("\n");
+		if (key(next) === key(this.files)) return;
+		const was = this.files.map((f) => f.rel);
+		this.files = next;
+		const old = this.stopWatching;
+		if (old) {
+			this.stopWatching = this.watchFiles();
+			old();
+		}
+		const now = next.map((f) => f.rel);
+		const gone = was.filter((r) => !now.includes(r));
+		const added = now.filter((r) => !was.includes(r));
+		this.say(
+			"info",
+			`rlm-guard: code changed under a running guard (pid ${process.pid}) — now protecting ${now.length} path(s)` +
+				(gone.length ? `; no longer ${gone.join(", ")}` : "") +
+				(added.length ? `; newly ${added.join(", ")}` : ""),
+		);
+	}
+
+	/**
+	 * The PATH half of the hook: the directory list and its backstop were also
+	 * built at init by the old code. Same zero-gap order as the files: the new
+	 * backstop is watching before the old one stops.
+	 */
+	private refreshPathDirs(): void {
+		const next = this.pathDirList();
+		const key = (list: typeof next) => list.map((d) => `${d.abs}${d.watched ? "" : "(unwatched)"}`).join("\n");
+		const prev = this.pathDirs ?? [];
+		if (key(next) === key(prev)) return;
+		const was = prev.map((d) => d.abs);
+		this.pathDirs = next;
+		const old = this.stopWatchingPath;
+		if (old) {
+			this.stopWatchingPath = this.watchPathDirsNow();
+			old();
+		}
+		const now = next.map((d) => d.abs);
+		const gone = was.filter((d) => !now.includes(d));
+		const added = now.filter((d) => !was.includes(d));
+		this.say(
+			"info",
+			`rlm-guard: PATH directories re-derived (pid ${process.pid}) — ${now.length} watched` +
+				(gone.length ? `; no longer ${gone.join(", ")}` : "") +
+				(added.length ? `; newly ${added.join(", ")}` : ""),
+		);
+	}
+
+	/** Snapshot the watched files and start the backstop. Returns its stopper. */
+	private watchFiles(): () => void {
+		this.baselines = this.files.filter((f) => f.watched).map((file) => readBaseline(this.root, file));
+		return watchProtected({
+			root: this.root,
+			baselines: this.baselines,
+			debounceMs: this.config.debounceMs ?? 400,
+			authorised: () => this.unlockState().open,
+			onIncident: (incident) => {
+				this.incidents.push(incident);
+				if (this.incidents.length > 200) this.incidents.shift();
+				const loud = incident.action !== "accepted-under-unlock";
+				this.say(
+					loud ? "warn" : "info",
+					loud
+						? `rlm-guard: ${incident.rel} was changed without an unlock and has been put back — ${incident.detail}`
+						: `rlm-guard: ${incident.rel} — ${incident.detail}`,
+				);
+			},
+		});
+	}
+
 	private startWatching() {
 		(this.ctx as { effect: (fn: () => () => void) => void }).effect(() => {
-			this.baselines = this.files.filter((f) => f.watched).map((file) => readBaseline(this.root, file));
-			this.stopWatching = watchProtected({
-				root: this.root,
-				baselines: this.baselines,
-				debounceMs: this.config.debounceMs ?? 400,
-				authorised: () => this.unlockState().open,
-				onIncident: (incident) => {
-					this.incidents.push(incident);
-					if (this.incidents.length > 200) this.incidents.shift();
-					const loud = incident.action !== "accepted-under-unlock";
-					this.say(
-						loud ? "warn" : "info",
-						loud
-							? `rlm-guard: ${incident.rel} was changed without an unlock and has been put back — ${incident.detail}`
-							: `rlm-guard: ${incident.rel} — ${incident.detail}`,
-					);
-				},
-			});
+			this.stopWatching = this.watchFiles();
 			return () => {
 				this.stopWatching?.();
 				this.stopWatching = null;
@@ -443,21 +501,42 @@ export class RlmGuardService extends Service {
 	 * exactly these directories and a guard that deletes new arrivals eventually
 	 * deletes somebody's real software.
 	 */
+	/**
+	 * Directories, by prefix. Derived from PATH rather than written down: the
+	 * property that matters is "a name the shell will find", and that is what
+	 * PATH means. See pathdir.ts for why this cannot reuse the file matcher.
+	 */
+	private pathDirList() {
+		return resolvePathDirs([
+			...INHERENT_PATH_DIRS.map((dir) => ({ dir, why: PATH_WHY })),
+			...(this.config.protectPath === false ? [] : pathDirsFromEnv(process.env.PATH, this.root)).map((dir) => ({
+				dir,
+				why: PATH_WHY,
+			})),
+			...(this.config.protectPathDirs ?? []).map((dir) => ({ dir, why: PATH_WHY })),
+		]);
+	}
+
+	/** Snapshot the watched PATH directories and start their backstop. Returns its stopper. */
+	private watchPathDirsNow(): () => void {
+		const started = Date.now();
+		this.pathBaselines = this.pathDirs
+			.filter((dir) => dir.watched)
+			.map((dir) => readDirBaseline(dir, this.snapshotMaxBytes));
+		const entries = this.pathBaselines.reduce((n, b) => n + b.entries.size, 0);
+		this.say("info", `rlm-guard: snapshotted ${entries} PATH entr(ies) in ${Date.now() - started}ms`);
+		return watchPathDirs({
+			baselines: this.pathBaselines,
+			debounceMs: this.config.debounceMs ?? 400,
+			maxBytes: this.snapshotMaxBytes,
+			authorised: () => this.unlockState().open,
+			onIncident: (incident) => this.notePathIncident(incident),
+		});
+	}
+
 	private startWatchingPathDirs() {
 		(this.ctx as { effect: (fn: () => () => void) => void }).effect(() => {
-			const started = Date.now();
-			this.pathBaselines = this.pathDirs
-				.filter((dir) => dir.watched)
-				.map((dir) => readDirBaseline(dir, this.snapshotMaxBytes));
-			const entries = this.pathBaselines.reduce((n, b) => n + b.entries.size, 0);
-			this.say("info", `rlm-guard: snapshotted ${entries} PATH entr(ies) in ${Date.now() - started}ms`);
-			this.stopWatchingPath = watchPathDirs({
-				baselines: this.pathBaselines,
-				debounceMs: this.config.debounceMs ?? 400,
-				maxBytes: this.snapshotMaxBytes,
-				authorised: () => this.unlockState().open,
-				onIncident: (incident) => this.notePathIncident(incident),
-			});
+			this.stopWatchingPath = this.watchPathDirsNow();
 			return () => {
 				this.stopWatchingPath?.();
 				this.stopWatchingPath = null;
@@ -523,15 +602,8 @@ export class RlmGuardService extends Service {
 		].join("\n");
 	}
 
-	async [Symbol.dispose]() {
-		const registry = factoryRegistry();
-		const i = registry.findIndex((e) => e.id === PLUGIN_ID);
-		if (i >= 0) registry.splice(i, 1);
-		this.stopWatching?.();
-		this.stopWatching = null;
-		this.stopWatchingPath?.();
-		this.stopWatchingPath = null;
-	}
+	// No `[Symbol.dispose]`: Cordis never calls it. The factory entry and both
+	// backstops are released by the effects that registered them.
 }
 
 export default RlmGuardService;

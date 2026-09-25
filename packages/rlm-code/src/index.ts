@@ -19,6 +19,7 @@
  * Reference: packages/coding-agent/src/core/kernel/index.ts ExecuteResult
  */
 import { Service } from "@deepseek-ai/cordis";
+import { adopt } from "../../rlm-hmr/src/hot.ts";
 import { createRequire } from "node:module";
 import vm from "node:vm";
 import { exec, execSync } from "node:child_process";
@@ -60,10 +61,12 @@ export class RlmCodeService extends Service {
 	/** Default shared context — used when no taskId is provided (backward compat). */
 	private context: vm.Context | null = null;
 	/** Per-task contexts — each task/session gets its own VM isolation. */
-	private readonly taskContexts = new Map<string, vm.Context>();
+	private taskContexts = new Map<string, vm.Context>();
 	/** Track global names per-context so vars() filtering is correct. */
-	private readonly taskGlobalNames = new Map<string, Set<string>>();
-	private readonly globalNames = new Set<string>();
+	private taskGlobalNames = new Map<string, Set<string>>();
+	private globalNames = new Set<string>();
+	/** The VM state every generation of this row shares (see rlm-hmr/src/hot.ts). */
+	private hot?: { context: vm.Context | null; taskContexts: Map<string, vm.Context>; taskGlobalNames: Map<string, Set<string>>; globalNames: Set<string> };
 	/** Max number of task contexts to retain (LRU-like eviction). */
 	private readonly maxTaskContexts = 64;
 
@@ -75,7 +78,24 @@ export class RlmCodeService extends Service {
 	}
 
 	async [Service.init]() {
-		this.resetContext();
+		// A swap must not drop the variables a session built up: adopt the VM the
+		// previous generation used. Released only when this row is really removed.
+		const hot = adopt(
+			this.ctx as any,
+			"rlm-code:vm",
+			() => ({ context: null as vm.Context | null, taskContexts: this.taskContexts, taskGlobalNames: this.taskGlobalNames, globalNames: this.globalNames }),
+			(s) => {
+				s.context = null;
+				s.taskContexts.clear();
+				s.taskGlobalNames.clear();
+			},
+		);
+		this.hot = hot;
+		this.taskContexts = hot.taskContexts;
+		this.taskGlobalNames = hot.taskGlobalNames;
+		this.globalNames = hot.globalNames;
+		if (hot.context) this.context = hot.context;
+		else this.resetContext();
 		this.ctx.logger?.info(
 			`rlm-code: persistent JS code tool ready (timeout=${this.config.timeout ?? 30000}ms)`,
 		);
@@ -89,6 +109,7 @@ export class RlmCodeService extends Service {
 			this.taskGlobalNames.set(taskId, new Set(this.globalNames));
 		} else {
 			this.context = ctx;
+			if (this.hot) this.hot.context = ctx;
 		}
 		return ctx;
 	}
@@ -384,11 +405,8 @@ export class RlmCodeService extends Service {
 		);
 	}
 
-	async [Symbol.dispose]() {
-		this.context = null;
-		this.taskContexts.clear();
-		this.taskGlobalNames.clear();
-	}
+	// No `[Symbol.dispose]`: Cordis never calls it. The VM is released by
+	// `adopt` when the row is removed, and kept across swaps.
 }
 
 const BUILTINS = new Set([

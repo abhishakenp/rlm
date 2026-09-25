@@ -54,6 +54,8 @@ export interface RlmPluginsConfig {
 	mountTimeout?: number;
 	/** Tell rlm, in its own prompt, that it can write and switch on new capabilities. */
 	promptSection?: boolean;
+	/** How long the prompt section may be reused before the package shelf is re-read, in milliseconds. */
+	promptCacheMs?: number;
 	/** Where that section sorts among the others. */
 	promptPriority?: number;
 }
@@ -172,9 +174,31 @@ export class RlmPluginsService extends Service {
 		const handle = prompt.registerFragment("rlm-plugins", {
 			id: "self-extension",
 			priority: this.config.promptPriority ?? 330,
-			content: () => this.promptText(),
+			content: () => this.cachedPromptText(),
 		});
 		this.detachPrompt = () => handle.dispose();
+	}
+
+	private promptCache: { at: number; text: string } | undefined;
+
+	/**
+	 * The section, rebuilt at most every couple of seconds.
+	 *
+	 * Every session builds its system prompt from this fragment — at creation
+	 * and whenever its prompt is refreshed — and `list()` reads every package's
+	 * manifest and marker from disk. With recursive subagents that was ~90
+	 * package reads per session per build on the main thread: measured at 200
+	 * subagents, `promptText → list` was 13.8% of all CPU. The shelf changes when
+	 * a package is written, not between two subagents spawned a millisecond
+	 * apart; two seconds of staleness is invisible, a frozen event loop is not.
+	 */
+	private cachedPromptText(): string {
+		const now = Date.now();
+		const ttl = this.config.promptCacheMs ?? 2000;
+		if (this.promptCache && now - this.promptCache.at < ttl) return this.promptCache.text;
+		const text = this.promptText();
+		this.promptCache = { at: now, text };
+		return text;
 	}
 
 	private promptText(): string {
@@ -207,7 +231,14 @@ export class RlmPluginsService extends Service {
 			const live = packages.filter((p) => p.state === "live").length;
 			lines.push("", `On disk now: ${packages.length} packages, ${live} switched on.`);
 			const needy = packages.filter((p) => p.state === "stale" || p.state === "broken");
-			if (needy.length) {
+			// A headless run (--print, a pool worker, a delegated task) was asked for
+			// one thing; handed an imperative "do not just leave them" list, a
+			// `--print "Reply with exactly: pong"` answered, then spent its budget on
+			// an old package until it timed out. Say they exist, not that they're
+			// this run's job.
+			if (needy.length && process.env.RLM_HEADLESS) {
+				lines.push("", `${needy.length} unfinished package(s) on the shelf — not this run's job.`);
+			} else if (needy.length) {
 				lines.push("", "Unfinished work of yours, still here:");
 				for (const p of needy) lines.push(`  - ${p.name}: ${p.note}`);
 				lines.push(
@@ -367,7 +398,14 @@ export class RlmPluginsService extends Service {
 	 * PENDING and the capability silently is not there. Reporting "mounted" for
 	 * that is how a tree fills up with plugins nobody knows are dead.
 	 */
-	async mount(name: string, id?: string, config?: Record<string, unknown>) {
+	async mount(name: string, id?: string | Record<string, unknown>, config?: Record<string, unknown>) {
+		// `mount(name, { ...config })` is the call models reach for. Taken
+		// literally it made the config object the row id — see compose.add.
+		if (id !== undefined && typeof id !== "string") {
+			if (config !== undefined) throw new Error("mount(name, id?, config?): id must be a string");
+			config = id ?? undefined;
+			id = undefined;
+		}
 		const pkg = this.list().find((p) => p.name === name);
 		if (!pkg) throw new Error(`no plugin package "${name}"`);
 		if (pkg.mountedAs) throw new Error(`${name} is already mounted as "${pkg.mountedAs}"`);

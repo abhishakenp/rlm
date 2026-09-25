@@ -124,3 +124,39 @@ test("a bad name is refused before anything is written", async () => {
 	assert.equal(existsSync(join(dir, "weather")), false);
 	await ctx.fiber.dispose();
 });
+
+test("mount(name, config) treats the object as config, not as the row id", async () => {
+	const { ctx, plugins, compose } = await mount();
+	plugins.create("rlm-voice", "a plugin with config");
+	await plugins.mount("rlm-voice", { path: "/x" } as never).catch(() => {});
+	assert.equal(compose.composed[0].id, "voice");
+	await ctx.fiber.dispose();
+});
+
+test("the prompt section reads the package shelf at most once per cache window", async () => {
+	const { ctx, plugins } = await mount({ promptCacheMs: 60_000 });
+	let reads = 0;
+	const original = plugins.list.bind(plugins);
+	(plugins as any).list = () => {
+		reads++;
+		return original();
+	};
+	const first = (plugins as any).cachedPromptText();
+	for (let i = 0; i < 50; i++) assert.equal((plugins as any).cachedPromptText(), first);
+	assert.equal(reads, 1);
+	await ctx.fiber.dispose();
+});
+
+test("a zero cache window re-reads the shelf every time", async () => {
+	const { ctx, plugins } = await mount({ promptCacheMs: 0 });
+	let reads = 0;
+	const original = plugins.list.bind(plugins);
+	(plugins as any).list = () => {
+		reads++;
+		return original();
+	};
+	(plugins as any).cachedPromptText();
+	(plugins as any).cachedPromptText();
+	assert.equal(reads, 2);
+	await ctx.fiber.dispose();
+});

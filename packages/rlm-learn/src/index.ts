@@ -120,6 +120,10 @@ export class RlmLearnService extends Service {
 		const interval = this.config.reflectInterval ?? 60000;
 		this.reflectTimer = setInterval(() => this.maybeReflect(), interval);
 		this.reflectTimer.unref?.(); // Don't keep process alive for reflection.
+		// Cordis 4 never calls `[Symbol.dispose]`, so after a swap the old timer
+		// kept reflecting and the old prompt fragment stayed registered beside the
+		// new one. The effect's disposer is what cordis runs when the fiber goes.
+		this.ctx.effect(() => () => void this.retire());
 
 		// Register a prompt fragment so the agent sees past learnings
 		// and doesn't make the same mistakes twice.
@@ -581,7 +585,8 @@ ${summary}`,
 		};
 	}
 
-	async [Symbol.dispose]() {
+	/** This generation ends: stop the reflect timer, drop the prompt fragment. */
+	async retire() {
 		if (this.reflectTimer) {
 			clearInterval(this.reflectTimer);
 			this.reflectTimer = null;

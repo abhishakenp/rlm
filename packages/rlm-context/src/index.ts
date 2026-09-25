@@ -31,6 +31,7 @@
  * Hot-reloadable: part of the Cordis plugin system.
  */
 import { Service } from "@deepseek-ai/cordis";
+import { adopt, hotData } from "../../rlm-hmr/src/hot.ts";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { truncateToWidth as piTruncateToWidth, visibleWidth as piVisibleWidth } from "@earendil-works/pi-tui";
@@ -114,12 +115,13 @@ const SCOPE_FALLBACK_ANSI: Record<string, string> = {
 // absent, but when registered this fragment is the authoritative doctrine.
 
 const CONTEXT_DOCTRINE = [
-	"# Context Registry — Everything Is A Variable (MANDATORY: use automatically at every step)",
+	"# Context Registry — Everything Is A Variable (use automatically whenever there is real work)",
 	"",
-	"Context IS your working memory. You MUST use `context.*` automatically at EVERY step — without being asked, without managing a second or dual source. This is your nature; you think in variables.",
+	"Context IS your working memory. Whenever a task involves real work — computation, files, commands, several steps, or subagents — use `context.*` automatically at every step, without being asked and without keeping a second or dual source. This is your nature; you think in variables.",
+	"Not for a direct answer: when the request can be answered without computation, files, commands, or subagents (e.g. \"Reply with exactly: X\"), do not read or write context and do not mention it — reply with only the answer.",
 	"YOU create ALL variables. The system creates NONE (except `runtime.*`, `skill.*`, `session.*` infrastructure vars which are system facts). You decide names, values, types, mutability. The harness facilitates you operating on your own context — every set/update/delete/mutate/clone is live, hot-reloadable, and automatically invalidates the next turn's prompt.",
 	"",
-	"There is NO dual source. You do NOT maintain notes outside context. Every turn is: read context → act → write context. If you duplicate state outside context, you have failed.",
+	"There is NO dual source. You do NOT maintain notes outside context. Every working turn is: read context → act → write context. If you duplicate state outside context, you have failed.",
 	"",
 	"## API — The Most Powerful Variable Engine (1 or many variables, any operation, any transfer)",
 	"",
@@ -229,7 +231,7 @@ const CONTEXT_DOCTRINE = [
 	"",
 	"## Automatic Use — No Dual Source",
 	"",
-	"You do NOT maintain a second memory system. You do NOT keep notes outside context. You do NOT wait to be told to use context — you do it automatically at every step by default. Every turn is: read context → act → write context. This is your nature. Context IS your working memory, you MUST use context.set/get at EVERY step without managing dual sources. Harness auto-invalidates prompt so your mutations are visible next turn without you asking.",
+	"You do NOT maintain a second memory system. You do NOT keep notes outside context. You do NOT wait to be told to use context — whenever there is real work you do it automatically at every step by default. Every working turn is: read context → act → write context. This is your nature. Context IS your working memory, you MUST use context.set/get at every working step without managing dual sources. A direct answer that needs no work is the exception: answer it, nothing else. Harness auto-invalidates prompt so your mutations are visible next turn without you asking.",
 ].join("\n");
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -319,7 +321,24 @@ export class RlmContextService extends Service {
 
 	async [Service.init]() {
 		this.projectRoot = this.config.projectRoot ?? process.cwd();
-		this.loadProject();
+		// Every generation of this row shares one set of variables (rlm-hmr hot.ts):
+		// a swap must not drop the session and task vars a run built up, nor the
+		// project vars it has not saved yet.
+		const hot = hotData<{ project?: Map<string, ContextVariable>; session?: Map<string, ContextVariable>; task?: Map<string, ContextVariable>; sessionDir?: string | null; epoch?: number; current?: RlmContextService; proxy?: any }>("rlm-context:state");
+		const adopted = !!hot.project;
+		if (adopted) {
+			this.projectVars = hot.project!;
+			this.sessionVars = hot.session!;
+			this.taskVars = hot.task!;
+			this.sessionDir = hot.sessionDir ?? null;
+			this._epoch = hot.epoch ?? 0;
+		} else {
+			this.loadProject();
+			hot.project = this.projectVars;
+			hot.session = this.sessionVars;
+			hot.task = this.taskVars;
+		}
+		hot.current = this;
 		this.ctx.logger?.info(
 			`rlm-context: ready (${this.projectVars.size} project vars loaded)`,
 		);
@@ -337,8 +356,40 @@ export class RlmContextService extends Service {
 		// rlm-context row is not mounted" while the row was mounted. The row
 		// publishes it itself now, and takes it back on dispose, so a hot swap
 		// hands the kernel the new instance.
-		this.contextProxy = createContextProxy(this);
+		// One proxy for the life of the process, forwarding to whichever generation
+		// is current: the code kernel binds it once, and a swap must not leave it
+		// calling a disposed instance or see it missing for a moment.
+		hot.proxy ??= createContextProxy(
+			new Proxy({} as RlmContextService, {
+				get: (_t, key) => {
+					const current = hot.current as any;
+					const value = current?.[key];
+					return typeof value === "function" ? value.bind(current) : value;
+				},
+			}),
+		);
+		this.contextProxy = hot.proxy;
 		(globalThis as any).__rlmContextProxy = this.contextProxy;
+		// Removed for real (no successor within the grace period): take the proxy back.
+		adopt(this.ctx as any, "rlm-context:proxy", () => hot.proxy, (proxy) => {
+			if ((globalThis as any).__rlmContextProxy === proxy) delete (globalThis as any).__rlmContextProxy;
+		});
+		(this.ctx as any).effect(() => () => this.retire(hot), "rlm-context retire");
+	}
+
+	/**
+	 * This generation ends (swap or removal): hand the counters to the next one,
+	 * drop this generation's UI registrations, persist. Replaces `[Symbol.dispose]`,
+	 * which Cordis never calls.
+	 */
+	private retire(hot: { epoch?: number; sessionDir?: string | null; current?: RlmContextService }) {
+		hot.epoch = this._epoch;
+		hot.sessionDir = this.sessionDir;
+		this.disposePromptFragment();
+		this.disposeTuiExtensions();
+		this._panelState = null;
+		this.saveProject();
+		this.saveSession();
 	}
 
 	private contextProxy: any = null;
@@ -1848,18 +1899,7 @@ export class RlmContextService extends Service {
 		}
 	}
 
-	async [Symbol.dispose]() {
-		if ((globalThis as any).__rlmContextProxy === this.contextProxy) delete (globalThis as any).__rlmContextProxy;
-		this.contextProxy = null;
-		// Dispose prompt fragment (triggers rlm/prompt-changed via service).
-		this.disposePromptFragment();
-		// Dispose TUI extensions — roll back the TUI to its core state.
-		this.disposeTuiExtensions();
-		this._panelState = null;
-		// Persist on dispose.
-		this.saveProject();
-		this.saveSession();
-	}
+	// No `[Symbol.dispose]`: Cordis never calls it. See `retire`.
 }
 
 // ─── Context Proxy (for VM context) ──────────────────────────────────────────

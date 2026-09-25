@@ -48,7 +48,7 @@ export const REFINE_DOCTRINE = [
 	"",
 	"- `await refine.run()` — schedule refinement. Returns IMMEDIATELY `{ scheduled: true }` (or `{ scheduled: false, reason }`), runs when the current turn ends. You MUST call this after evidence; it never runs mid-cell.",
 	"- `await refine.run(\"create a memory about always checking git status before committing\")` — focus refinement on a specific observation. You MUST provide instructions that describe the evidence.",
-	"- `await refine.run(\"promote the error-handling pattern to a global skill\", global_=True)` — persist cross-session (global); omit `global_` for local (session-scoped). Local is the default for task progress; global only for stable lessons, durable preferences, or reusable skills/subagents.",
+	"- `await refine.run(\"promote the error-handling pattern to a global skill\", { global: true })` — persist cross-session (global); omit the options for local (session-scoped). Local is the default for task progress; global only for stable lessons, durable preferences, or reusable skills/subagents.",
 	"- `await refine.status()` — current refine state as `{ pending: boolean, in_flight: boolean }`. Check before scheduling if unsure.",
 	"",
 	"## When you MUST call `await refine.run()`",
@@ -65,7 +65,7 @@ export const REFINE_DOCTRINE = [
 	"## MANDATORY Rules — You MUST obey",
 	"",
 	"- You MUST treat refinement as a small, evidence-backed update: diagnose the issue, update the SMALLEST relevant harness component (one memory, skill, prompt note, or subagent spec), validate on the next action, then record the outcome. Do NOT rewrite the whole harness when a focused edit is enough.",
-	"- You MUST prefer local refinement for current task progress, temporary blockers, and session coordination. Use global (`global_=True`) ONLY for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.",
+	"- You MUST prefer local refinement for current task progress, temporary blockers, and session coordination. Use global (`{ global: true }`) ONLY for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.",
 	"- You MUST continue working normally after calling `await refine.run()` — it runs when the turn ends; do NOT wait or poll.",
 	"- One request per turn is enough; calling `run` again before the turn ends only updates the instructions. Do NOT spam the call.",
 	"- Auto-refine also runs automatically on `tool_error` and `tool_discovery` (5+ tool calls) — but you MUST still explicitly call `await refine.run()` when you notice a pattern worth persisting; do NOT rely solely on auto-refine for important learnings.",
@@ -155,6 +155,9 @@ export class RlmRefineService extends Service {
 	}
 
 	async [Service.init]() {
+		// Cordis never calls `[Symbol.dispose]`; the effect disposer is what runs when
+		// this fiber goes (swap or removal). See packages/rlm-hmr/src/hot.ts.
+		(this.ctx as any).effect(() => () => void this.retire(), "rlm-refine retire");
 		const rlmConfig = (this.ctx as any).rlmConfig;
 		this.agentDir = rlmConfig?.config?.agentDir ?? rlmConfig?.getAgentDir?.() ?? process.cwd();
 		const globalHarnessDir = getGlobalHarnessStateDir(this.agentDir);
@@ -230,7 +233,8 @@ export class RlmRefineService extends Service {
 		return getLocalHarnessStateDir(sessionDir);
 	}
 
-	async [Symbol.dispose]() {
+	/** This generation ends: release what it registered. */
+	async retire() {
 		this.disposePromptFragment();
 	}
 }
