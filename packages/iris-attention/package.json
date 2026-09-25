@@ -1,12 +1,10 @@
 {
   "name": "iris-attention",
   "version": "1.0.0",
-  "main": "dist/index.js",
-  "scripts": {
-    "build": "tsc"
-  },
+  "type": "module",
+  "main": "src/index.ts",
   "dependencies": {
-    "@deepseek-ai/cordis": "^4.0.1"
+    "@deepseek-ai/cordis": "*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0"

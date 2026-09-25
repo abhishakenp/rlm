@@ -12,13 +12,15 @@
     "packages/ai",
     "packages/agent",
     "packages/coding-agent",
+    "packages/iris-attention",
     "packages/rlm-*"
   ],
   "scripts": {
     "build": "cd packages/tui && npm run build && cd ../ai && npm run build && cd ../agent && npm run build && cd ../coding-agent && npm run build",
     "dev": "node cordis-shell.mjs",
     "skills:check": "node --import tsx scripts/check-skills.ts",
-    "test:skills-gate": "node --import tsx --test scripts/check-skills.test.ts"
+    "test:skills-gate": "node --import tsx --test scripts/check-skills.test.ts",
+    "check:types": "bun --cwd packages/rlm-iris run build"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
