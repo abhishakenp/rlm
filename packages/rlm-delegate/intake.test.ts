@@ -342,9 +342,15 @@ console.log("\nthe turn answering a request is not told to ask about it");
 	await root.rlmModes.dispatch(["--print", "Reply with exactly: pong"]);
 
 	t("the request in flight is not in its own prompt", () => ok(!during.includes("pong"), during));
-	t("older owed work still is", () => ok(during.includes("an older thing"), during));
-	t("a headless run is told to answer, not ask", () => {
-		ok(during.includes("Nobody is reading this run live"), during);
+	// Listing everyone else's open work as actionable made a --print run pick
+	// it up after answering: `pong`, then an old rlm-iris task until timeout.
+	// A headless run in flight gets a count and no list.
+	t("older owed work is counted, not listed as this run's job", () => {
+		ok(!during.includes("an older thing"), during);
+		ok(during.includes("owed elsewhere — not this run's job"), during);
+	});
+	t("a headless run is told to answer and stop, never to ask", () => {
+		ok(during.includes("Answer what this run was asked and stop"), during);
 		ok(!during.includes("Ask — being asked"), during);
 	});
 	t("once the turn ends, the request is owed like anything else", () =>

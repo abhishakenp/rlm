@@ -728,6 +728,15 @@ export class RlmDelegateService extends Service {
 		if (!open.length && !questions.length) return "";
 
 		const all = open.flatMap((graph) => graph.tasks.map((task) => ({ graph, task })));
+		// A --print run records its own request (inFlight, excluded above) and must
+		// end on its answer. Listing everyone else's open tasks as "something can
+		// pick these up now" made it pick them up. The drive and the interactive
+		// session still get the full list.
+		if (this.headless && this.inFlight.size > 0) {
+			return all.length
+				? `## Still owed\n\n${all.length} task(s) are owed elsewhere — not this run's job. They are on disk and in QUESTIONS.md. Answer what this run was asked and stop.`
+				: "";
+		}
 		const live = all.filter(({ task }) => ["ready", "blocked", "running"].includes(task.state));
 		const stopped = all.filter(({ task }) => ["failed", "unreachable", "rejected"].includes(task.state));
 		const unchecked = all.filter(({ task }) => task.state === "unproven");
