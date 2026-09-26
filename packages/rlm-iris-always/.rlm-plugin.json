@@ -1,0 +1,8 @@
+{
+  "name": "rlm-iris-always",
+  "description": "Always-on dictation: type when focused unless prefixed with 'iris', run iris command otherwise",
+  "version": "0.1.0",
+  "enabled": true,
+  "irisPrefix": "iris",
+  "verbose": false
+}
