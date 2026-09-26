@@ -5,6 +5,7 @@ const aiSrcIndex = fileURLToPath(new URL("../ai/src/index.ts", import.meta.url))
 const aiSrcOAuth = fileURLToPath(new URL("../ai/src/oauth.ts", import.meta.url));
 const aiSrcMcp = fileURLToPath(new URL("../ai/src/mcp.ts", import.meta.url));
 const agentSrcIndex = fileURLToPath(new URL("../agent/src/index.ts", import.meta.url));
+const agentSrcParentWait = fileURLToPath(new URL("../agent/src/communication/parent-wait.js", import.meta.url));
 const tuiSrcIndex = fileURLToPath(new URL("../tui/src/index.ts", import.meta.url));
 // Subpath imports (`@earendil-works/pi-tui/terminal-colors.js`) keep the TUI out of
 // the agent core; bun resolves them through tsconfig paths, vitest needs these.
@@ -17,6 +18,9 @@ export default defineConfig({
 		testTimeout: 30000,
 		// Never the user's real ~/.rlm/agent — see the file for what that cost.
 		setupFiles: ["./test/isolate-agent-dir.ts"],
+		// Tests write times as UTC literals ("2026-01-01T12:34:00.000Z") while cron matches in
+		// local time; pin the zone so they mean the same thing on every machine.
+		env: { TZ: "UTC" },
 		tags: [
 			{
 				name: "process-stress",
@@ -43,12 +47,14 @@ export default defineConfig({
 			{ find: /^@earendil-works\/pi-ai\/oauth$/, replacement: aiSrcOAuth },
 			{ find: /^@earendil-works\/pi-ai\/mcp$/, replacement: aiSrcMcp },
 			{ find: /^@earendil-works\/pi-agent-core$/, replacement: agentSrcIndex },
+			{ find: /^@earendil-works\/pi-agent-core\/communication\/parent-wait(\.js)?$/, replacement: agentSrcParentWait },
 			{ find: /^@earendil-works\/pi-tui$/, replacement: tuiSrcIndex },
 			{ find: /^@earendil-works\/pi-tui\/(.+)\.js$/, replacement: `${tuiSrcDir}$1.ts` },
 			{ find: /^@mariozechner\/pi-ai$/, replacement: aiSrcIndex },
 			{ find: /^@mariozechner\/pi-ai\/oauth$/, replacement: aiSrcOAuth },
 			{ find: /^@mariozechner\/pi-ai\/mcp$/, replacement: aiSrcMcp },
 			{ find: /^@mariozechner\/pi-agent-core$/, replacement: agentSrcIndex },
+			{ find: /^@mariozechner\/pi-agent-core\/communication\/parent-wait(\.js)?$/, replacement: agentSrcParentWait },
 			{ find: /^@mariozechner\/pi-tui$/, replacement: tuiSrcIndex },
 		],
 	},

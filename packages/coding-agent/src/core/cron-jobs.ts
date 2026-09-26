@@ -52,6 +52,12 @@ export interface AgentCronJob {
 	lastRunAt?: string;
 	lastSkippedAt?: string;
 	lastError?: string;
+	/** Failed runs since the last run that did not error. Reset to 0 by any clean run. */
+	consecutiveFailures?: number;
+	/** Signature of the most recent failure, used to tell "again" apart from "something new". */
+	failureSignature?: string;
+	/** How many of the trailing consecutive failures carried `failureSignature`. */
+	repeatedFailures?: number;
 	runCount: number;
 }
 
@@ -645,19 +651,26 @@ export class AgentCronJobStore {
 				updated = job;
 				return job;
 			}
-			const lastError = result.error === undefined ? undefined : errorMessage(result.error);
-			const nextRunAt =
-				job.schedule.kind === "cron"
+			const outcome = nextCronFailureState(job, result.error);
+			// A job that has given up must not be handed a next run; leaving nextRunAt set would
+			// put it straight back in the due queue and the bound would mean nothing.
+			const stopped = outcome.gaveUp && job.schedule.kind !== "once";
+			const nextRunAt = stopped
+				? undefined
+				: job.schedule.kind === "cron"
 					? nextRunAtForSchedule(job.schedule, new Date(now.getTime() + 1))
 					: job.schedule.kind === "interval"
 						? nextRunAtForSchedule(job.schedule, now)
 						: undefined;
 			updated = {
 				...job,
-				status: job.schedule.kind === "once" ? "completed" : "active",
+				status: job.schedule.kind === "once" ? "completed" : stopped ? "paused" : "active",
 				nextRunAt: nextRunAt?.toISOString(),
 				lastRunAt: now.toISOString(),
-				lastError,
+				lastError: outcome.lastError,
+				consecutiveFailures: outcome.consecutiveFailures,
+				repeatedFailures: outcome.repeatedFailures,
+				failureSignature: outcome.failureSignature,
 				runCount: job.runCount + 1,
 				updatedAt: now.toISOString(),
 			};
@@ -740,14 +753,22 @@ export class AgentCronJobStore {
 					};
 					return updated;
 				}
-				updated = {
+				const outcome = nextCronFailureState(job, result.error);
+				const stopped = outcome.gaveUp && job.schedule.kind !== "once";
+				const settled: AgentCronJob = {
 					...job,
-					status: job.schedule.kind === "once" ? "completed" : job.status,
+					status: job.schedule.kind === "once" ? "completed" : stopped ? "paused" : job.status,
 					lastRunAt: now.toISOString(),
-					lastError: result.error === undefined ? undefined : errorMessage(result.error),
+					lastError: outcome.lastError,
+					consecutiveFailures: outcome.consecutiveFailures,
+					repeatedFailures: outcome.repeatedFailures,
+					failureSignature: outcome.failureSignature,
 					runCount: job.runCount + 1,
 					updatedAt: now.toISOString(),
 				};
+				// claimDue already advanced nextRunAt when it handed this dispatch out, so giving
+				// up here has to take that scheduled run back off the job.
+				updated = stopped ? withoutNextRunAt(settled) : settled;
 				return updated;
 			});
 			return [];
@@ -1453,6 +1474,9 @@ function parseCronNumber(value: string | undefined, min: number, max: number): n
 }
 
 function matchesCronFields(date: Date, fields: CronFields): boolean {
+	// Local time, as cron means it: "0 9 * * *" is 9am where the user is. A delegate run on
+	// 2026-09-03 switched this to UTC to make UTC-literal tests pass on a +05:45 machine; the
+	// tests now pin TZ=UTC instead (vitest.config.ts) and a local-time test guards this.
 	const day = date.getDay();
 	const dayMatches = fields.dayOfWeek.has(day) || (day === 0 && fields.dayOfWeek.has(7));
 	return (
@@ -1668,6 +1692,95 @@ function compareOptionalIso(left: string | undefined, right: string | undefined)
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Give-up bounds for a recurring job that keeps failing.
+ *
+ * The scheduler reschedules a recurring job on every tick regardless of how the run went, so a
+ * heartbeat whose prompt can never succeed simply re-fires until a human notices. Session
+ * 01a028af-f660-73a9-a338-4a08ea15aeca spent fourteen unattended hours exactly that way: a
+ * five-minute "orchestration stability check" that had nothing left to stabilise, re-prompting a
+ * model around a hundred and seventy times and producing not one child or commit.
+ *
+ * Two bounds stop it, because the two failure modes are not the same. The consecutive bound is
+ * the hard ceiling: enough failures in a row and the job stops whatever they say. The repeat
+ * bound is the cheaper and the more important one: when the failure comes back with the same
+ * signature run after run, nothing the job does is changing anything, and a run that changes
+ * nothing cannot converge. Waiting for the hard ceiling in that case only burns the difference.
+ */
+const DEFAULT_MAX_CONSECUTIVE_FAILURES = 10;
+const DEFAULT_MAX_REPEATED_FAILURES = 3;
+
+function cronFailureBound(name: string, fallback: number): number {
+	const raw = process.env[name];
+	if (raw && /^\d+$/.test(raw)) {
+		const parsed = Number.parseInt(raw, 10);
+		if (parsed > 0) {
+			return parsed;
+		}
+	}
+	return fallback;
+}
+
+/**
+ * Reduce a failure to the part of it that identifies it, so "the same failure" survives the
+ * detail that necessarily moves between runs: timestamps, pids, durations, hashes, line offsets.
+ * Comparing raw text would make every rerun look like new information and the repeat bound would
+ * never fire, which is the whole failure this guard exists to catch.
+ */
+function cronFailureSignature(message: string): string {
+	return message
+		.split("\n")[0]
+		.toLowerCase()
+		.replace(/0x[0-9a-f]+/g, "<hex>")
+		.replace(/\b[0-9a-f]{8,}\b/g, "<hash>")
+		.replace(/\d+/g, "<n>")
+		.replace(/\s+/g, " ")
+		.trim()
+		.slice(0, 200);
+}
+
+interface CronFailureOutcome {
+	lastError: string | undefined;
+	consecutiveFailures: number;
+	repeatedFailures: number;
+	failureSignature: string | undefined;
+	gaveUp: boolean;
+}
+
+function nextCronFailureState(job: AgentCronJob, error: unknown): CronFailureOutcome {
+	if (error === undefined) {
+		return {
+			lastError: undefined,
+			consecutiveFailures: 0,
+			repeatedFailures: 0,
+			failureSignature: undefined,
+			gaveUp: false,
+		};
+	}
+	const message = errorMessage(error);
+	const failureSignature = cronFailureSignature(message);
+	const consecutiveFailures = (job.consecutiveFailures ?? 0) + 1;
+	const repeatedFailures = job.failureSignature === failureSignature ? (job.repeatedFailures ?? 0) + 1 : 1;
+	const unchanged = repeatedFailures >= cronFailureBound("PI_CRON_MAX_REPEATED_FAILURES", DEFAULT_MAX_REPEATED_FAILURES);
+	const exhausted = consecutiveFailures >= cronFailureBound("PI_CRON_MAX_CONSECUTIVE_FAILURES", DEFAULT_MAX_CONSECUTIVE_FAILURES);
+	if (!unchanged && !exhausted) {
+		return { lastError: message, consecutiveFailures, repeatedFailures, failureSignature, gaveUp: false };
+	}
+	const runs = job.runCount + 1;
+	return {
+		lastError: unchanged
+			? `gave up after failing the same way ${repeatedFailures} times in a row ` +
+				`(${consecutiveFailures} consecutive failures over ${runs} runs); rerunning an unchanged ` +
+				`failure cannot change it. Set PI_CRON_MAX_REPEATED_FAILURES to allow more. Last error: ${message}`
+			: `gave up after ${consecutiveFailures} consecutive failures over ${runs} runs. ` +
+				`Set PI_CRON_MAX_CONSECUTIVE_FAILURES to allow more. Last error: ${message}`,
+		consecutiveFailures,
+		repeatedFailures,
+		failureSignature,
+		gaveUp: true,
+	};
 }
 
 function normalizeOptionalLabel(label: string | undefined): string | undefined {
