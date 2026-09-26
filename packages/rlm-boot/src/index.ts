@@ -72,6 +72,8 @@ export interface RlmHost {
 	refresh: () => void;
 	/** `require` resolved from the repo root, for rows needing CJS interop. */
 	require: NodeJS.Require;
+	/** Settles when the boot-time overlay apply, and the rows it inserted, have. */
+	overlayReady?: Promise<void>;
 }
 
 export interface RlmBootConfig {
@@ -353,6 +355,10 @@ export function apply(ctx: any, config: RlmBootConfig = {}) {
 	 * makes for the composition at boot. Left-out rows are named, and retried
 	 * whenever their file or the overlay changes.
 	 */
+	// Settles once the first overlay apply (and the rows it inserted) has; the
+	// host waits on it, bounded, before dispatching the command line.
+	let resolveOverlayReady: () => void = () => {};
+	const overlayReady = new Promise<void>((r) => (resolveOverlayReady = r));
 	let applying: Promise<void> = Promise.resolve();
 	const applyOverlay = () => {
 		applying = applying.then(applyOverlayNow, applyOverlayNow);
@@ -432,11 +438,23 @@ export function apply(ctx: any, config: RlmBootConfig = {}) {
 				} catch {
 					/* a tree that failed to load has nothing to patch */
 				}
-				if (!disposed) void applyOverlay();
+				if (!disposed) await applyOverlay();
+				// The overlay's rows are inserted now but may still be loading;
+				// wait for them too, so a mode an overlay row registers (e.g.
+				// `rlm iris`) exists before the host dispatches the command line.
+				try {
+					await (tree.ctx.fiber as any).await?.();
+				} catch {
+					/* a row that failed is named by applyOverlay; nothing to wait for */
+				}
+				resolveOverlayReady();
 			})();
+		} else {
+			resolveOverlayReady();
 		}
 	} else {
 		warn("not mounted from a config file — nothing to watch");
+		resolveOverlayReady();
 	}
 
 	ctx.provide?.(
@@ -448,6 +466,7 @@ export function apply(ctx: any, config: RlmBootConfig = {}) {
 			overlay: overlayPath,
 			refresh,
 			require: createRequire(join(root, "package.json")),
+			overlayReady,
 		} satisfies RlmHost,
 		true,
 	);

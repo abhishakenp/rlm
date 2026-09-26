@@ -49,6 +49,8 @@ const POLL_MS = 1000;
 const HOST_EXIT = 78;
 /** Batch rapid saves in this directory into one reload. */
 const DEBOUNCE_MS = 150;
+/** Longest the command line waits for the overlay's rows before dispatching. */
+const OVERLAY_WAIT_MS = 5000;
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -724,6 +726,14 @@ const api: ShellApi = {
 			restoreAfterExec(host);
 			snapshotLastGood(host);
 
+			// Overlay rows can register modes (`rlm iris …`); rlm-boot applies the
+			// overlay only after the composition settles, so dispatching now would
+			// miss them. Bounded: a slow row must not hold the command line.
+			const overlayReady = (host.ctx as any).get?.("rlmHost")?.overlayReady as Promise<void> | undefined;
+			if (overlayReady) {
+				await Promise.race([overlayReady, new Promise((r) => setTimeout(r, OVERLAY_WAIT_MS))]);
+				say("info", `boot: overlay settled (${Math.round(performance.now())}ms)`);
+			}
 			const modes = await waitFor(host.ctx, "rlmModes");
 			say("info", `boot: modes ${modes ? "ready" : "missing"} (${Math.round(performance.now())}ms)`);
 			if (!modes) {
