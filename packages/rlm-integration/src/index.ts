@@ -54,6 +54,7 @@ import { join } from "node:path";
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createNetServer, type Server } from "node:net";
 import { route as modelRoute, type Route } from "../../rlm-delegate/src/ask.ts";
+import { cleanCompletion, cleanStream } from "./think.ts";
 
 declare module "@deepseek-ai/cordis" {
 	interface Events {
@@ -349,13 +350,15 @@ export class RlmIntegration extends Service {
 				if (body.stream) {
 					res.status(response.status).setHeader("content-type", "text/event-stream");
 					if (!response.body) { res.end(); return; }
-					for await (const chunk of response.body) {
+					// Reasoning out of `content` (see think.ts); an error body passes as is.
+					const events = response.ok ? cleanStream(response.body as any) : (response.body as any);
+					for await (const chunk of events) {
 						res.write(chunk);
 					}
 					res.end();
 				} else {
 					const data = await response.json();
-					res.status(response.status).json(data);
+					res.status(response.status).json(response.ok ? cleanCompletion(data) : data);
 				}
 			} catch (err: any) {
 				const durationMs = Date.now() - t0;

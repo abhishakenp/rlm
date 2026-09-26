@@ -79,7 +79,7 @@ export interface InlineThinkSegment {
 const ROLE_LABELS = ["User", "Human", "Assistant", "Model", "AI", "System", "Tool"];
 
 const PSEUDO_MARKUP =
-	/<\/?[a-z][a-z0-9_]*>|<\|[a-z0-9_]+\|>|\[\/?[A-Z][A-Z0-9_]+\]|\n(?:User|Human|Assistant|Model|AI|System|Tool)\s*:/;
+	/<\/?[a-z][a-z0-9_]*(?::[a-z][a-z0-9_]*)?>|<\|[a-z0-9_]+\|>|\[\/?[A-Z][A-Z0-9_]+\]|\n(?:User|Human|Assistant|Model|AI|System|Tool)\s*:/;
 
 const findPseudoMarkup = (s: string, fenceOpen: boolean): { index: number; length: number } | undefined => {
 	// Skip anything inside inline code or a ``` fence: markup there is the answer's content.
@@ -113,7 +113,7 @@ const possibleMarkupTail = (s: string): number => {
 	const at = Math.max(s.lastIndexOf("<"), s.lastIndexOf("["));
 	if (at === -1 || s.length - at > 32) return 0;
 	const tail = s.slice(at);
-	return /^(<\/?[a-z0-9_]*|<\|[a-z0-9_|]*|\[\/?[A-Z0-9_]*)$/.test(tail) ? tail.length : 0;
+	return /^(<\/?[a-z0-9_:]*|<\|[a-z0-9_|]*|\[\/?[A-Z0-9_]*)$/.test(tail) ? tail.length : 0;
 };
 
 /** Length of the longest suffix of `s` that is a proper prefix of one of `tags`. */
