@@ -9,7 +9,8 @@
     "./client": "./src/client.ts"
   },
   "dependencies": {
-    "@deepseek-ai/cordis": "*"
+    "@deepseek-ai/cordis": "*",
+    "express": "^4.21.2"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

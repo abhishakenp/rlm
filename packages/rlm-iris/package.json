@@ -1,21 +1,16 @@
 {
   "name": "rlm-iris",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "version": "0.0.1",
+  "main": "dist/index.js",
+  "rlm-plugin": true,
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
   "scripts": {
     "build": "tsc"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
-  "exports": {
-    ".": "./dist/index.js",
-    "*": "./dist/*.js"
-  },
-  "dependencies": {
-    "@deepseek-ai/cordis": "^0.0.0",
-    "@rlm/tui": "^0.0.0"
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0"
   }
 }
