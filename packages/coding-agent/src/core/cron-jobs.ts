@@ -137,7 +137,7 @@ export interface AgentRlmHeartbeatController {
 		interval?: string;
 		label?: string;
 		deliveryMode?: AgentHeartbeatDeliveryMode;
-	}): AgentCronJob;
+	}): AgentCronJob | Promise<AgentCronJob>;
 	updateRlmHeartbeat(input: {
 		id: string;
 		instruction?: string;
@@ -145,8 +145,8 @@ export interface AgentRlmHeartbeatController {
 		label?: string;
 		status?: AgentRlmHeartbeatStatusUpdate;
 		deliveryMode?: AgentHeartbeatDeliveryMode;
-	}): AgentCronJob | undefined;
-	deleteRlmHeartbeat(id: string): AgentCronJob | undefined;
+	}): AgentCronJob | undefined | Promise<AgentCronJob | undefined>;
+	deleteRlmHeartbeat(id: string): AgentCronJob | undefined | Promise<AgentCronJob | undefined>;
 }
 
 function heartbeatCatalogSignature(jobs: readonly AgentCronJob[]): string {

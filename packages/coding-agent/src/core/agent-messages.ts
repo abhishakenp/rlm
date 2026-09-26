@@ -83,6 +83,19 @@ export interface AgentFamilyCatalogEntry {
 	parentSessionId?: string;
 	parentSessionPath?: string;
 	sessionPath?: string;
+	cwd?: string;
+	rlmChildId?: string;
+	/** Set only for peers live in another daemon worker; local rows read residency directly. */
+	activeSessionId?: string;
+	/** Persisted transcript facts; known only for entries read from disk. */
+	messageCount?: number;
+	firstMessage?: string;
+}
+
+/** prime-agent v0.9.6: one relative of the current session, with its catalog entry. */
+export interface AgentFamilyMember {
+	relationship: AgentFamilyRelationship;
+	entry: AgentFamilyCatalogEntry;
 }
 
 export interface AgentFamilyRosterEntry {
@@ -108,6 +121,13 @@ export interface AgentSessionNameScope {
 export interface AgentSessionNameAvailabilityInput extends AgentSessionNameScope {
 	name: string;
 	ignoreSessionId?: string;
+	/**
+	 * Session ids of children whose delete receipt already returned. The daemon
+	 * catalog keeps listing such a child until its detached unwind removes the
+	 * runtime, so the caller passes every freed id it still holds and a same-name
+	 * respawn is admitted at the receipt instead of at the unwind.
+	 */
+	ignoreSessionIds?: string[];
 }
 
 export interface AgentSessionMessagePayload {
@@ -158,6 +178,8 @@ export interface AgentSessionMessageSendInput {
 export interface AgentSessionMessageController {
 	listAgents(): AgentSessionMessageListResult | Promise<AgentSessionMessageListResult>;
 	roster?(): AgentFamilyRosterResult | Promise<AgentFamilyRosterResult>;
+	/** prime-agent v0.9.6 (daemon): the current session's parent, siblings and children. */
+	family?(): AgentFamilyMember[] | Promise<AgentFamilyMember[]>;
 	awaitPendingChildPublication?(selector: string): Promise<string | undefined>;
 	assertSessionNameAvailable?(input: AgentSessionNameAvailabilityInput): void | Promise<void>;
 	setSessionName?(name: string): void | Promise<void>;
@@ -202,9 +224,11 @@ export function assertAgentSessionNameAvailable(
 	catalog: readonly AgentFamilyCatalogEntry[],
 	input: AgentSessionNameAvailabilityInput,
 ): void {
+	const freedSessionIds = input.ignoreSessionIds?.length ? new Set(input.ignoreSessionIds) : undefined;
 	const conflict = catalog.some(
 		(entry) =>
 			entry.id !== input.ignoreSessionId &&
+			!freedSessionIds?.has(entry.id) &&
 			entry.name === input.name &&
 			entry.depth === input.depth &&
 			sameAgentSessionNameParent(entry, input, catalog),
@@ -212,6 +236,30 @@ export function assertAgentSessionNameAvailable(
 	if (conflict) {
 		throw new Error(formatAgentSessionNameUnavailable(input.name, input.depth));
 	}
+}
+
+/** prime-agent v0.9.6: parent, then siblings and children by name. */
+export function selectAgentFamily(
+	current: AgentFamilyCatalogEntry,
+	catalog: readonly AgentFamilyCatalogEntry[],
+): AgentFamilyMember[] {
+	const parent = catalog.find((entry) => isAgentFamilyParent(entry, current));
+	const siblings = catalog.filter(
+		(entry) =>
+			entry.id !== current.id && entry.depth === current.depth && sameAgentFamilyParent(entry, current, catalog),
+	);
+	const children = catalog.filter((entry) => entry.depth === current.depth + 1 && isAgentFamilyParent(current, entry));
+	const byName = (a: AgentFamilyCatalogEntry, b: AgentFamilyCatalogEntry) =>
+		agentFamilyMemberName(a).localeCompare(agentFamilyMemberName(b));
+	return [
+		...(parent ? [{ relationship: "parent" as const, entry: parent }] : []),
+		...siblings.sort(byName).map((entry) => ({ relationship: "sibling" as const, entry })),
+		...children.sort(byName).map((entry) => ({ relationship: "child" as const, entry })),
+	];
+}
+
+export function agentFamilyMemberName(entry: AgentFamilyCatalogEntry): string {
+	return entry.name ?? entry.id;
 }
 
 export function buildAgentFamilyRoster(

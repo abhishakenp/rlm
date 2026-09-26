@@ -283,7 +283,8 @@ import { type BashOperations, createLocalBashOperations } from "./bash-operation
 import { createAllToolDefinitions } from "./tools/index.js";
 import { CodeKernelProvisioner, KERNEL_HOST_APIS } from "./tools/code.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
-import { addAssistantUsage, emptyUsage } from "./usage.js";
+import { addAssistantUsage, emptyUsage, type SessionUsageSummary, sessionUsageSummaryFrom, subtractAssistantUsage } from "./usage.js";
+import type { AcpMcpServerConfig } from "./mcp/acp-mcp-types.js";
 import { SERPER_CREDENTIAL_ID, SERPER_ENV_VAR, WEBSEARCH_SKILL_NAME } from "./websearch-credential.js";
 
 export type { GoalState, GoalStatus } from "./goals.js";
@@ -321,6 +322,7 @@ export interface RlmChildAgentSnapshot {
 export type CompactionReason = "manual" | "threshold" | "overflow" | "requested";
 
 export type AgentSessionEvent =
+	| { type: "rlm_progress_note"; message: string; timestamp: number }
 	| AgentEvent
 	| {
 			type: "code_sent_agent_message";
@@ -3630,7 +3632,10 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 	 * These heartbeats are internal to this active session and never read or
 	 * mutate the user-level /heartbeat.
 	 */
-	handleRlmHeartbeatHostRequest(type: string, payload: Record<string, unknown> = {}): Record<string, unknown> {
+	async handleRlmHeartbeatHostRequest(
+		type: string,
+		payload: Record<string, unknown> = {},
+	): Promise<Record<string, unknown>> {
 		const controller = this._rlmHeartbeatController;
 		if (!controller) {
 			throw new Error("RLM heartbeat skill is not available in this session");
@@ -3657,7 +3662,7 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 				const deliveryMode = normalizeHeartbeatDeliveryMode(payload.delivery_mode ?? payload.deliveryMode);
 				return {
 					heartbeat: rlmHeartbeatHostResponse(
-						controller.createRlmHeartbeat({
+						await controller.createRlmHeartbeat({
 							instruction: payload.instruction,
 							interval: payload.interval,
 							label: payload.label,
@@ -3693,7 +3698,7 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 				) {
 					throw new Error("rlm_heartbeat.update requires at least one field to update");
 				}
-				const heartbeat = controller.updateRlmHeartbeat({
+				const heartbeat = await controller.updateRlmHeartbeat({
 					id: payload.id,
 					instruction: payload.instruction,
 					interval: payload.interval,
@@ -3709,7 +3714,7 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 				if (typeof payload.id !== "string") {
 					throw new Error("rlm_heartbeat.delete id must be a string");
 				}
-				const heartbeat = controller.deleteRlmHeartbeat(payload.id);
+				const heartbeat = await controller.deleteRlmHeartbeat(payload.id);
 				return {
 					heartbeat: heartbeat ? rlmHeartbeatHostResponse(heartbeat) : null,
 				};
@@ -4431,7 +4436,8 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 	 * (which flushes a final namespace snapshot) before the synchronous dispose, so
 	 * the latest state reaches disk instead of racing process exit.
 	 */
-	async disposeAsync(): Promise<void> {
+	/** Options are prime-agent's (kernel snapshot on dispose); rlm's code kernel has no snapshot to flush. */
+	async disposeAsync(_options?: { kernelSnapshot?: boolean }): Promise<void> {
 		if (this._disposed) {
 			return this._disposeCallbacksPromise;
 		}
@@ -7072,6 +7078,71 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 			if (action.payload.kind === "turn") action.payload.prepared = undefined;
 		}
 	}
+
+	// ── prime-agent v0.9.6 daemon surface ────────────────────────────────────
+	// The daemon worker drives sessions through these; they are rlm's
+	// equivalents of upstream's methods of the same names.
+
+	/** Drop every queued agent message (turns delivered by agent_message), keeping user prompts. */
+	clearQueuedAgentMessages(): { steering: string[]; followUp: string[] } {
+		// Agent-message turns are exactly the actions that carry an agentMessageId.
+		return this.clearQueuedUserMessagesMatching(() => true);
+	}
+
+	/**
+	 * Abort the current run and deliver the visible queued steering at once.
+	 * Abort-only when nothing is queued or the queue cannot resume; an
+	 * update-restart suspension is left untouched.
+	 */
+	abortAndSendQueued(): boolean {
+		if (this._sessionInputSuspendedForUpdateRestart) return false;
+		const queuedSteering = visibleSessionActionProjection(this._actionStore.queuedActions("next_turn_boundary")).filter(
+			(action) =>
+				action.payload.kind === "turn" &&
+				!action.payload.acceptedAgentMessage &&
+				primaryDeliveryRecord(action).message.role === "user",
+		);
+		const canResume =
+			!this._disposed &&
+			!this._disposing &&
+			this._sessionInputAdmissionPauses.size === 0 &&
+			this._queuedWorkPauses.size === 0;
+		this.requestAbort();
+		if (queuedSteering.length === 0 || !canResume) return false;
+		this.resumeQueuedWork();
+		return true;
+	}
+
+	/** Upstream re-reads xAI model metadata for the current auth; rlm's registry has no per-auth variants. */
+	refreshModelMetadata(): void {}
+
+	private _ownUsageMemo?: { count: number; tailId: string | undefined; usage: SessionUsageSummary | undefined };
+
+	/** This session's own spend: every assistant turn, less child usage attributed into those turns. */
+	getOwnUsageSummary(): SessionUsageSummary | undefined {
+		const entries = this.sessionManager.getEntries();
+		const tailId = entries.at(-1)?.id;
+		const memo = this._ownUsageMemo;
+		if (memo && memo.count === entries.length && memo.tailId === tailId) return memo.usage;
+		const total = emptyUsage();
+		for (const entry of entries) {
+			if (entry.type === "message" && entry.message.role === "assistant" && entry.message.usage) {
+				addAssistantUsage(total, entry.message.usage);
+			} else if (entry.type === "child_usage_attributed") {
+				subtractAssistantUsage(total, entry.childUsage);
+			}
+		}
+		const usage = sessionUsageSummaryFrom(total);
+		this._ownUsageMemo = { count: entries.length, tailId, usage };
+		return usage;
+	}
+
+	/** rlm does not host ACP-supplied MCP servers (upstream needs its Python kernel for them). */
+	replaceAcpMcpServers(servers: readonly AcpMcpServerConfig[], _ownerId: string): void {
+		if (servers.length > 0) throw new Error("ACP MCP servers are not supported in rlm");
+	}
+
+	async releaseAcpMcpServers(_ownerId: string, _serverNames: readonly string[]): Promise<void> {}
 
 	clearQueuedUserMessagesMatching(predicate: (text: string) => boolean): { steering: string[]; followUp: string[] } {
 		const ownedActions = this._actionStore.ownedActions();

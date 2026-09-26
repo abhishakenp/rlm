@@ -350,7 +350,8 @@ export type IdleEvictionMinutes = number | "off";
 export interface SessionEvictionSnapshot {
 	isSessionActive: boolean;
 	attachedClients: number;
-	hasRegisteredHeartbeat: boolean;
+	/** rlm: heartbeats registered for the session; the prime-agent daemon folds these into hasRegisteredCronJob. */
+	hasRegisteredHeartbeat?: boolean;
 	hasRegisteredCronJob: boolean;
 	lastActivityAt: number;
 }
@@ -367,6 +368,8 @@ export interface WorkerEvictionSnapshot {
 	isStopping: boolean;
 	hasOwnerClient: boolean;
 	isPreparingUpdateRestart: boolean;
+	/** prime-agent v0.9.6: a worker holding a schedule no wake can reach must stay resident. */
+	hasWakeBlindSchedule?: boolean;
 	sessions: readonly SessionEvictionSnapshot[];
 }
 
@@ -414,6 +417,7 @@ export function canEvictWorker(
 		worker.isStopping ||
 		worker.hasOwnerClient ||
 		worker.isPreparingUpdateRestart ||
+		worker.hasWakeBlindSchedule === true ||
 		worker.sessions.length === 0
 	) {
 		return false;

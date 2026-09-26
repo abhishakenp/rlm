@@ -61,6 +61,11 @@ function extractUserMessageText(content: string | Array<{ type: string; text?: s
 		.join("");
 }
 
+/** prime-agent v0.9.6 dispose options; rlm accepts and ignores kernelSnapshot (its code kernel keeps no snapshot). */
+export interface AgentSessionRuntimeDisposeOptions {
+	kernelSnapshot?: boolean;
+}
+
 export class AgentSessionRuntime implements SubagentRuntimeHost {
 	private rebindSession?: (session: AgentSession) => Promise<void>;
 	private readonly sessionReplacedListeners = new Set<(session: AgentSession) => void | Promise<void>>();
@@ -722,7 +727,7 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		}
 	}
 
-	async dispose(): Promise<void> {
+	async dispose(_options?: AgentSessionRuntimeDisposeOptions): Promise<void> {
 		if (!this.disposePromise) {
 			this.disposePromise = this.disposeOnce();
 		}

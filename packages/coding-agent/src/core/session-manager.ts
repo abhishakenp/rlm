@@ -2196,3 +2196,31 @@ export class SessionManager {
 		return sessions;
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Appends to a closed session file, for the daemon's catalog process
+// (prime-agent v0.9.6 API). Upstream has a fast path that skips the full
+// transcript parse; rlm takes the full open, which upstream uses as its
+// fallback, so the entry lands exactly as a live append would place it.
+// ---------------------------------------------------------------------------
+
+/** Appends a rename (session_info) entry to a closed session file. */
+export function appendSessionInfoToExistingFile(sessionFile: string, name: string): string {
+	return SessionManager.open(sessionFile).appendSessionInfo(name);
+}
+
+/** Appends a lifecycle (session_state) entry to a closed session file. */
+export function appendSessionStateToExistingFile(sessionFile: string, state: SessionState): string {
+	return SessionManager.open(sessionFile).appendSessionState(state);
+}
+
+/** Appends a custom message entry to a closed session file. */
+export function appendCustomMessageToExistingFile<T = unknown>(
+	sessionFile: string,
+	customType: string,
+	content: string | (TextContent | ImageContent)[],
+	display: boolean,
+	details?: T,
+): string {
+	return SessionManager.open(sessionFile).appendCustomMessageEntry(customType, content, display, details);
+}

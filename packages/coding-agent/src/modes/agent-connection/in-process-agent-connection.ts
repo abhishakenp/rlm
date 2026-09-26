@@ -1,3 +1,4 @@
+import type { CustomMessage } from "../../core/messages.js";
 import { resolve } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent, ServiceTier, Transport } from "@earendil-works/pi-ai";
@@ -420,6 +421,16 @@ export class InProcessAgentConnection implements AgentConnection {
 
 	async abort(): Promise<void> {
 		this.session.requestAbort();
+	}
+
+	async abortAndSendQueued(): Promise<void> {
+		this.session.abortAndSendQueued();
+	}
+
+	async appendCustomMessage(
+		message: Pick<CustomMessage, "customType" | "content" | "display" | "details">,
+	): Promise<void> {
+		await this.session.sendCustomMessage(message);
 	}
 
 	async cancelRlmChild(childId: string): Promise<boolean> {

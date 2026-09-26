@@ -1,4 +1,5 @@
 import { spawnSync } from "child_process";
+import { createHash } from "crypto";
 import {
 	accessSync,
 	appendFileSync,
@@ -12,9 +13,8 @@ import {
 	statSync,
 } from "fs";
 import { homedir } from "os";
-import { basename, dirname, join, resolve, sep, win32 } from "path";
+import { basename, dirname, join, posix, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
-import { shouldUseWindowsShell } from "./utils/child-process.js";
 
 // =============================================================================
 // Iris Attention Service Configuration
@@ -33,6 +33,11 @@ import { IrisAttention } from "iris-attention";
 // Re-export for type checking and plugin registration
 export { IrisAttention };
 export const irisService = IrisAttention.provide();
+
+import { shouldUseWindowsShell, spawnSyncHidden } from "./utils/child-process.js";
+import { normalizeSocketPath } from "./utils/daemon-socket-path.js";
+import { getNativeInstallationTarget } from "./utils/native-installation.js";
+
 
 
 // =============================================================================
@@ -224,7 +229,7 @@ function readCommandOutput(
 	args: string[],
 	options: { requireSuccess?: boolean } = {},
 ): string | undefined {
-	const result = spawnSync(command, args, {
+	const result = spawnSyncHidden(command, args, {
 		encoding: "utf-8",
 		stdio: ["ignore", "pipe", "pipe"],
 		shell: shouldUseWindowsShell(command),
@@ -361,6 +366,7 @@ export function getSelfUpdateUnavailableInstruction(
 }
 
 export function getUpdateInstruction(packageName: string): string {
+	if (isBunBinary && getNativeInstallationTarget()) return `Run: ${APP_NAME} update`;
 	const method = detectInstallMethod();
 	const command = getSelfUpdateCommandForMethod(method, packageName);
 	if (command) {
@@ -383,9 +389,7 @@ export function getPackageDir(): string {
 	// Allow override via environment variable (useful for Nix/Guix where store paths tokenize poorly)
 	const envDir = process.env.PI_PACKAGE_DIR;
 	if (envDir) {
-		if (envDir === "~") return homedir();
-		if (envDir.startsWith("~/")) return homedir() + envDir.slice(1);
-		return envDir;
+		return expandTildePath(envDir);
 	}
 
 	if (isBunBinary) {
@@ -520,9 +524,11 @@ export const ENV_AGENT_DIR = `${envPrefix}_CODING_AGENT_DIR`;
 export const ENV_SESSION_DIR = `${envPrefix}_SESSION_DIR`;
 export const ENV_LEGACY_SESSION_DIR = `${envPrefix}_CODING_AGENT_SESSION_DIR`;
 
-export function expandTildePath(path: string): string {
+export function expandTildePath(path: string, platform: NodeJS.Platform = process.platform): string {
 	if (path === "~") return homedir();
-	if (path.startsWith("~/")) return homedir() + path.slice(1);
+	if (path.startsWith("~/") || (platform === "win32" && path.startsWith("~\\"))) {
+		return (platform === "win32" ? win32 : posix).join(homedir(), path.slice(2));
+	}
 	return path;
 }
 
@@ -553,6 +559,28 @@ export function getCustomThemesDir(): string {
 }
 
 /** Directory where diagnostic logs are written (e.g. ~/.rlm/logs/). */
+/**
+ * Directory for fetched-catalog caches (provider models, MCP services,
+ * default-model pointer, Prime Inference model cache). Derived state only —
+ * never user-owned config like auth.json, settings.json, models.json, or
+ * mcp-connections.json. Caches are non-authoritative: losing them costs one
+ * cold fetch, nothing else.
+ */
+export function getCatalogCacheDir(): string {
+	return join(getAgentDir(), "catalog");
+}
+
+/** Model catalog caches: provider catalog snapshot + Prime Inference model cache. */
+export function getModelCacheDir(): string {
+	return join(getAgentDir(), "models");
+}
+
+/** MCP service catalog cache. */
+export function getMcpCacheDir(): string {
+	return join(getAgentDir(), "mcp");
+}
+
+/** Directory where daemon and client diagnostic logs are written (e.g. ~/.prime/agent/logs/). */
 export function getLogsDir(): string {
 	return join(getAgentDir(), "logs");
 }
@@ -567,6 +595,23 @@ export function getAgentTracesLogPath(): string {
 }
 
 /** Shared structured (JSON lines) log for client and provider diagnostics. */
+/**
+ * Log file for a daemon. The basename keeps it readable; a hash of the full
+ * socket path makes it unique so two sockets that share a basename (e.g.
+ * daemon.sock in different dirs) don't interleave into one file.
+ */
+export function getDaemonLogPath(socketPath: string): string {
+	const normalized = normalizeSocketPath(socketPath);
+	const hash = createHash("sha256").update(normalized).digest("hex").slice(0, 8);
+	return join(getLogsDir(), `${basename(normalized)}.${hash}.log`);
+}
+
+export function getDaemonUpdateRestartManifestPath(socketPath: string, agentDir: string = getAgentDir()): string {
+	const normalizedSocketPath = normalizeSocketPath(socketPath);
+	const socketHash = createHash("sha256").update(normalizedSocketPath).digest("hex");
+	return join(agentDir, "daemon-update-restarts", `${socketHash}.json`);
+}
+
 export function getAgentLogPath(): string {
 	return join(getLogsDir(), "agent.jsonl");
 }

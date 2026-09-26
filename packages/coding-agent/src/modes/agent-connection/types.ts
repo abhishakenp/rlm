@@ -17,6 +17,8 @@ import type { ReplayBuiltInToolName } from "../../core/extensions/index.js";
 import type { InputSource } from "../../core/extensions/types.js";
 import type { GoalState } from "../../core/goals.js";
 import type { KernelSentAgentMessage } from "../../core/kernel/index.js";
+import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
+import type { CustomMessage } from "../../core/messages.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
 import type { RlmMaxDepthStatus, SetRlmMaxDepthResult } from "../../core/rlm-max-depth.js";
 import type {
@@ -27,6 +29,7 @@ import type {
 } from "../../core/session-action-store.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import type { SessionStats } from "../../core/session-stats.js";
+import type { SessionSummary } from "../daemon/daemon-session-list.js";
 
 /**
  * Client-side interaction boundary consumed by InteractiveMode.
@@ -567,17 +570,22 @@ export interface AgentConnectionRlmChildAgentSnapshot {
 	recap?: string;
 	sessionDir: string;
 	activity?: AgentConnectionRlmChildAgentActivity;
+	/** Latest child progress note (`rlm.progress.note`), newest wins. */
+	progressNote?: string;
+	lastActivityAt?: number;
+	/** Set when a running child has had no tracked activity for the staleness threshold. */
+	activityStaleMs?: number;
 	error?: string;
-	/** Hostname where this child is running. Set when running on a remote fleet host. */
-	host?: string;
-	/** Tags of the host where this child is running. */
-	hostTags?: string[];
-	/** Children of this child (for recursive tree view). */
-	children?: AgentConnectionRlmChildAgentSnapshot[];
 }
 
 export type AgentConnectionSessionEvent =
 	| AgentEvent
+	| {
+			/** rlm: the session reached a terminal state on its own (see AgentSessionEvent). */
+			type: "session_resolved";
+			reason: "needs_input_timeout";
+			timeoutMs: number;
+	  }
 	| { type: "code_sent_agent_message"; toolCallId: string; message: KernelSentAgentMessage }
 	| { type: "session_action_update"; actions: SessionActionSnapshot }
 	| {
@@ -598,10 +606,28 @@ export type AgentConnectionSessionEvent =
 			errorSeverity?: "warning" | "error";
 			customInstructions?: string;
 	  }
-	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
-	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
+	| {
+			type: "auto_retry_start";
+			attempt: number;
+			maxAttempts: number;
+			delayMs: number;
+			errorMessage: string;
+			/** Why the retry loop re-issues the turn; absent = ordinary quick retry. */
+			reason?: "usage" | "unavailable" | "backup";
+			/** Present when reason is "backup": "provider/model-id" of the backup. */
+			backupModel?: string;
+	  }
+	| {
+			type: "auto_retry_end";
+			success: boolean;
+			attempt: number;
+			finalError?: string;
+			/** "provider/model-id" restored after a backup-model retry succeeded. */
+			restoredModel?: string;
+	  }
 	| { type: "auth_stale"; provider: string; sourceTokens?: readonly AuthSourceToken[] }
 	| { type: "rlm_child_update"; child: AgentConnectionRlmChildAgentSnapshot }
+	| { type: "rlm_progress_note"; message: string; timestamp: number }
 	| { type: "recap_update"; recap: string | undefined }
 	| { type: "goal_update"; goal: GoalState }
 	| { type: "bash_start"; command: string; excludeFromContext: boolean; transient?: boolean; runId?: string }
@@ -627,7 +653,13 @@ export type AgentConnectionEvent =
 	| { type: "session_status"; recap?: string }
 	| { type: "extension_ui_request"; request: AgentConnectionExtensionUiRequest }
 	| { type: "extension_error"; extensionPath: string; event: string; error: string }
-	| { type: "connection_status"; status: "reconnecting" | "connected"; error?: string }
+	| {
+			type: "connection_status";
+			status: "reconnecting" | "connected";
+			error?: string;
+			/** App version of the restarted daemon; set when recovery re-attached to it. */
+			daemonVersion?: string;
+	  }
 	| { type: "heartbeats_changed" }
 	| { type: "closed"; error?: string };
 
@@ -708,6 +740,17 @@ export interface AgentConnection {
 	getToolDefinition(name: string): Promise<AgentConnectionToolDefinition | undefined>;
 	setSessionEntryLabel(entryId: string, label: string | undefined): Promise<void>;
 	respondToExtensionUiRequest(requestId: string, response: AgentConnectionExtensionUiResponse): Promise<void>;
+	subscribeAgentRoster?(listener: () => void): Promise<{ summaries(): SessionSummary[]; dispose(): Promise<void> }>;
+	supportsAcpMcpServers?(): boolean;
+	replaceAcpMcpServers?(servers: readonly AcpMcpServerConfig[], ownerId: string): Promise<void>;
+	releaseAcpMcpServers?(ownerId: string, serverNames: readonly string[]): Promise<void>;
+
+	/**
+	 * Append a durable custom message to the active session transcript without
+	 * triggering a turn: it persists in the session file and renders in chat.
+	 * Callers must not rely on it while the agent is streaming.
+	 */
+	appendCustomMessage(message: Pick<CustomMessage, "customType" | "content" | "display" | "details">): Promise<void>;
 
 	prompt(message: string, options?: AgentConnectionPromptOptions): Promise<void>;
 	promptAndWait(message: string, options?: AgentConnectionPromptOptions): Promise<void>;
@@ -716,6 +759,8 @@ export interface AgentConnection {
 	steer(message: string, images?: ImageContent[]): Promise<void>;
 	followUp(message: string, images?: ImageContent[]): Promise<void>;
 	abort(): Promise<void>;
+	/** Abort the active run and start all queued user steering together in one new turn; abort-only when the queue is empty. */
+	abortAndSendQueued(): Promise<void>;
 	cancelRlmChild(childId: string): Promise<boolean>;
 	waitForIdle(): Promise<void>;
 	waitForHeadlessCompletion(options?: AgentConnectionHeadlessCompletionOptions): Promise<AgentAutonomousStatus>;
