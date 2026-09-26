@@ -1,3 +1,4 @@
+import { APP_NAME } from "../src/config.js";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
@@ -7,6 +8,7 @@ import lockfile from "proper-lockfile";
 import { describe, expect, it } from "vitest";
 import {
 	cleanupDaemonSocketPath,
+	DaemonSocketPathLease,
 	defaultDaemonSocketPath,
 	getDaemonSocketIdentity,
 	normalizeSocketPath,
@@ -26,7 +28,7 @@ describe("defaultDaemonSocketPath", () => {
 			return;
 		}
 
-		expect(defaultDaemonSocketPath()).toBe("\\\\.\\pipe\\prime-agent-daemon");
+		expect(defaultDaemonSocketPath()).toBe(`\\\\.\\pipe\\${APP_NAME}-daemon`);
 	});
 
 	it("uses a per-user Unix socket directory", () => {
@@ -37,7 +39,7 @@ describe("defaultDaemonSocketPath", () => {
 		const suffix = typeof process.getuid === "function" ? String(process.getuid()) : "user";
 		const socketPath = defaultDaemonSocketPath();
 
-		expect(dirname(socketPath)).toBe(join(tmpdir(), `prime-agent-${suffix}`));
+		expect(dirname(socketPath)).toBe(join(tmpdir(), `${APP_NAME}-${suffix}`));
 		expect(basename(socketPath)).toBe("daemon.sock");
 	});
 
@@ -250,6 +252,39 @@ describe("defaultDaemonSocketPath", () => {
 			if (replacementServer.listening) {
 				await new Promise<void>((resolve) => replacementServer.close(() => resolve()));
 			}
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe.skipIf(process.platform === "win32")("DaemonSocketPathLease compromise hardening", () => {
+	it("records compromise without rethrowing listener failures", () => {
+		const lease = new DaemonSocketPathLease("/tmp/test.sock", () => Promise.resolve());
+		const observed: Error[] = [];
+		lease.onCompromised(() => {
+			throw new Error("listener failed");
+		});
+		lease.onCompromised((error) => observed.push(error));
+
+		expect(() => lease.recordCompromise(new Error("lock update failed"))).not.toThrow();
+		expect(lease.compromise?.message).toBe("lock update failed");
+		expect(observed).toHaveLength(1);
+	});
+
+	it("does not unlink a successor socket after the old lease is compromised", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pa-socket-compromise-"));
+		const socketPath = join(dir, "daemon.sock");
+		const server = createServer();
+		try {
+			await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+			const identity = getDaemonSocketIdentity(socketPath);
+			const lease = new DaemonSocketPathLease(socketPath, () => Promise.resolve());
+			lease.recordCompromise(new Error("lock stolen"));
+
+			cleanupDaemonSocketPath(socketPath, identity, lease);
+			expect(existsSync(socketPath)).toBe(true);
+		} finally {
+			await new Promise<void>((resolve) => server.close(() => resolve()));
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});

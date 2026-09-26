@@ -1,6 +1,16 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,6 +19,7 @@ import { AgentCronJobStore } from "../src/core/cron-jobs.js";
 import { readActiveOrphanProcesses } from "../src/core/orphan-process-journal.js";
 import {
 	acquireSessionLease,
+	getPsProcessStartId,
 	SESSION_LEASE_OWNER_ID_ENV,
 	SESSION_LEASES_ENABLED_ENV,
 } from "../src/core/session-lease.js";
@@ -16,9 +27,14 @@ import { readSessionInfo, SessionManager } from "../src/core/session-manager.js"
 import { DaemonAgentConnection } from "../src/modes/agent-connection/daemon-agent-connection.js";
 import { DaemonClient, getDaemonSocketCloseReason } from "../src/modes/daemon/daemon-client.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
-import type { DaemonWorkerDescriptor } from "../src/modes/daemon/daemon-worker-protocol.js";
+import {
+	type DaemonWorkerDescriptor,
+	type DaemonWorkerFrameHeader,
+	isDaemonWorkerFrameHeader,
+} from "../src/modes/daemon/daemon-worker-protocol.js";
+import { encodePrivateFrame, PrivateFrameDecoder } from "../src/modes/session-worker/private-framing.js";
 
-const cliPath = resolve(__dirname, "../src/cli.ts");
+const cliPath = resolve(__dirname, "../../../cordis-shell.mjs") /* rlm: the daemon runs through the composition */;
 const tsxPath = resolve(__dirname, "../../../node_modules/tsx/dist/cli.mjs");
 const blockingProcessPath = resolve(__dirname, "fixtures/blocking-process.mjs");
 const tempDirs: string[] = [];
@@ -46,6 +62,8 @@ afterEach(async () => {
 			child.kill("SIGTERM");
 		}
 	}
+	// Await owned exits before rmSync: a dying worker's log writer otherwise races it into ENOTEMPTY.
+	await Promise.all([...children].map((child) => waitForExit(child).catch(() => undefined)));
 	children.clear();
 	for (const pid of workerPids) {
 		try {
@@ -63,9 +81,10 @@ afterEach(async () => {
 			}
 		}
 	}
+	await Promise.all([...workerPids].map((pid) => waitForProcessGone(pid).catch(() => undefined)));
 	workerPids.clear();
 	for (const directory of tempDirs.splice(0)) {
-		rmSync(directory, { recursive: true, force: true });
+		rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 	}
 });
 
@@ -335,6 +354,134 @@ describe("daemon supervisor resident workers", () => {
 		workerPids.delete(summary.workerPid);
 		await waitForSocketGone(socketPath);
 	}, 60_000);
+
+	it("restarts an adopted pre-roster worker from the current binary", async () => {
+		const directory = tempDir();
+		const agentDir = join(directory, "agent");
+		const projectDir = join(directory, "project");
+		const sessionDir = join(agentDir, "sessions");
+		mkdirSync(projectDir, { recursive: true });
+		const manager = SessionManager.create(projectDir, sessionDir);
+		manager.appendMessage({ role: "user", content: "pre-roster fixture", timestamp: 1 });
+		manager.flushNow();
+		const sessionPath = manager.getSessionFile();
+		const sessionId = manager.getSessionId();
+		if (!sessionPath) throw new Error("Fixture session did not persist");
+
+		// A long-lived stand-in process plays the pre-roster worker's pid.
+		const legacyProcess = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000);"], { stdio: "ignore" });
+		children.add(legacyProcess);
+		if (!legacyProcess.pid) throw new Error("Missing legacy process pid");
+
+		// A fake worker socket that authenticates without advertising the roster capability.
+		const workerSocketPath = join(directory, "legacy-worker.sock");
+		const fakeWorker = createServer((socket) => {
+			const decoder = new PrivateFrameDecoder(isDaemonWorkerFrameHeader);
+			socket.write(
+				encodePrivateFrame<DaemonWorkerFrameHeader>(
+					{ kind: "outbound", outboundType: "daemon_hello" },
+					Buffer.from(`${JSON.stringify({ type: "daemon_hello" })}\n`),
+				),
+			);
+			socket.on("data", (chunk: Buffer) => {
+				for (const frame of decoder.push(chunk)) {
+					if (frame.header.kind !== "command") continue;
+					const command = JSON.parse(frame.payload.toString("utf8")) as { id: string; type: string };
+					const data =
+						command.type === "list"
+							? {
+									sessions: [
+										{
+											id: "legacy-root-active",
+											activeSessionId: "legacy-root-active",
+											sessionId,
+											sessionFile: sessionPath,
+											lifecycle: "live",
+											activity: "idle",
+											isSessionActive: false,
+											cwd: projectDir,
+											isStreaming: false,
+											isCompacting: false,
+											attachedClients: 0,
+											messageCount: 1,
+											sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+										},
+									],
+								}
+							: {};
+					socket.write(
+						encodePrivateFrame<DaemonWorkerFrameHeader>(
+							{ kind: "outbound", outboundType: "response", requestId: frame.header.requestId },
+							Buffer.from(
+								`${JSON.stringify({ id: command.id, type: "response", command: command.type, success: true, data })}\n`,
+							),
+						),
+					);
+				}
+			});
+		});
+		const socketPath = join(directory, "daemon.sock");
+		await new Promise<void>((resolveListen) => fakeWorker.listen(workerSocketPath, resolveListen));
+		const descriptorDir = join(
+			agentDir,
+			"daemon-workers",
+			createHash("sha256").update(socketPath).digest("hex").slice(0, 12),
+		);
+		mkdirSync(descriptorDir, { recursive: true });
+		const now = new Date().toISOString();
+		writeFileSync(
+			join(descriptorDir, "legacy-worker.json"),
+			`${JSON.stringify({
+				version: 2,
+				workerId: "legacy-worker",
+				pid: legacyProcess.pid,
+				socketPath: workerSocketPath,
+				recoveryJournalPath: join(descriptorDir, "legacy-worker.recovery.jsonl"),
+				supervisorSocketPath: socketPath,
+				authenticationToken: "legacy-token",
+				rootActiveSessionId: "legacy-root-active",
+				rootSessionId: sessionId,
+				sessionFile: sessionPath,
+				sessionDir,
+				createdAt: now,
+				updatedAt: now,
+				lifecycle: "ready",
+				createCommand: { type: "create", sessionPath },
+				consecutiveFailures: 0,
+			})}\n`,
+		);
+
+		// Once the supervisor kills the old pid, its socket goes quiet exactly like a dead worker's.
+		legacyProcess.once("exit", () => {
+			fakeWorker.close();
+			rmSync(workerSocketPath, { force: true });
+		});
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		let restarted: SessionSummary | undefined;
+		const deadline = Date.now() + 30_000;
+		while (Date.now() < deadline) {
+			const listed = await client.request({ type: "list" });
+			restarted = requireSessionList(listed.success ? listed.data : undefined).find(
+				(candidate) => candidate.sessionId === sessionId,
+			);
+			if (restarted?.workerState === "ready" && restarted.workerPid !== undefined) break;
+			restarted = undefined;
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+		}
+		if (!restarted?.workerPid) {
+			throw new Error(`Pre-roster worker was not restarted:\n${readDaemonLogs(agentDir)}`);
+		}
+		workerPids.add(restarted.workerPid);
+		// A fresh current-binary worker owns the reloaded idle session; the fake pre-roster pid is not adopted.
+		expect(restarted.workerPid).not.toBe(legacyProcess.pid);
+		expect(restarted.isSessionActive).toBe(false);
+		// The seeded user message plus the harness digest injected on resume.
+		expect(restarted.messageCount).toBe(2);
+		await waitForProcessGone(legacyProcess.pid);
+		fakeWorker.close();
+		client.close();
+	}, 90_000);
 
 	it("lists, creates, and attaches passive children through their owning worker", async () => {
 		const root = tempDir();
@@ -665,7 +812,7 @@ describe("daemon supervisor resident workers", () => {
 			throw new Error("Fixture session did not persist");
 		}
 		const cronStore = new AgentCronJobStore(getCronJobsPath(agentDir));
-		const heartbeat = cronStore.createHeartbeat({
+		const heartbeat = await cronStore.createHeartbeat({
 			activeSessionId: "old-active-session",
 			sessionId: sessionManager.getSessionId(),
 			sessionFile,
@@ -716,7 +863,7 @@ describe("daemon supervisor resident workers", () => {
 			throw new Error("Fixture session did not persist");
 		}
 		const cronStore = new AgentCronJobStore(getCronJobsPath(agentDir));
-		const heartbeat = cronStore.createHeartbeat({
+		const heartbeat = await cronStore.createHeartbeat({
 			activeSessionId: "deleted-worker",
 			sessionId: sessionManager.getSessionId(),
 			sessionFile,
@@ -1378,12 +1525,25 @@ describe("daemon supervisor resident workers", () => {
 		connection.subscribe((event) => {
 			connectionEvents.push(event.type === "connection_status" ? `${event.type}:${event.status}` : event.type);
 			if (event.type === "session_replaced") {
-				replacementMessageCounts.push(event.messages.length);
+				// Count conversation messages only; every session carries a harness digest.
+				replacementMessageCounts.push(
+					event.messages.filter(
+						(message) =>
+							!(
+								message.role === "custom" &&
+								(message as { customType?: string }).customType === "harness_digest"
+							),
+					).length,
+				);
 			}
 		});
 		const snapshot = await connection.getInitialSnapshot();
-		expect(snapshot.messages).toHaveLength(2);
-		expect(snapshot.messages[0]).toMatchObject({ role: "user", content: largePrompt });
+		const snapshotConversation = snapshot.messages.filter(
+			(message) =>
+				!(message.role === "custom" && (message as { customType?: string }).customType === "harness_digest"),
+		);
+		expect(snapshotConversation).toHaveLength(2);
+		expect(snapshotConversation[0]).toMatchObject({ role: "user", content: largePrompt });
 
 		const activeSessionId = createdSummary.activeSessionId ?? createdSummary.id;
 		const createdNew = await client.request({ type: "new_session", activeSessionId });
@@ -1395,6 +1555,12 @@ describe("daemon supervisor resident workers", () => {
 		expect(replacementMessageCounts).toContain(0);
 		const switchedBack = await client.request({ type: "switch_session", activeSessionId, sessionPath: sessionFile });
 		expect(switchedBack.success).toBe(true);
+		// The switch reports the file it resolved, so a client that sent a relative
+		// path can still correlate the replacement snapshot it waits on.
+		expect(switchedBack.success ? switchedBack.data : undefined).toMatchObject({
+			cancelled: false,
+			sessionFile,
+		});
 		const restoredReplacementDeadline = Date.now() + 5000;
 		while (replacementMessageCounts.at(-1) !== 2 && Date.now() < restoredReplacementDeadline) {
 			await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
@@ -1410,7 +1576,8 @@ describe("daemon supervisor resident workers", () => {
 			await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
 		}
 		expect(connectionEvents).toContain("connection_status:reconnecting");
-		expect(connectionEvents).toContain("session_resynced");
+		// The direct worker link held through the supervisor swap, so no resync is warranted.
+		expect(connectionEvents).not.toContain("session_resynced");
 		expect(connectionEvents).toContain("connection_status:connected");
 		expect(connectionEvents).not.toContain("closed");
 		await expect(connection.getState()).resolves.toMatchObject({
@@ -1572,5 +1739,129 @@ describe("daemon supervisor resident workers", () => {
 		await waitForSocketGone(socketPath);
 		await waitForProcessGone(summary.workerPid);
 		workerPids.delete(summary.workerPid);
+	});
+
+	it("exits an orphaned session worker when no replacement supervisor can come up", { timeout: 120_000 }, async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const registryDir = join(root, "supervisor-registry");
+		// The socket path must stay short: macOS rejects listen() with EINVAL
+		// past the sun_path limit, and the per-test temp dir nests too deep.
+		const socketDir = mkdtempSync(join(tmpdir(), "prime-orphan-gc-"));
+		tempDirs.push(socketDir);
+		const sessionDir = join(agentDir, "sessions");
+		const socketPath = join(socketDir, "supervisor.sock");
+		mkdirSync(projectDir, { recursive: true });
+
+		const manager = SessionManager.create(projectDir, sessionDir);
+		manager.appendMessage({ role: "user", content: "orphan gc fixture", timestamp: 1 });
+		manager.flushNow();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Missing fixture session path");
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir, [], {
+			PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR: registryDir,
+			PRIME_AGENT_INTERNAL_WORKER_SUPERVISOR_LOST_EXIT_MS: "3000",
+		});
+		// Cold tsx startup can exceed the shared helper's 15s readiness deadline.
+		let client: DaemonClient | undefined;
+		const readyDeadline = Date.now() + 60_000;
+		while (client === undefined && Date.now() < readyDeadline) {
+			if (supervisor.exitCode !== null || supervisor.signalCode !== null) {
+				const diagnostics = childDiagnostics.get(supervisor);
+				throw new Error(
+					`Supervisor exited before becoming ready\nstdout:\n${diagnostics?.stdout ?? ""}\nstderr:\n${diagnostics?.stderr ?? ""}`,
+				);
+			}
+			const candidate = new DaemonClient(socketPath);
+			try {
+				await candidate.connect(250);
+				await candidate.waitForHello(1000);
+				client = candidate;
+			} catch {
+				candidate.close();
+				await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
+			}
+		}
+		if (!client) throw new Error("Supervisor did not become ready in time");
+		const created = await client.request({
+			type: "create",
+			sessionPath: sessionFile,
+			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+		});
+		if (!created.success) throw new Error(created.error);
+		const summary = requireSummary(created.data);
+		if (!summary.workerPid) throw new Error("Session worker did not spawn");
+		workerPids.add(summary.workerPid);
+
+		// SIGKILL the registry-recorded supervisor pid: the spawned child can be
+		// a tsx wrapper, and killing the wrapper alone leaves the supervisor
+		// listening on its socket, so the worker would never orphan.
+		const ownerDirectories = readdirSync(registryDir).filter((name) => name.endsWith(".owner"));
+		expect(ownerDirectories).toHaveLength(1);
+		const owner = JSON.parse(readFileSync(join(registryDir, ownerDirectories[0], "owner.json"), "utf8")) as {
+			pid?: number;
+		};
+		if (!owner.pid) throw new Error("Supervisor owner record is missing its pid");
+		const supervisorPid = owner.pid;
+		const workerPid = summary.workerPid;
+		client.close();
+
+		// A read-only socket directory makes every replacement-launch attempt
+		// fail (lock/bind EACCES): the real-world orphan precondition where a
+		// worker cannot bring its supervisor back.
+		chmodSync(socketDir, 0o555);
+		try {
+			process.kill(supervisorPid, "SIGKILL");
+			await waitForCondition(
+				() => {
+					try {
+						process.kill(workerPid, 0);
+						return false;
+					} catch (error) {
+						return (error as NodeJS.ErrnoException).code === "ESRCH";
+					}
+				},
+				"Orphaned session worker did not exit after the supervisor-lost window",
+				60_000,
+			);
+		} finally {
+			chmodSync(socketDir, 0o755);
+		}
+		workerPids.delete(workerPid);
+	});
+});
+
+describe("issue #879 stable daemon process identity across timezone changes", () => {
+	it("pins the portable process query to UTC across caller timezone changes", () => {
+		const calls: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv | undefined }> = [];
+		const query = (command: string, args: string[], options?: { env?: NodeJS.ProcessEnv }) => {
+			calls.push({ command, args, env: options?.env });
+			return options?.env?.TZ === "UTC" ? "Sat Aug 29 20:55:18 2026\n" : "Sat Aug 29 16:55:18 2026\n";
+		};
+		const originalTimezone = process.env.TZ;
+		let before: string | undefined;
+		let after: string | undefined;
+		try {
+			process.env.TZ = "America/Los_Angeles";
+			before = getPsProcessStartId(42, query);
+			process.env.TZ = "America/New_York";
+			after = getPsProcessStartId(42, query);
+		} finally {
+			if (originalTimezone === undefined) delete process.env.TZ;
+			else process.env.TZ = originalTimezone;
+		}
+
+		expect(before).toBe("ps:Sat Aug 29 20:55:18 2026");
+		expect(after).toBe(before);
+		expect(calls).toHaveLength(2);
+		for (const call of calls) {
+			expect(call).toMatchObject({
+				command: "ps",
+				args: ["-p", "42", "-o", "lstart="],
+				env: { LC_ALL: "C", LC_TIME: "C", LANG: "C", TZ: "UTC" },
+			});
+		}
 	});
 });
