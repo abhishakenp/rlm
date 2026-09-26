@@ -298,51 +298,7 @@ export class RlmAgentService extends Service {
 		// `--skill`, `--system-prompt` …), built by `runtimeConfigFromArgs` and
 		// applied here with the helpers `main()` uses. This factory used to drop
 		// it, so every such flag was silently ignored on the Cordis launch path.
-		const createRuntimeFn: CreateAgentSessionRuntimeFactory = async (runtimeOptions) => {
-			const config = runtimeOptions.sessionConfig;
-			const runtimeArgs = config ? await import("../../coding-agent/src/cli/runtime-args.js") : undefined;
-			const childSessionManager = runtimeOptions.sessionManager ?? sessionManager;
-			const prepared = await this.createServices({
-				cwd: runtimeOptions.cwd ?? cwd,
-				agentDir: runtimeOptions.agentDir ?? agentDir,
-				...(config && runtimeArgs
-					? {
-							resourceLoaderOptions: runtimeArgs.resourceLoaderOptionsFromConfig(config),
-							extensionFlagValues: new Map(Object.entries(config.extensionFlagValues ?? {})),
-							telemetryDisabled: config.telemetryDisabled,
-						}
-					: {}),
-			});
-			if (!config || !runtimeArgs) {
-				const created = await this.createSession({
-					services: prepared,
-					sessionManager: childSessionManager,
-					...(runtimeOptions.sessionOptions ?? {}),
-				});
-				return { ...created, services: prepared, diagnostics: [] };
-			}
-			const fromConfig = await runtimeArgs.sessionOptionsFromConfig({
-				config,
-				services: prepared,
-				sessionManager: childSessionManager,
-				sessionOptionsOverride: runtimeOptions.sessionOptions,
-			});
-			const created = await this.createSession({
-				services: prepared,
-				sessionManager: childSessionManager,
-				...runtimeArgs.resolveRuntimeSessionOptions(fromConfig.sessionOptions, runtimeOptions.sessionOptions),
-				serializedRefine: config.serializedRefine ?? false,
-				executionMode: config.executionMode,
-				telemetryDisabled: config.telemetryDisabled,
-				// Only seed initial goal for top-level sessions (rlmDepth 0).
-				initialGoal: (runtimeOptions.sessionOptions?.rlmDepth ?? 0) === 0 ? config.initialGoal : undefined,
-			} as never);
-			const cliThinkingOverride = config.thinking !== undefined || fromConfig.cliThinkingFromModel;
-			if (created.session.model && cliThinkingOverride) {
-				created.session.setThinkingLevel(created.session.thinkingLevel);
-			}
-			return { ...created, services: prepared, diagnostics: fromConfig.diagnostics };
-		};
+		const createRuntimeFn = buildRuntimeFactory(this, { cwd, agentDir, sessionManager });
 
 		return createAgentSessionRuntime(createRuntimeFn, {
 			cwd,
@@ -353,9 +309,82 @@ export class RlmAgentService extends Service {
 		});
 	}
 
+	/**
+	 * The session factory every runtime here is built with, as prime-agent's
+	 * `createDefaultRuntimeFactory`: the daemon worker hands it to
+	 * `runDaemonMode`, which calls it for every session it hosts — top-level
+	 * ones and each RLM subagent, each time with that session's own manager.
+	 */
+	async runtimeFactory(options: { fallbackSessionManager?: SessionManager } = {}): Promise<CreateAgentSessionRuntimeFactory> {
+		const { getAgentDir } = await loadAgentConfig();
+		const cwd = this.services?.cwd ?? this.config.cwd ?? process.cwd();
+		const agentDir = this.services?.agentDir ?? this.config.agentDir ?? getAgentDir();
+		return buildRuntimeFactory(this, { cwd, agentDir, sessionManager: options.fallbackSessionManager });
+	}
+
 	getServices(): AgentSessionServices | undefined {
 		return this.services;
 	}
+}
+
+
+/**
+ * The factory itself, over the row's `createServices`/`createSession`. A plain
+ * function of the row so `createRuntime` and `runtimeFactory` share one body and
+ * `createRuntime` needs nothing from its receiver beyond what it always did.
+ */
+function buildRuntimeFactory(
+	self: Pick<RlmAgentService, "createServices" | "createSession">,
+	{ cwd, agentDir, sessionManager }: { cwd: string; agentDir: string; sessionManager?: SessionManager },
+): CreateAgentSessionRuntimeFactory {
+	const createRuntimeFn: CreateAgentSessionRuntimeFactory = async (runtimeOptions) => {
+		if (!runtimeOptions.sessionManager && !sessionManager) throw new Error("rlm-agent: the runtime factory was called without a SessionManager");
+		const config = runtimeOptions.sessionConfig;
+		const runtimeArgs = config ? await import("../../coding-agent/src/cli/runtime-args.js") : undefined;
+		const childSessionManager = (runtimeOptions.sessionManager ?? sessionManager)!;
+		const prepared = await self.createServices({
+			cwd: runtimeOptions.cwd ?? cwd,
+			agentDir: runtimeOptions.agentDir ?? agentDir,
+			...(config && runtimeArgs
+				? {
+						resourceLoaderOptions: runtimeArgs.resourceLoaderOptionsFromConfig(config),
+						extensionFlagValues: new Map(Object.entries(config.extensionFlagValues ?? {})),
+						telemetryDisabled: config.telemetryDisabled,
+					}
+				: {}),
+		});
+		if (!config || !runtimeArgs) {
+			const created = await self.createSession({
+				services: prepared,
+				sessionManager: childSessionManager,
+				...(runtimeOptions.sessionOptions ?? {}),
+			});
+			return { ...created, services: prepared, diagnostics: [] };
+		}
+		const fromConfig = await runtimeArgs.sessionOptionsFromConfig({
+			config,
+			services: prepared,
+			sessionManager: childSessionManager,
+			sessionOptionsOverride: runtimeOptions.sessionOptions,
+		});
+		const created = await self.createSession({
+			services: prepared,
+			sessionManager: childSessionManager,
+			...runtimeArgs.resolveRuntimeSessionOptions(fromConfig.sessionOptions, runtimeOptions.sessionOptions),
+			serializedRefine: config.serializedRefine ?? false,
+			executionMode: config.executionMode,
+			telemetryDisabled: config.telemetryDisabled,
+			// Only seed initial goal for top-level sessions (rlmDepth 0).
+			initialGoal: (runtimeOptions.sessionOptions?.rlmDepth ?? 0) === 0 ? config.initialGoal : undefined,
+		} as never);
+		const cliThinkingOverride = config.thinking !== undefined || fromConfig.cliThinkingFromModel;
+		if (created.session.model && cliThinkingOverride) {
+			created.session.setThinkingLevel(created.session.thinkingLevel);
+		}
+		return { ...created, services: prepared, diagnostics: fromConfig.diagnostics };
+	};
+
+	return createRuntimeFn;
 }
 
 export default RlmAgentService;

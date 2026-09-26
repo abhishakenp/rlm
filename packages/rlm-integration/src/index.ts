@@ -87,6 +87,22 @@ export interface RlmIntegrationConfig {
 	home?: string;
 	/** Whether to start the server on boot. Default: true. */
 	enabled?: boolean;
+	/**
+	 * Which process serves the port. Default `daemon`: with `RLM_DAEMON=1` only
+	 * prime-agent's daemon supervisor listens — it is the one process that is up
+	 * whenever rlm is — and clients, workers and `--print` runs leave the port
+	 * alone. Without the daemon every process tries and the first to bind wins,
+	 * as before. `any`: always the latter.
+	 */
+	owner?: "daemon" | "any";
+}
+
+/** prime-agent's supervisor: `--mode daemon` without the worker role in the environment. */
+function isDaemonSupervisorProcess(): boolean {
+	const argv = process.argv;
+	const index = argv.indexOf("--mode");
+	const daemon = (index >= 0 && argv[index + 1] === "daemon") || argv.includes("--mode=daemon");
+	return daemon && !process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER;
 }
 
 
@@ -195,6 +211,7 @@ export class RlmIntegration extends Service {
 			host: raw.host ?? "loopback",
 			home: raw.home ?? join(homedir(), ".rlm"),
 			enabled: raw.enabled ?? true,
+			owner: raw.owner ?? "daemon",
 		};
 		this.app = express();
 	}
@@ -208,8 +225,36 @@ export class RlmIntegration extends Service {
 		// symbol, so that was a method named "undefined" that nothing ever called,
 		// and a swapped fiber kept :20130 bound with no way to hand it on. The
 		// effect's disposer is what cordis actually runs when the fiber goes.
-		(this.ctx as { effect: (fn: () => () => void) => void }).effect(() => () => void this.release("fiber disposed"));
+		(this.ctx as { effect: (fn: () => () => void) => void }).effect(() => () => {
+			if (this.takeoverTimer) clearTimeout(this.takeoverTimer);
+			void this.release("fiber disposed");
+		});
+		if ((this.config.owner ?? "daemon") === "daemon" && !isDaemonSupervisorProcess() && process.env.RLM_DAEMON === "1") {
+			this.ctx.logger?.info?.("rlm-integration: the daemon supervisor serves the port; not listening in this process");
+			return;
+		}
+		if (isDaemonSupervisorProcess()) {
+			// The supervisor is the long-lived owner, but an rlm started without the daemon
+			// may hold the port first. Take it over when that one lets go, instead of
+			// failing the supervisor's boot over a port someone else is already serving.
+			this.startWhenFree();
+			return;
+		}
 		await this.start();
+	}
+
+	private takeoverTimer?: ReturnType<typeof setTimeout>;
+
+	private startWhenFree(): void {
+		this.start().catch((error) => {
+			if (!String(error?.message ?? error).includes("EADDRINUSE")) {
+				console.error(`[rlm] rlm-integration: ${String(error?.message ?? error)}`);
+				return;
+			}
+			this.ctx.logger?.info?.("rlm-integration: port held by another rlm; the supervisor will take it over when it frees");
+			this.takeoverTimer = setTimeout(() => this.startWhenFree(), 5_000);
+			this.takeoverTimer.unref?.();
+		});
 	}
 
 	/**

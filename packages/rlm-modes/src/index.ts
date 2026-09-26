@@ -13,6 +13,7 @@
  */
 import { Service } from "@deepseek-ai/cordis";
 import { surface } from "../../rlm-host/src/surface.ts";
+import type { CreateAgentSessionRuntimeFactory } from "../../coding-agent/src/core/agent-session-runtime.js";
 
 export const name = "rlm-modes";
 
@@ -161,6 +162,38 @@ export class RlmModesService extends Service {
 	private registerBuiltins() {
 		this.ctx.effect(() => {
 			const disposers = [
+				this.register({
+					id: "daemon",
+					// Above print: the supervisor launches workers with no terminal, and print
+					// claims anything whose stdin is not a TTY.
+					priority: 100,
+					// prime-agent's supervisor and resident workers are this same entrypoint
+					// relaunched with `--mode daemon --daemon-socket <path>`; the worker role
+					// arrives in the environment, which runRlmDaemonProcess reads.
+					claims: (argv) => isDaemonInvocation(argv),
+					run: async (argv) => {
+						const agent = this.ctx.get("rlmAgent") as
+							| { runtimeFactory: () => Promise<CreateAgentSessionRuntimeFactory> }
+							| undefined;
+						// The supervisor hosts no sessions and its composition leaves the agent row out.
+						const isWorker = !!process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER;
+						if (isWorker && !agent?.runtimeFactory) throw new Error("the agent row is not mounted");
+						const [{ runRlmDaemonProcess }, { parseArgs }, { runtimeConfigFromLine }] = await Promise.all([
+							import("../../coding-agent/src/modes/daemon/rlm-daemon-client.js"),
+							import("../../coding-agent/src/cli/args.js"),
+							import("../../coding-agent/src/cli/runtime-args.js"),
+						]);
+						const rest = withoutDaemonFlags(argv);
+						const cwd = this.config.cwd ?? process.cwd();
+						const defaultSessionConfig = await runtimeConfigFromLine(parseArgs(rest), cwd, "interactive", undefined as never);
+						await runRlmDaemonProcess({
+							argv,
+							createRuntime: isWorker ? await agent!.runtimeFactory() : (undefined as never),
+							defaultSessionConfig: defaultSessionConfig as never,
+						});
+						return 0;
+					},
+				}),
 				this.register({
 					id: "print",
 					priority: 20,
@@ -325,6 +358,30 @@ export class RlmModesService extends Service {
 		}
 		return null;
 	}
+}
+
+function isDaemonInvocation(argv: readonly string[]): boolean {
+	const index = argv.indexOf("--mode");
+	return (index >= 0 && argv[index + 1] === "daemon") || argv.includes("--mode=daemon");
+}
+
+/** The daemon's own flags, which the session-config parser does not know. */
+function withoutDaemonFlags(argv: readonly string[]): string[] {
+	const out: string[] = [];
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i];
+		if (arg === "--mode" && argv[i + 1] === "daemon") {
+			i++;
+			continue;
+		}
+		if (arg === "--daemon-socket") {
+			i++;
+			continue;
+		}
+		if (arg === "--mode=daemon" || arg.startsWith("--daemon-socket=")) continue;
+		out.push(arg);
+	}
+	return out;
 }
 
 function readStdin(): Promise<string> {

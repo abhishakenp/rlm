@@ -1,7 +1,8 @@
-import type { AgentRosterEntry } from "./agent-roster.js";
-import { sessionSummaryFromRosterEntry } from "./agent-roster.js";
-import type { DaemonHello, DaemonOutbound, DaemonTransportClient } from "./in-process-daemon.js";
-import type { SessionSummary } from "./session-summary.js";
+import type { AgentRosterEntry } from "../daemon/agent-roster.js";
+import { sessionSummaryFromRosterEntry } from "../daemon/agent-roster.js";
+import type { DaemonHello, DaemonTransportClient } from "../daemon/daemon-client.js";
+import type { DaemonOutbound } from "../daemon/daemon-protocol.js";
+import type { SessionSummary } from "../daemon/daemon-session-list.js";
 
 export const STALE_ROSTER_DAEMON_MESSAGE =
 	"Daemon is stale: it does not advertise the agent_roster capability; restart the daemon";

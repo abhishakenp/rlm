@@ -36,6 +36,8 @@ import { ensureTool } from "../../utils/tools-manager.js";
 import type { AgentConnectionHeartbeat, AgentConnectionSavedSessionInfo } from "../agent-connection/types.js";
 // rlm: the agents view talks to in-process sessions through a stand-in with
 // the daemon client's exact surface, so the view below is prime-agent's own.
+// rlm: one transport for both hosts — prime-agent's daemon, or this process's
+// own sessions under an `inprocess:` key. See view-transport.ts.
 import {
 	collectDaemonClientEnv,
 	DaemonAgentConnection,
@@ -54,13 +56,13 @@ import {
 	listDaemonHeartbeats,
 	listDaemonSavedSessions,
 	renameDaemonSavedSession,
-} from "./in-process-daemon.js";
+} from "./view-transport.js";
 import { resolveAttachModelFallbackMessage, type SessionSummary } from "./session-summary.js";
 import { formatTokenCount } from "../interactive/agent-activity.js";
 import { CustomEditor } from "../interactive/components/custom-editor.js";
 import { keyText } from "../interactive/components/keybinding-hints.js";
 import { BrandSplashHeader, InteractiveMode } from "../interactive/interactive-mode.js";
-import type { InteractiveModeUiServices } from "../interactive/interactive-mode-services.js";
+import type { InteractiveModeLocalSessionHost, InteractiveModeUiServices } from "../interactive/interactive-mode-services.js";
 import { ClientPromptStashStore } from "../interactive/prompt-stash-state.js";
 import {
 	getEditorTheme,
@@ -718,7 +720,7 @@ async function runAgentsViewLoop(
 			}
 			// rlm: an in-process session binds its extensions to this chat's UI
 			// through its own local host, where the daemon bound them remotely.
-			const localSessionHost = opened.connection.localSessionHost;
+			const localSessionHost = (opened.connection as { localSessionHost?: InteractiveModeLocalSessionHost }).localSessionHost;
 			const uiServices = localSessionHost
 				? localSessionHost.createUiServices()
 				: await resolveAgentsViewSessionUiServices(options, opened.summary);

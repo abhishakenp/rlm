@@ -55,6 +55,7 @@ import {
 	surface,
 	takeAgentsViewSeed,
 } from "../../rlm-host/src/surface.ts";
+import type { AgentSessionServices } from "../../coding-agent/src/core/agent-session-services.js";
 
 export interface RlmRendererConfig {
 	cwd?: string;
@@ -76,6 +77,12 @@ export interface RlmRendererStartOptions {
 	openAgentsView?: boolean;
 	/** The rest of the command line (--model, --thinking, --tools, …) as a runtime config. */
 	sessionConfig?: Record<string, unknown>;
+	/**
+	 * Attach to prime-agent's daemon instead of hosting the sessions in this
+	 * process. Opt-in while it settles: `RLM_DAEMON=1` in the environment.
+	 */
+	daemon?: boolean;
+	cwd?: string;
 }
 
 export class RlmRendererService extends Service {
@@ -311,6 +318,15 @@ export class RlmRendererService extends Service {
 			throw new Error("rlm-tui-renderer: rlmAgent.createRuntime not available");
 		}
 
+		// prime-agent's interactive flow: this process is a client, and the session
+		// lives in a resident worker under the daemon supervisor, so closing the chat
+		// detaches instead of ending it. The in-process path below remains for when
+		// the daemon cannot be brought up.
+		if (opts.daemon ?? process.env.RLM_DAEMON === "1") {
+			const attached = await this.startDaemonClient(opts);
+			if (attached) return attached;
+		}
+
 		// Check for active provider that wants to own rendering.
 		const tui = this.getTui();
 		const active = tui?.getActiveProvider?.();
@@ -436,6 +452,96 @@ export class RlmRendererService extends Service {
 		surface().interactive.surfaceForwarding = false;
 
 		return result as InteractiveModeRunResult;
+	}
+
+	/**
+	 * Run the chat as a daemon client. Undefined when the daemon could not be made
+	 * ready, so the caller can host the session in-process instead; once attached,
+	 * failures propagate like any other.
+	 */
+	private async startDaemonClient(opts: RlmRendererStartOptions): Promise<InteractiveModeRunResult | undefined> {
+		const agent = this.ctx.get("rlmAgent") as {
+			createServices: (options: { cwd: string }) => Promise<AgentSessionServices>;
+		};
+		const [{ ensureInteractiveDaemonRunning }, { defaultDaemonSocketPath }, client, services, { SessionManager }] =
+			await Promise.all([
+				import("../../coding-agent/src/cli/daemon-launch.js"),
+				import("../../coding-agent/src/modes/daemon/daemon-socket.js"),
+				import("../../coding-agent/src/modes/daemon/rlm-daemon-client.js"),
+				import("../../coding-agent/src/modes/interactive/interactive-mode-services.js"),
+				import("../../coding-agent/src/core/session-manager.js"),
+			]);
+		const socketPath = defaultDaemonSocketPath();
+		try {
+			await ensureInteractiveDaemonRunning(socketPath);
+		} catch (error) {
+			this.ctx.logger?.warn(
+				`rlm-tui-renderer: daemon unavailable, hosting sessions in-process: ${(error as Error)?.message ?? error}`,
+			);
+			return undefined;
+		}
+		const cwd = opts.cwd ?? opts.sessionManager?.getCwd() ?? process.cwd();
+		const clientServices = await agent.createServices({ cwd });
+		const sessionManager = opts.sessionManager ?? SessionManager.inMemory(cwd);
+		initTheme(clientServices.settingsManager.getTheme(), true);
+		await preloadCodeHighlighter();
+		const uiServices = services.createInteractiveModeUiServicesFromServices({ services: clientServices, sessionManager });
+		let daemonActiveSessionId: string | undefined;
+		surface().interactive.view ??= opts.openAgentsView ? "agents" : "chat";
+		surface().beforeExec = (plan) => {
+			const live = surface().interactive;
+			plan.resume.view = live.view;
+			if (live.view === "agents") {
+				const state = captureAgentsViewState();
+				if (state) plan.resume.agentsView = state;
+			}
+			// The session lives in a daemon worker and outlives this process: the next
+			// image reattaches to it instead of opening a new one.
+			if (daemonActiveSessionId) plan.resume.daemonActiveSessionId = daemonActiveSessionId;
+		};
+		this.running = true;
+		try {
+			await client.runRlmDaemonInteractive({
+				socketPath,
+				sessionManager: opts.sessionManager,
+				openAgentsView: opts.openAgentsView,
+				config: { cwd, ...(opts.sessionConfig ?? {}), executionMode: "interactive" } as never,
+				cwd,
+				uiServices,
+				createUiServicesForSession: async (summary) => {
+					const attached = client.createSessionManagerForActiveDaemonSummary(summary, cwd);
+					const attachedServices = await agent.createServices({ cwd: attached.getCwd() });
+					return services.createInteractiveModeUiServicesFromServices({
+						services: attachedServices,
+						sessionManager: attached,
+					});
+				},
+				initialMessage: opts.initialMessage,
+				initialMessages: opts.initialMessages,
+				verbose: opts.verbose,
+				// The same Surface bookkeeping as the in-process path: whichever chat or
+				// agents view is on screen, and — for an execve in place — which daemon
+				// session to reattach to, so the next image resumes the same live session.
+				onInteractiveMode: (mode) => {
+					surface().interactive.instance = mode;
+					surface().interactive.view = "chat";
+				},
+				onAgentsView: (view) => {
+					const live = surface().interactive;
+					live.view = "agents";
+					live.agentsView = view as never;
+				},
+				initialAgentsViewState: takeAgentsViewSeed() as never,
+				activeSessionId: (surface().resumed?.daemonActiveSessionId as string | undefined) ?? undefined,
+				onAttached: (activeSessionId) => {
+					daemonActiveSessionId = activeSessionId;
+				},
+			});
+		} finally {
+			this.running = false;
+			this.instance = undefined;
+		}
+		return { type: "agents_view", source: {} } as InteractiveModeRunResult;
 	}
 
 	/**

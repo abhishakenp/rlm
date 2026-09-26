@@ -40,6 +40,13 @@
 # First row of all: everything after it can be explained from the log, and a
 # failure during boot is exactly the one you cannot reproduce on demand.
 
+# ─── Daemon processes ────────────────────────────────────────────────────────
+#
+# prime-agent's daemon (RLM_DAEMON=1) runs this same composition in its
+# supervisor and in every session worker. Each boot of the whole file costs
+# ~160 MB, and neither role uses all of it: rows below carry `disabled:` for the
+# roles that do not need them, evaluated per process.
+#
 - id: log
   name: './packages/rlm-log/src/index.ts'
   config:
@@ -144,6 +151,9 @@
 
 - id: context
   name: './packages/rlm-context/src/index.ts'
+  # daemon roles: see "Daemon processes" above. A worker hosts sessions and needs no terminal rows;
+  # the supervisor routes and hosts nothing, so it skips the agent stack too.
+  disabled: !!js '(process.argv.includes("--mode") && process.argv.includes("daemon") && !process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER)'
   config:
     projectRoot: .
 
@@ -156,9 +166,15 @@
 # cell its `tui.*` handle.
 - id: tui
   name: './packages/rlm-tui/src/index.ts'
+  # daemon roles: see "Daemon processes" above. A worker hosts sessions and needs no terminal rows;
+  # the supervisor routes and hosts nothing, so it skips the agent stack too.
+  disabled: !!js 'Boolean(process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER) || (process.argv.includes("--mode") && process.argv.includes("daemon") && !process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER)'
 
 - id: prompt
   name: './packages/rlm-prompt/src/index.ts'
+  # daemon roles: see "Daemon processes" above. A worker hosts sessions and needs no terminal rows;
+  # the supervisor routes and hosts nothing, so it skips the agent stack too.
+  disabled: !!js '(process.argv.includes("--mode") && process.argv.includes("daemon") && !process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER)'
 
 # ─── Self-extension ──────────────────────────────────────────────────────────
 #
@@ -188,24 +204,39 @@
 
 - id: session
   name: './packages/rlm-session/src/index.ts'
+  # daemon roles: see "Daemon processes" above. A worker hosts sessions and needs no terminal rows;
+  # the supervisor routes and hosts nothing, so it skips the agent stack too.
+  disabled: !!js '(process.argv.includes("--mode") && process.argv.includes("daemon") && !process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER)'
 
 - id: tools
   name: './packages/rlm-tools/src/index.ts'
+  # daemon roles: see "Daemon processes" above. A worker hosts sessions and needs no terminal rows;
+  # the supervisor routes and hosts nothing, so it skips the agent stack too.
+  disabled: !!js '(process.argv.includes("--mode") && process.argv.includes("daemon") && !process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER)'
   config:
     timeout: 60000
     maxOutputChars: 65536
 
 - id: refine
   name: './packages/rlm-refine/src/index.ts'
+  # daemon roles: see "Daemon processes" above. A worker hosts sessions and needs no terminal rows;
+  # the supervisor routes and hosts nothing, so it skips the agent stack too.
+  disabled: !!js '(process.argv.includes("--mode") && process.argv.includes("daemon") && !process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER)'
 
 - id: code
   name: './packages/rlm-code/src/index.ts'
+  # daemon roles: see "Daemon processes" above. A worker hosts sessions and needs no terminal rows;
+  # the supervisor routes and hosts nothing, so it skips the agent stack too.
+  disabled: !!js '(process.argv.includes("--mode") && process.argv.includes("daemon") && !process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER)'
   config:
     timeout: 60000
     maxOutputChars: 65536
 
 - id: workflow
   name: './packages/rlm-workflow/src/index.ts'
+  # daemon roles: see "Daemon processes" above. A worker hosts sessions and needs no terminal rows;
+  # the supervisor routes and hosts nothing, so it skips the agent stack too.
+  disabled: !!js '(process.argv.includes("--mode") && process.argv.includes("daemon") && !process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER)'
   config:
     workflowsDir: ~/.rlm/agent/workflows
 
@@ -234,6 +265,9 @@
 # boot for whichever loses the race.
 - id: integration
   name: './packages/rlm-integration/src/index.ts'
+  # daemon roles: see "Daemon processes" above. A worker hosts sessions and needs no terminal rows;
+  # the supervisor routes and hosts nothing, so it skips the agent stack too.
+  disabled: !!js 'Boolean(process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER)'
   config:
     port: 20130
     # `loopback`, not `localhost`. `localhost` is a name with two addresses
@@ -276,12 +310,18 @@
 
 - id: learn
   name: './packages/rlm-learn/src/index.ts'
+  # daemon roles: see "Daemon processes" above. A worker hosts sessions and needs no terminal rows;
+  # the supervisor routes and hosts nothing, so it skips the agent stack too.
+  disabled: !!js '(process.argv.includes("--mode") && process.argv.includes("daemon") && !process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER)'
   config:
     reflectInterval: 60000
     maxLearningsBeforeReflect: 10
 
 - id: pixel
   name: './packages/rlm-pixel/src/index.ts'
+  # daemon roles: see "Daemon processes" above. A worker hosts sessions and needs no terminal rows;
+  # the supervisor routes and hosts nothing, so it skips the agent stack too.
+  disabled: !!js 'Boolean(process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER) || (process.argv.includes("--mode") && process.argv.includes("daemon") && !process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER)'
   config:
     cwd: .
     warmOnStart: true
@@ -291,6 +331,20 @@
 # patch reaches the AssistantMessageComponent the TUI actually renders with.
 - id: thinking-steps
   name: './packages/rlm-thinking-steps/src/row.ts'
+  # daemon roles: see "Daemon processes" above. A worker hosts sessions and needs no terminal rows;
+  # the supervisor routes and hosts nothing, so it skips the agent stack too.
+  disabled: !!js '(process.argv.includes("--mode") && process.argv.includes("daemon") && !process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER)'
+
+# Work that outlives its process. Keeps a journal beside every session file
+# (open / turn in progress); a session whose owner died mid-turn continues on
+# its next open, with its interrupted subagents resumed headless; a subagent
+# resumed without a live parent delivers its result to the parent's inbox,
+# reviving the parent if nobody has it open. State is on disk only — see
+# packages/coding-agent/src/core/inflight-journal.ts. RLM_INFLIGHT_AUTORESUME=0
+# keeps the journal but stops automatic resumption.
+- id: inflight
+  name: './packages/rlm-inflight/src/index.ts'
+  disabled: !!js '(process.argv.includes("--mode") && process.argv.includes("daemon") && !process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER)'
 
 # Claude / Codex / Gemini subscriptions, served by CLIProxyAPI (launchd
 # `com.abhi.cliproxyapi`, config ~/.cli-proxy-api/config.yaml) and offered as
@@ -298,6 +352,9 @@
 # subscription with `cliproxyapi -config ~/.cli-proxy-api/config.yaml -claude-login`.
 - id: cliproxy
   name: './packages/rlm-cliproxy/src/index.ts'
+  # daemon roles: see "Daemon processes" above. A worker hosts sessions and needs no terminal rows;
+  # the supervisor routes and hosts nothing, so it skips the agent stack too.
+  disabled: !!js '(process.argv.includes("--mode") && process.argv.includes("daemon") && !process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER)'
   config:
     baseUrl: http://127.0.0.1:8317
     apiKeyFile: ~/.cli-proxy-api/rlm-api-key
@@ -314,6 +371,9 @@
 
 - id: agent
   name: './packages/rlm-agent/src/index.ts'
+  # daemon roles: see "Daemon processes" above. A worker hosts sessions and needs no terminal rows;
+  # the supervisor routes and hosts nothing, so it skips the agent stack too.
+  disabled: !!js '(process.argv.includes("--mode") && process.argv.includes("daemon") && !process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER)'
   config:
 # This row *is* the interactive surface, and it is already gated by being one:
 # everything expensive lives behind `start()`, which only the `interactive`
@@ -325,16 +385,25 @@
 # module to find the plugin object even when the fiber then parks for ever.
 - id: renderer
   name: './packages/rlm-tui-renderer/src/index.ts'
+  # daemon roles: see "Daemon processes" above. A worker hosts sessions and needs no terminal rows;
+  # the supervisor routes and hosts nothing, so it skips the agent stack too.
+  disabled: !!js 'Boolean(process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER) || (process.argv.includes("--mode") && process.argv.includes("daemon") && !process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER)'
   config:
     cwd: .
 
 - id: print
   name: './packages/rlm-print/src/index.ts'
+  # daemon roles: see "Daemon processes" above. A worker hosts sessions and needs no terminal rows;
+  # the supervisor routes and hosts nothing, so it skips the agent stack too.
+  disabled: !!js 'Boolean(process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER) || (process.argv.includes("--mode") && process.argv.includes("daemon") && !process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER)'
   config:
     cwd: .
 
 - id: sdk
   name: './packages/rlm-sdk/src/index.ts'
+  # daemon roles: see "Daemon processes" above. A worker hosts sessions and needs no terminal rows;
+  # the supervisor routes and hosts nothing, so it skips the agent stack too.
+  disabled: !!js 'Boolean(process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER) || (process.argv.includes("--mode") && process.argv.includes("daemon") && !process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER)'
   config:
     maxDepth: 10
     defaultModel: auto/best-free
