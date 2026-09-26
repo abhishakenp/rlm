@@ -5,8 +5,15 @@
   "license": "MIT",
   "type": "module",
   "main": "src/row.ts",
-  "exports": { ".": "./src/row.ts" },
+  "exports": {
+    ".": "./src/row.ts"
+  },
   "scripts": {
     "test": "node --import tsx --test test/thinking-steps.test.ts test/summarizer-challenger.test.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "workspace:*",
+    "@earendil-works/pi-coding-agent": "workspace:*",
+    "@earendil-works/pi-tui": "workspace:*"
   }
 }

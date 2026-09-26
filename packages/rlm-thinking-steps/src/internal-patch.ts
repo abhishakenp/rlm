@@ -1,7 +1,7 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { AssistantMessage, ThinkingContent } from "@mariozechner/pi-ai";
-import { Markdown, Spacer, Text } from "@mariozechner/pi-tui";
+import type { AssistantMessage, ThinkingContent } from "@earendil-works/pi-ai";
+import { Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { decrementPatchRefCount, getActiveThinkingState, getPatchCleanup, setThinkingStepsMode, getPatchInstallPromise, incrementPatchRefCount, resolveThinkingMessageScope, setPatchCleanup, setPatchInstallPromise } from "./state.js";
 import { ThinkingStepsComponent } from "./render.js";
 import type { ThinkingSourceBlock, ThinkingThemeLike } from "./types.js";
@@ -107,7 +107,7 @@ function getPackageRoot(packageName: string): string {
 }
 
 export function resolvePiCodingAgentInternalModuleUrl(relativePath: string): string {
-	const packageRoot = getPackageRoot("@mariozechner/pi-coding-agent");
+	const packageRoot = getPackageRoot("@earendil-works/pi-coding-agent");
 	return pathToFileURL(join(packageRoot, relativePath)).href;
 }
 
@@ -116,7 +116,7 @@ export async function importPiCodingAgentInternal<TModule>(relativePath: string)
 	try {
 		return (await import(moduleUrl)) as TModule;
 	} catch (error) {
-		throw new Error(`Thinking Steps patch failed: could not import internal module "@mariozechner/pi-coding-agent/${relativePath}". Pi internals may have moved.`, {
+		throw new Error(`Thinking Steps patch failed: could not import internal module "@earendil-works/pi-coding-agent/${relativePath}". Pi internals may have moved.`, {
 			cause: error,
 		});
 	}

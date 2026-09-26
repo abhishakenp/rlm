@@ -29,7 +29,7 @@ import {
 } from "../src/state.js";
 import type { ThinkingThemeLike } from "../src/types.js";
 import thinkingStepsExtension from "../src/index.js";
-import { Key } from "@mariozechner/pi-tui";
+import { Key } from "@earendil-works/pi-tui";
 
 function stripAnsi(text: string): string {
 	return text.replace(/\x1b\[[0-9;]*m/g, "");
@@ -318,7 +318,7 @@ describe("patch guards", () => {
 	it("reports a specific compatibility error when an internal module cannot be imported", async () => {
 		await assert.rejects(
 			() => importPiCodingAgentInternal("src/modes/interactive/missing.ts"),
-			/could not import internal module "@mariozechner\/pi-coding-agent\/src\/modes\/interactive\/missing\.ts"/,
+			/could not import internal module "@earendil-works\/pi-coding-agent\/src\/modes\/interactive\/missing\.ts"/,
 		);
 	});
 });
