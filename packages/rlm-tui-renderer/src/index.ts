@@ -451,6 +451,26 @@ export class RlmRendererService extends Service {
 		this.sessionEventUnsub = undefined;
 		surface().interactive.surfaceForwarding = false;
 
+		// /daemon: the in-process loop released the session (idle, kernel
+		// variables handed over on disk); reopen the same session file in a daemon
+		// worker and keep chatting — same process, same terminal, no restart.
+		const promotedFile = result?.type === "promote_to_daemon" ? result.source.sessionFile : undefined;
+		if (promotedFile) {
+			const next = {
+				...opts,
+				openAgentsView: false,
+				initialMessage: undefined,
+				initialMessages: undefined,
+				sessionManager: SessionManager.open(promotedFile, sessionDir),
+			};
+			process.env.RLM_DAEMON = "1";
+			const promoted = await this.startDaemonClient({ ...next, daemon: true });
+			if (promoted) return promoted;
+			// The daemon could not be brought up: stay in-process on the same session.
+			delete process.env.RLM_DAEMON;
+			return this.start({ ...next, daemon: false });
+		}
+
 		return result as InteractiveModeRunResult;
 	}
 

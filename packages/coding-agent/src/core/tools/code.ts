@@ -293,6 +293,8 @@ export class CodeKernelProvisioner {
 		if (mine) {
 			for (const [name, value] of Object.entries(mine)) (this.context as any)[name] = value;
 			delete handover![this.options!.sessionId!];
+		} else {
+			restoreKernelHandoverFile(this.context, this.options?.snapshotDir, this.options?.sessionId);
 		}
 		liveKernels().add(new WeakRef(this));
 		// rlm-hmr's after-patch dispatch (bun-reload.ts registerLive) reaches only
@@ -887,6 +889,35 @@ const endedKernels = (): WeakSet<CodeKernelProvisioner> =>
 	((globalThis as any).__rlmCodeKernelsEnded ??= new WeakSet<CodeKernelProvisioner>());
 
 /** Every kernel this process has built, across evaluations of this module. */
+/**
+ * Variables handed over by another process (rlm /daemon promotion,
+ * in-process-agents-session.ts): `<snapshotDir>/kernel-handover.json`, bun:jsc
+ * serialized per name. Read once and deleted, so a later context starts clean.
+ */
+function restoreKernelHandoverFile(context: vm.Context, snapshotDir?: string, sessionId?: string): void {
+	if (!snapshotDir || !sessionId) return;
+	const file = path.join(snapshotDir, "kernel-handover.json");
+	let raw: string;
+	try {
+		raw = fs.readFileSync(file, "utf8");
+	} catch {
+		return;
+	}
+	try {
+		fs.unlinkSync(file);
+	} catch {}
+	try {
+		const parsed = JSON.parse(raw) as { sessionId?: string; vars?: Record<string, string> };
+		if (parsed.sessionId !== sessionId || !parsed.vars) return;
+		const { deserialize } = require("bun:jsc") as { deserialize: (bytes: Uint8Array) => unknown };
+		for (const [name, b64] of Object.entries(parsed.vars)) {
+			try {
+				(context as any)[name] = deserialize(Buffer.from(b64, "base64"));
+			} catch {}
+		}
+	} catch {}
+}
+
 const liveKernels = (): Set<WeakRef<CodeKernelProvisioner>> =>
 	((globalThis as any).__rlmCodeKernels ??= new Set<WeakRef<CodeKernelProvisioner>>());
 

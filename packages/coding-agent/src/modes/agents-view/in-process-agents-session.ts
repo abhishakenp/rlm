@@ -131,6 +131,24 @@ export async function runInProcessAgentsSession(
 		throw error;
 	}
 
+	if (interactiveResult.type === "promote_to_daemon") {
+		// /daemon: the host reopens this session in a daemon worker. Let the tree
+		// finish what it is doing (no turn cut in half), hand the kernel's
+		// variables over through the session's artifact dir, then release every
+		// runtime so the worker can take the session file.
+		const hosted = (() => {
+			try {
+				return host.findHosted(interactiveResult.source.activeSessionId ?? rootActiveSessionId);
+			} catch {
+				return host.findHosted(rootActiveSessionId);
+			}
+		})();
+		await waitForTreeIdle(hosted.runtime, PROMOTE_IDLE_WAIT_MS);
+		await handOverKernelVariables(hosted.runtime);
+		await host.disposeAll();
+		return interactiveResult;
+	}
+
 	const summary = host.summaryFor(host.findHosted(rootActiveSessionId));
 	const returnedSummary: SessionSummary = {
 		...summary,
@@ -150,6 +168,41 @@ export async function runInProcessAgentsSession(
 }
 
 /** Leave the alternate screen, show the cursor, and hand input back cooked. */
+const PROMOTE_IDLE_WAIT_MS = 120_000;
+
+/** Wait (bounded) until the session and its subagents are idle. */
+async function waitForTreeIdle(runtime: AgentSessionRuntime, timeoutMs: number): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		const session = runtime.session as { isStreaming?: boolean; hasRunningRlmChildren?: () => boolean };
+		if (!session.isStreaming && !session.hasRunningRlmChildren?.()) return;
+		await new Promise((resolveDelay) => setTimeout(resolveDelay, 200));
+	}
+}
+
+/**
+ * The code kernel's variables for this session, serialized (bun:jsc) into the
+ * session's artifact dir as kernel-handover.json. The daemon worker's kernel
+ * reads and deletes it the first time it creates its context (tools/code.ts).
+ */
+async function handOverKernelVariables(runtime: AgentSessionRuntime): Promise<void> {
+	try {
+		const { snapshotKernels } = await import("../../../../rlm-host/src/shell.ts");
+		const sessionId = runtime.session.sessionId;
+		const vars = (await snapshotKernels())[sessionId];
+		const dir = runtime.session.sessionManager.getSessionArtifactDir();
+		if (!vars || !Object.keys(vars).length || !dir) return;
+		const { mkdirSync, writeFileSync, renameSync } = await import("node:fs");
+		const { join } = await import("node:path");
+		mkdirSync(dir, { recursive: true });
+		const path = join(dir, "kernel-handover.json");
+		writeFileSync(`${path}.tmp`, JSON.stringify({ v: 1, sessionId, vars }));
+		renameSync(`${path}.tmp`, path);
+	} catch {
+		// Losing kernel variables is recoverable (the session history is intact).
+	}
+}
+
 export function restoreTerminal(): void {
 	try {
 		if (process.stdin.isTTY && process.stdin.setRawMode) process.stdin.setRawMode(false);

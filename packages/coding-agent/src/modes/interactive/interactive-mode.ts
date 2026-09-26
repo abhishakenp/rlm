@@ -851,7 +851,11 @@ export interface InteractiveModeOptions {
 }
 
 export interface InteractiveModeRunResult {
-	type: "agents_view" | "scoped_agents_view";
+	/**
+	 * `promote_to_daemon` (rlm, /daemon): leave this in-process chat so the host
+	 * can reopen the same session in a daemon worker — no restart, same terminal.
+	 */
+	type: "agents_view" | "scoped_agents_view" | "promote_to_daemon";
 	source: Pick<AgentConnectionState, "activeSessionId" | "sessionFile" | "sessionId" | "sessionName" | "cwd">;
 }
 
@@ -5411,6 +5415,11 @@ export class InteractiveMode {
 					await this.handleReloadCommand();
 					return;
 				}
+				if (commandName === "daemon" && !commandArgs) {
+					this.editor.setText("");
+					await this.requestDaemonPromotion();
+					return;
+				}
 				if (commandName === "update") {
 					this.editor.setText("");
 					const updateArgs = parseCommandArgs(commandArgs);
@@ -7568,6 +7577,19 @@ export class InteractiveMode {
 			return;
 		}
 		await this.returnToAgentsView();
+	}
+
+	/**
+	 * /daemon: hand this session to the daemon. Only an in-process chat (it has a
+	 * local session host) can be promoted; a daemon chat already lives there.
+	 */
+	private async requestDaemonPromotion(): Promise<void> {
+		if (!this.localSessionHost || !this.options.returnToAgentsView) {
+			this.showStatus("This session already runs in the daemon.");
+			return;
+		}
+		this.showStatus("Moving this session into the daemon…");
+		await this.returnToAgentsView("promote_to_daemon");
 	}
 
 	private async returnToAgentsView(request: InteractiveModeRunResult["type"] = "agents_view"): Promise<void> {
