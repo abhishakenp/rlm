@@ -218,6 +218,57 @@ export async function createDaemonClientConnection(options: {
 	}
 }
 
+/**
+ * One-shot print through the daemon (upstream main.ts print branch): a
+ * client-owned worker runs the prompt; normal completion removes the worker.
+ * Opt-in with the rest of the daemon (RLM_DAEMON=1).
+ */
+export async function runRlmDaemonPrint(options: {
+	config: AgentSessionRuntimeConfig;
+	cwd: string;
+	mode: "text" | "json";
+	initialMessage?: string;
+	messages?: string[];
+	sessionManager?: SessionManager;
+	continueRecent?: boolean;
+	noSession?: boolean;
+	socketPath?: string;
+}): Promise<number> {
+	const socketPath = options.socketPath ?? defaultDaemonSocketPath();
+	phase("print:start");
+	await ensureInteractiveDaemonRunning(socketPath);
+	phase("daemon:ready");
+	const { connection, summary } = await createDaemonClientConnection({
+		socketPath,
+		config: {
+			cwd: options.cwd,
+			...options.config,
+			executionMode: options.mode === "json" ? "json" : "print",
+		} as AgentSessionRuntimeConfig,
+		sessionPath: options.noSession ? undefined : options.sessionManager?.getSessionFile(),
+		continueRecent: options.continueRecent,
+		clientOwned: true,
+		noSession: options.noSession,
+	});
+	const errors = (summary.diagnostics ?? []).filter((diagnostic) => diagnostic.type === "error");
+	for (const diagnostic of summary.diagnostics ?? []) process.stderr.write(`${diagnostic.message}\n`);
+	if (errors.length > 0) {
+		await connection.dispose();
+		return 1;
+	}
+	if (!summary.model) {
+		process.stderr.write(`${summary.modelFallbackMessage ?? "No models are available."}\n`);
+		await connection.dispose();
+		return 1;
+	}
+	const { runPrintModeWithConnection } = await import("../print-mode.js");
+	return runPrintModeWithConnection(connection, {
+		mode: options.mode,
+		messages: options.messages,
+		initialMessage: options.initialMessage,
+	});
+}
+
 /** RLM_DAEMON_TIMING=1: wall-clock phases of a daemon attach, ms since process start, on stderr. */
 function phase(label: string): void {
 	if (process.env.RLM_DAEMON_TIMING === "1") process.stderr.write(`[rlm-daemon] ${label} ${Math.round(performance.now())}ms\n`);

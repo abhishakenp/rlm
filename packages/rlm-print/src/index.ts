@@ -71,6 +71,20 @@ export class RlmPrintService extends Service {
 		// the modes row; without one the session row's fresh session is used.
 		// `sessionConfig` is the rest of the command line (--model, --thinking, …).
 		const { sessionManager, sessionConfig, ...printOptions } = options;
+		// Daemon mode (opt-in, RLM_DAEMON=1): upstream runs print in a
+		// client-owned worker; the worker is removed when the run completes.
+		if (process.env.RLM_DAEMON === "1") {
+			const { runRlmDaemonPrint } = await import("../../coding-agent/src/modes/daemon/rlm-daemon-client.js");
+			return runRlmDaemonPrint({
+				config: (sessionConfig ?? {}) as never,
+				cwd: (sessionConfig?.cwd as string | undefined) ?? this.config.cwd ?? process.cwd(),
+				mode: printOptions.mode === "json" ? "json" : "text",
+				initialMessage: printOptions.initialMessage,
+				messages: printOptions.messages,
+				sessionManager,
+				socketPath: process.env.RLM_DAEMON_SOCKET || undefined,
+			});
+		}
 		this.runtime = await rlmAgent.createRuntime({
 			...(sessionManager ? { sessionManager } : {}),
 			...(sessionConfig ? { sessionConfig } : {}),
