@@ -124,6 +124,7 @@ export const createInflightExtension =
 	(pi: any): void => {
 		const spawner = options.spawner ?? spawnResume;
 		let file: string | undefined;
+		let manager: any;
 		let depth = 0;
 		let parent: string | undefined;
 		/** This session's results go to its parent's inbox, not through a live parent's memory. */
@@ -150,6 +151,7 @@ export const createInflightExtension =
 
 		pi.on("session_start", (_event: any, ctx: any) => {
 			const sm = ctx?.sessionManager;
+			manager = sm;
 			file = sm?.getSessionFile?.();
 			if (!file) return;
 			const header = sm.getHeader?.() ?? {};
@@ -193,7 +195,31 @@ export const createInflightExtension =
 
 		pi.on("agent_start", () => {
 			idle = false;
+			// A brand-new session is written to disk only after its first reply
+			// (session-manager keeps abandoned drafts off disk). A turn that is
+			// actually running is not a draft: put its prompt on disk now, so a
+			// crash before the first reply still leaves something to resume.
+			try {
+				manager?.flushNow?.();
+			} catch {
+				// Journal below still records the turn; the flush retries next turn.
+			}
 			if (file) writeInflight(file, { open: true, busy: true, depth, parentSession: parent });
+		});
+
+		// The prompt itself is appended at its own message_end, after
+		// agent_start — and after extensions have seen that event (AgentSession
+		// emits to extensions, then appends). So flush on the next macrotask,
+		// once the append has happened, or the file holds everything but it.
+		pi.on("message_end", (event: any) => {
+			if (event?.message?.role !== "user") return;
+			setTimeout(() => {
+				try {
+					manager?.flushNow?.();
+				} catch {
+					// Retried on the next event; the journal still marks the turn busy.
+				}
+			}, 0);
 		});
 
 		pi.on("agent_end", (event: any) => {

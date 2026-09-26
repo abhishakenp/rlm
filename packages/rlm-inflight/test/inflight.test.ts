@@ -9,7 +9,7 @@ import {
 	readInflight,
 	recoverLockPath,
 } from "../../coding-agent/src/core/inflight-journal.ts";
-import { getSessionArtifactPathForFile } from "../../coding-agent/src/core/session-manager.ts";
+import { getSessionArtifactPathForFile, SessionManager } from "../../coding-agent/src/core/session-manager.ts";
 import { createInflightExtension, finalAnswer, resumeEnv, SPAWNED_ENV } from "../src/index.ts";
 
 const DEAD = 2 ** 22 + 11;
@@ -207,5 +207,29 @@ describe("rlm-inflight", () => {
 		expect(env.KEEP).toBe("k");
 		expect(env[SPAWNED_ENV]).toBe("/s/x.jsonl");
 		expect(finalAnswer([assistant("a"), { role: "user", content: "q" }, assistant("  last ")])).toBe("last");
+	});
+	it("puts a brand-new session's prompt on disk when its first turn starts", async () => {
+		// session-manager keeps a session off disk until its first reply; a
+		// crash during that first turn used to lose the prompt entirely.
+		const manager = SessionManager.create(join(dir, ".."), dir);
+		const file = manager.getSessionFile()!;
+		const handlers = new Map<string, (e: any, ctx: any) => void>();
+		createInflightExtension({ spawner: () => {} })({
+			on: (event: string, h: any) => handlers.set(event, h),
+			sendMessage: () => {},
+		});
+		const ctx = { sessionManager: manager };
+		handlers.get("session_start")?.({ type: "session_start" }, ctx);
+		handlers.get("agent_start")?.({ type: "agent_start" }, ctx);
+		// As in AgentSession: extensions see the prompt's message_end first, then
+		// it is appended to the session.
+		const prompt = { role: "user", content: "first prompt", timestamp: 1 } as const;
+		handlers.get("message_end")?.({ type: "message_end", message: prompt }, ctx);
+		manager.appendMessage(prompt);
+		expect(existsSync(file)).toBe(true);
+		await new Promise((r) => setTimeout(r, 5));
+		const lines = require("node:fs").readFileSync(file, "utf8").trim().split("\n").map((l: string) => JSON.parse(l));
+		expect(lines.some((e: any) => e.type === "message" && e.message.role === "user")).toBe(true);
+		expect(readInflight(file)?.busy).toBe(true);
 	});
 });
