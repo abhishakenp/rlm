@@ -18,7 +18,7 @@
   },
   "scripts": {
     "dev": "node --loader ts-node/esm src/server.ts",
-    "test": "node test/client.test.js"
+    "test": "bun test"
   },
   "keywords": [
     "rlm",
