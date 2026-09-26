@@ -215,7 +215,9 @@ describe("daemon command", () => {
 	let consoleErrorMessages: unknown[];
 
 	beforeEach(() => {
-		process.exitCode = undefined;
+		// Bun ignores `process.exitCode = undefined` (the old value stays), so a
+		// test that set 1 would leak into the next one. 0 is "no error" in both.
+		process.exitCode = 0;
 		daemonClientMock.instances.length = 0;
 		daemonClientMock.behavior.promptSucceeds = false;
 		daemonClientMock.behavior.emitStaleAgentEndOnAttach = false;
@@ -233,7 +235,7 @@ describe("daemon command", () => {
 	});
 
 	afterEach(() => {
-		process.exitCode = undefined;
+		process.exitCode = 0;
 		vi.restoreAllMocks();
 	});
 
@@ -401,7 +403,7 @@ describe("daemon command", () => {
 		await expect(handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "--json"])).resolves.toBe(true);
 
 		// No attach-guard error: the machine-readable path prints the summary and exits.
-		expect(process.exitCode).toBeUndefined();
+		expect(process.exitCode ?? 0).toBe(0);
 		expect(consoleErrorMessages).toEqual([]);
 		const client = daemonClientMock.instances.at(-1);
 		expect(client?.requests.some((request) => request.type === "attach")).toBe(false);

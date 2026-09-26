@@ -476,8 +476,9 @@ describe("daemon supervisor resident workers", () => {
 		// A fresh current-binary worker owns the reloaded idle session; the fake pre-roster pid is not adopted.
 		expect(restarted.workerPid).not.toBe(legacyProcess.pid);
 		expect(restarted.isSessionActive).toBe(false);
-		// The seeded user message plus the harness digest injected on resume.
-		expect(restarted.messageCount).toBe(2);
+		// Upstream also injects a harness-digest message on resume; rlm carries
+		// harness state in the system prompt instead, so only the seeded message.
+		expect(restarted.messageCount).toBe(1);
 		await waitForProcessGone(legacyProcess.pid);
 		fakeWorker.close();
 		client.close();
