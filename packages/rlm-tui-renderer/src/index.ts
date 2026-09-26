@@ -97,38 +97,65 @@ function daemonProbe(): DaemonProbe {
 }
 
 /**
- * A chat started before the in-process loop learned to hand itself to the
- * daemon (a process that was already running when this code landed) has no
- * watcher of its own. Hot reload patches classes, not a function that is
- * already mid-await, so the renderer row watches for it instead — only for the
- * first chat, the one that older loop can hand over.
+ * A process that was already running when the daemon became the default has an
+ * in-process loop that predates the handover — hot reload patches classes, not
+ * a function already mid-await, and an old loop may not know how to hand a
+ * session over at all. For it, the renderer row asks the host for an execve in
+ * place (rlm-host shell.ts): same pid and terminal, the draft and kernel
+ * variables carried, and the next image attaches to the daemon because that is
+ * the default now. Only at a quiet moment in a chat, with nothing hosted running.
  */
 function watchLegacyChatForDaemon(): () => void {
 	const timer = setInterval(() => {
 		try {
 			const live = surface().interactive as any;
-			if (!daemonEnabled() || !live.running || live.handoverWatch) return;
-			if (!daemonProbe().available) return;
-			const chat = live.instance as
-				| { canHandOverToDaemon?: () => boolean; handOverToDaemon?: () => boolean; promptStashSessionId?: string }
-				| undefined;
-			const rootSessionId = live.runtime?.session?.sessionId;
-			if (!chat?.canHandOverToDaemon?.() || !rootSessionId || chat.promptStashSessionId !== rootSessionId) return;
+			if (!daemonEnabled() || !live.running || live.handoverWatch || live.legacyHandoverRequested) return;
+			if (live.view === "agents" || !daemonProbe().available) return;
+			const host = (globalThis as any).__rlmHost as { reexec?: (reason: string) => unknown; execing?: boolean } | undefined;
+			if (typeof host?.reexec !== "function" || host.execing) return;
+			const chat = live.instance as { canHandOverToDaemon?: () => boolean } | undefined;
+			if (!chat?.canHandOverToDaemon?.()) return;
 			const hosts = (globalThis as Record<symbol, unknown>)[Symbol.for("rlm.agents-view.in-process-hosts")] as
 				| Map<string, { listHosted(): Array<{ runtime: any }> }>
 				| undefined;
-			for (const host of hosts?.values() ?? []) {
-				for (const { runtime } of host.listHosted()) {
+			for (const hosted of hosts?.values() ?? []) {
+				for (const { runtime } of hosted.listHosted()) {
 					if (runtime.session?.isStreaming || runtime.session?.hasRunningRlmChildren?.()) return;
 				}
 			}
-			chat.handOverToDaemon?.();
+			live.legacyHandoverRequested = true;
+			void host.reexec("the background daemon takes this session over");
 		} catch {
 			// A failed check waits for the next tick.
 		}
 	}, 2000);
 	timer.unref?.();
 	return () => clearInterval(timer);
+}
+
+/**
+ * After an execve in place the old image's kernel variables arrive on the
+ * Surface (`resumed.kernels`, rlm-host). When this image attaches to the daemon
+ * instead of hosting the session, the kernel lives in the worker: leave the
+ * variables where that kernel reads them on first use (tools/code.ts,
+ * kernel-handover.json in the session's artifact dir).
+ */
+function handResumedKernelToWorker(sessionManager: SessionManager | undefined): void {
+	try {
+		const kernels = (surface().resumed as any)?.kernels as Record<string, Record<string, string>> | undefined;
+		const sessionId = sessionManager?.getSessionId?.();
+		const vars = sessionId ? kernels?.[sessionId] : undefined;
+		const dir = sessionManager?.getSessionArtifactDir?.();
+		if (!vars || !Object.keys(vars).length || !dir || !sessionId) return;
+		const { mkdirSync, writeFileSync, renameSync } = require("node:fs") as typeof import("node:fs");
+		const path = `${dir}/kernel-handover.json`;
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(`${path}.tmp`, JSON.stringify({ v: 1, sessionId, vars }));
+		renameSync(`${path}.tmp`, path);
+		delete kernels![sessionId];
+	} catch {
+		// Losing kernel variables is recoverable: the session history is intact.
+	}
 }
 
 export interface RlmRendererConfig {
@@ -575,6 +602,7 @@ export class RlmRendererService extends Service {
 				import("../../coding-agent/src/core/session-manager.js"),
 			]);
 		const socketPath = defaultDaemonSocketPath();
+		handResumedKernelToWorker(opts.sessionManager);
 		try {
 			await ensureInteractiveDaemonRunning(socketPath);
 		} catch (error) {

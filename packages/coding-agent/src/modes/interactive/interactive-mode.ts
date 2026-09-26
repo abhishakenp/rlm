@@ -7576,7 +7576,7 @@ export class InteractiveMode {
 	}
 
 	/** When a key last reached this chat; the daemon handover waits for a quiet terminal. */
-	private lastInputAt = Date.now();
+	private lastInputAt: number | undefined = Date.now();
 
 	/**
 	 * The background daemon takes this in-process chat over on its own — there is
@@ -7594,6 +7594,17 @@ export class InteractiveMode {
 		if (stash?.stash !== undefined || (stash?.queuedStashes?.length ?? 0) > 0) return false;
 		const ui = this.ui as unknown as { focusedComponent?: unknown; overlayStack?: unknown[] };
 		if ((ui.overlayStack?.length ?? 0) > 0 || (ui.focusedComponent && ui.focusedComponent !== this.editor)) return false;
+		// A chat built before this field existed (patched in place by hot reload)
+		// has neither the field nor a listener that sets it: start tracking now and
+		// count the quiet time from this first look.
+		if (this.lastInputAt === undefined) {
+			this.lastInputAt = Date.now();
+			this.ui.addInputListener(() => {
+				this.lastInputAt = Date.now();
+				return undefined;
+			});
+			return false;
+		}
 		return Date.now() - this.lastInputAt >= quietMs;
 	}
 

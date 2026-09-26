@@ -2,7 +2,7 @@
 # Install (or remove) a launchd agent that keeps rlm's daemon supervisor running.
 #
 # Why launchd: the supervisor is what lets sessions outlive their terminal, and
-# rlm-integration's :20130 lives in it (RLM_DAEMON=1). Clients still start a
+# rlm-integration's :20130 lives in it (the daemon is the default). Clients still start a
 # supervisor on demand; this one runs as a hot standby when a client-started
 # supervisor already owns the socket (RLM_DAEMON_STANDBY=1), so KeepAlive never
 # churns — it takes over the moment the lock frees.
