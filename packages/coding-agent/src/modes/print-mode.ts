@@ -102,7 +102,19 @@ async function runPrintModeWithConnectionInternal(
 			}
 		}
 
+		// Phase timings (ms since process start) for a run that stalls: whether it
+		// stopped before the request, or waiting on the model's first event.
+		const phase = (text: string) => {
+			try {
+				(globalThis as any).__rlmLog?.("info", "print", `${text} (${Math.round(performance.now())}ms)`);
+			} catch {}
+		};
+		let sawFirstEvent = false;
 		unsubscribe = connection.subscribe((event) => {
+			if (!sawFirstEvent && event.type === "session_event") {
+				sawFirstEvent = true;
+				phase(`first session event: ${(event.event as { type?: string })?.type ?? "?"}`);
+			}
 			if (mode === "json" && event.type === "session_event") {
 				writeRawStdout(`${JSON.stringify(event.event)}\n`);
 			}
@@ -115,6 +127,7 @@ async function runPrintModeWithConnectionInternal(
 			}
 		});
 		await bindHeadlessExtensions?.();
+		phase("prompt sent");
 
 		if (initialMessage) {
 			await connection.promptAndWait(initialMessage, { images: initialImages });
@@ -124,6 +137,7 @@ async function runPrintModeWithConnectionInternal(
 		}
 
 		const autonomousStatus = await connection.waitForHeadlessCompletion();
+		phase("run complete");
 		if (repeatLoop.answer !== undefined) {
 			// Stopped a run that kept giving the same answer and calling tools.
 			console.error(`[rlm] stopped after ${REPEATED_ANSWER_LIMIT} identical answers in a row`);

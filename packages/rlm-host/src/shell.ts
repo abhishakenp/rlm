@@ -714,7 +714,10 @@ const api: ShellApi = {
 		host.shellHash = hashOf(hostFiles());
 		if (headlessInvocation(process.argv.slice(2))) process.env.RLM_HEADLESS ??= "1";
 		try {
+			// Boot-phase timings (ms since process start), so a run that stalls
+			// before it ever reaches the model says where it stopped.
 			await bootComposition(host);
+			say("info", `boot: composition ready (${Math.round(performance.now())}ms)`);
 			installDeadMan(host);
 			installSelfWatch(host);
 			installExecTriggers(host);
@@ -722,6 +725,7 @@ const api: ShellApi = {
 			snapshotLastGood(host);
 
 			const modes = await waitFor(host.ctx, "rlmModes");
+			say("info", `boot: modes ${modes ? "ready" : "missing"} (${Math.round(performance.now())}ms)`);
 			if (!modes) {
 				die(
 					"the `modes` row never started, so there is no surface to run.\n" +
@@ -763,7 +767,15 @@ const api: ShellApi = {
 		for (const t of host.execTriggers ?? []) unwatchFile(t.path, t.listener);
 		if (host.deadMan) unwatchFile(host.deadMan.path, host.deadMan.listener);
 		host.selfWatch?.close();
-		await Promise.resolve(host.ctx?.fiber?.dispose?.()).catch(() => {});
+		// Bounded: a row whose effect disposer never settles must not keep the
+		// process alive behind a terminal that is already handed back.
+		const deadlineMs = Number(process.env.RLM_EXIT_DEADLINE_MS) > 0 ? Number(process.env.RLM_EXIT_DEADLINE_MS) : 5000;
+		let timedOut = false;
+		await Promise.race([
+			Promise.resolve(host.ctx?.fiber?.dispose?.()).catch(() => {}),
+			new Promise<void>((r) => setTimeout(() => ((timedOut = true), r()), deadlineMs)),
+		]);
+		if (timedOut) say("warn", `exit: composition dispose still pending after ${deadlineMs}ms — exiting anyway`);
 		// Exit explicitly in every mode: provider keep-alive and proxy sockets
 		// outlive the composition and would otherwise hold the terminal (worker M).
 		process.exit(code);
