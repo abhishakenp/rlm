@@ -13,7 +13,7 @@
  * that rlm-delegate reads from, so nothing is ever lost or forgotten.
  */
 
-import { Store, defaultDir, mintId, outstanding } from "/Users/abhi/proj/rlm/packages/rlm-delegate/src/index.ts";
+import { Store, defaultDir, mintId, outstanding } from "../packages/rlm-delegate/src/index.ts";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -205,7 +205,7 @@ export function storePath(options: { storeDir?: string } = {}): string {
 
 type Command = "submit" | "audit" | "status" | "open" | "path" | "help";
 
-function parseArgs(argv: string[]): { cmd: Command; args: string[] } {
+function parseArgs(argv: string[]): { cmd: Command; args: string[]; id?: string } {
 	const raw = argv.slice(2);
 	const [cmd, ...rest] = raw;
 
@@ -216,7 +216,9 @@ function parseArgs(argv: string[]): { cmd: Command; args: string[] } {
 	}
 
 	if (!commands.includes(cmd as Command) && !cmd.startsWith("-")) {
-		return { cmd: "submit", args: raw };
+		const idMatch = raw.find(arg => arg === "--id" || arg.startsWith("--id="));
+		const idValue = idMatch ? (idMatch.startsWith("--id=") ? idMatch.slice(5) : undefined) : undefined;
+		return { cmd: "submit", args: raw, id: idValue };
 	}
 
 	return { cmd: cmd as Command, args: rest };
@@ -289,6 +291,7 @@ async function handleSubmit(args: string[], stdin: string): Promise<number> {
 	// Filter out --proof args and extract proof value
 	const cleanArgs: string[] = [];
 	let proofValue: string | null = null;
+	let idValue: string | undefined;
 	
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
@@ -297,6 +300,11 @@ async function handleSubmit(args: string[], stdin: string): Promise<number> {
 			i++; // skip the proof value
 		} else if (arg.startsWith("--proof=")) {
 			proofValue = arg.replace("--proof=", "");
+		} else if (arg === "--id" && i + 1 < args.length) {
+			idValue = args[i + 1];
+			i++; // skip the id value
+		} else if (arg.startsWith("--id=")) {
+			idValue = arg.replace("--id=", "");
 		} else {
 			cleanArgs.push(arg);
 		}
@@ -329,11 +337,7 @@ async function handleSubmit(args: string[], stdin: string): Promise<number> {
 
 	const title = text.split("\n")[0].slice(0, 120);
 
-	const result = capture({
-		title,
-		prompt: text,
-		proof,
-	});
+	const result = capture({ id: idValue, title, prompt: text, proof });
 
 	if (result.recorded) {
 		console.log(`Captured: ${result.graphId}/${result.taskId}`);
