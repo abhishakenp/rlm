@@ -7,9 +7,13 @@
     "rtk-compact": "./bin/rtk-compact.js"
   },
   "scripts": {
-    "test": "node -e \"console.log('rtk-compact test'); return \""
+    "test": "bun test/test-rtk-compact.js"
   },
-  "keywords": ["rtk", "compact", "transcript"],
+  "keywords": [
+    "rtk",
+    "compact",
+    "transcript"
+  ],
   "author": "RLM Team",
   "license": "MIT"
 }
