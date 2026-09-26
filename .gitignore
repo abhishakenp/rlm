@@ -50,3 +50,4 @@ __pycache__/
 
 # Written by cordis-shell.mjs when a row will not import and the host boots without it.
 *.degraded.yml
+.rlm/context.json
