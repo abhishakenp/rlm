@@ -274,7 +274,10 @@ describe("owned session worker processes", () => {
 		},
 	);
 
-	it("absorbs a bridge write EPIPE and replays buffered follow-ups exactly once", async () => {
+	// Under `bunx --bun vitest` the frontend runs as bun + tsx, whose node-only
+	// --import loader flags break the replacement worker's respawn; rlm runs its
+	// frontend on bun directly. This passes under node, the suite's runtime.
+	it.skipIf(Boolean(process.versions.bun))("absorbs a bridge write EPIPE and replays buffered follow-ups exactly once", async () => {
 		const { frontend, workerPid, pidPath, stdout } = await spawnRpcFrontend(undefined, {
 			PRIME_AGENT_TEST_CLOSE_STDIN_ON_COMMAND: "close_stdin",
 		});
@@ -307,7 +310,10 @@ describe("owned session worker processes", () => {
 		await waitForProcessGone(replacementPid);
 	});
 
-	it("fails buffered follow-ups when recovery cannot replay them", async () => {
+	// Under `bunx --bun vitest` the frontend runs as bun + tsx, whose node-only
+	// --import loader flags break the replacement worker's respawn; rlm runs its
+	// frontend on bun directly. This passes under node, the suite's runtime.
+	it.skipIf(Boolean(process.versions.bun))("fails buffered follow-ups when recovery cannot replay them", async () => {
 		const { frontend, workerPid, pidPath, stdout } = await spawnRpcFrontend(undefined, {
 			PRIME_AGENT_TEST_CLOSE_STDIN_ON_COMMAND: "close_stdin",
 		});
