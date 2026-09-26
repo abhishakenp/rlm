@@ -16,6 +16,8 @@
 #   scripts/install-rlm-daemon.sh --dry-run       # print the plist, change nothing
 #   scripts/install-rlm-daemon.sh --uninstall
 # Test options: --label <label> --agent-dir <dir> --socket <path> --plist-dir <dir>
+#   --no-integration   keep this supervisor off :20130 (RLM_INTEGRATION=0) — for an
+#                      isolated test daemon beside the real one
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,6 +28,7 @@ SOCKET=""
 DRY_RUN=0
 UNINSTALL=0
 NOFILE=65536
+NO_INTEGRATION=0
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -33,6 +36,7 @@ while [ $# -gt 0 ]; do
 		--agent-dir) AGENT_DIR="$2"; shift 2 ;;
 		--socket) SOCKET="$2"; shift 2 ;;
 		--plist-dir) PLIST_DIR="$2"; shift 2 ;;
+		--no-integration) NO_INTEGRATION=1; shift ;;
 		--dry-run) DRY_RUN=1; shift ;;
 		--uninstall) UNINSTALL=1; shift ;;
 		*) echo "unknown option: $1" >&2; exit 2 ;;
@@ -90,6 +94,7 @@ $(env_entry RLM_DAEMON "1")
 $(env_entry RLM_DAEMON_STANDBY "1")
 $(env_entry BUN_CONFIG_MAX_HTTP_REQUESTS "4096")
 $( [ -n "$AGENT_DIR" ] && env_entry RLM_CODING_AGENT_DIR "$AGENT_DIR" )
+$( [ "$NO_INTEGRATION" = 1 ] && env_entry RLM_INTEGRATION "0" )
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

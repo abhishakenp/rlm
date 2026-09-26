@@ -989,7 +989,10 @@ export class DaemonSupervisor {
 		if (process.env.RLM_DAEMON_STANDBY === "1") {
 			for (;;) {
 				try {
-					return await acquireDaemonSocketPathLease(this.socketPath);
+					// One quick attempt per poll, not proper-lockfile's 15 s of retries:
+					// each attempt first breaks a dead holder's lock, so a crashed
+					// supervisor is replaced within a poll instead of the mtime staleness.
+					return await acquireDaemonSocketPathLease(this.socketPath, { retries: 0 });
 				} catch (error) {
 					if (!/already being held/i.test(String((error as Error)?.message ?? error))) throw error;
 					await new Promise((resolveDelay) => setTimeout(resolveDelay, PEER_SUPERVISOR_PROBE_INTERVAL_MS));

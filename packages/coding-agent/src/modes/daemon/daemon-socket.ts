@@ -1,9 +1,11 @@
 import { APP_NAME } from "../../config.js";
-import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
+import { getProcessStartId } from "../../core/session-lease.js";
+import { processIdExists } from "../../utils/child-process.js";
 
 export { normalizeSocketPath } from "../../utils/daemon-socket-path.js";
 
@@ -77,11 +79,64 @@ export function defaultDaemonSocketPath(): string {
 	return join(defaultDaemonSocketDir(), "daemon.sock");
 }
 
-export async function acquireDaemonSocketPathLease(socketPath: string): Promise<DaemonSocketPathLease | undefined> {
+/**
+ * rlm: who holds the socket lock, beside proper-lockfile's lock directory.
+ * proper-lockfile only knows a lock went stale by its mtime (5 s here), so a
+ * supervisor that crashed kept every successor — the launchd standby, a
+ * restarted supervisor, a client's recovery — waiting that long on a lock held
+ * by nobody. With the holder's pid and start id on record, a successor breaks a
+ * dead holder's lock at once instead.
+ */
+const lockOwnerPath = (socketPath: string) => `${socketPath}.lock.owner`;
+
+function writeLockOwner(socketPath: string): void {
+	try {
+		const startId = getProcessStartId(process.pid);
+		writeFileSync(lockOwnerPath(socketPath), JSON.stringify({ pid: process.pid, ...(startId ? { startId } : {}) }), {
+			mode: 0o600,
+		});
+	} catch {
+		// Without the record a successor falls back to the mtime staleness.
+	}
+}
+
+/** True when the lock's recorded holder is gone (or its pid now names another process). */
+export function daemonSocketLockHolderIsDead(socketPath: string): boolean {
+	if (!existsSync(`${socketPath}.lock`)) return false;
+	let owner: { pid?: number; startId?: string };
+	try {
+		owner = JSON.parse(readFileSync(lockOwnerPath(socketPath), "utf8"));
+	} catch {
+		return false;
+	}
+	if (typeof owner.pid !== "number" || owner.pid === process.pid) return false;
+	if (!processIdExists(owner.pid)) return true;
+	if (owner.startId) {
+		const current = getProcessStartId(owner.pid);
+		if (current && current !== owner.startId) return true;
+	}
+	return false;
+}
+
+function breakDeadHolderLock(socketPath: string): void {
+	if (!daemonSocketLockHolderIsDead(socketPath)) return;
+	try {
+		rmSync(`${socketPath}.lock`, { recursive: true, force: true });
+		rmSync(lockOwnerPath(socketPath), { force: true });
+	} catch {
+		// Leave it to proper-lockfile's staleness.
+	}
+}
+
+export async function acquireDaemonSocketPathLease(
+	socketPath: string,
+	options: { retries?: number } = {},
+): Promise<DaemonSocketPathLease | undefined> {
 	ensureDefaultDaemonSocketDir(socketPath);
 	if (process.platform === "win32") {
 		return undefined;
 	}
+	breakDeadHolderLock(socketPath);
 	let lease: DaemonSocketPathLease | undefined;
 	let pendingCompromise: Error | undefined;
 	const releaseLock = await lockfile.lock(socketPath, {
@@ -93,13 +148,19 @@ export async function acquireDaemonSocketPathLease(socketPath: string): Promise<
 			else pendingCompromise = error;
 		},
 		retries: {
-			retries: 600,
+			retries: options.retries ?? 600,
 			factor: 1,
 			minTimeout: DAEMON_SOCKET_RELEASE_POLL_MS,
 			maxTimeout: DAEMON_SOCKET_RELEASE_POLL_MS,
 		},
 	});
-	lease = new DaemonSocketPathLease(socketPath, releaseLock);
+	writeLockOwner(socketPath);
+	lease = new DaemonSocketPathLease(socketPath, async () => {
+		try {
+			rmSync(lockOwnerPath(socketPath), { force: true });
+		} catch {}
+		await releaseLock();
+	});
 	if (pendingCompromise) lease.recordCompromise(pendingCompromise);
 	return lease;
 }

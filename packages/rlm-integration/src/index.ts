@@ -231,6 +231,12 @@ export class RlmIntegration extends Service {
 			console.error("[rlm] rlm-integration: disabled by config");
 			return;
 		}
+		// An isolated daemon (a test supervisor on its own socket and agent dir)
+		// must not take the machine's :20130 over from the real one.
+		if (process.env.RLM_INTEGRATION === "0") {
+			this.ctx.logger?.info?.("rlm-integration: off in this process (RLM_INTEGRATION=0)");
+			return;
+		}
 		// Cleanup used to live in `[Service.stop]`. Cordis 4 defines no such
 		// symbol, so that was a method named "undefined" that nothing ever called,
 		// and a swapped fiber kept :20130 bound with no way to hand it on. The
