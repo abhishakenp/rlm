@@ -1,0 +1,15 @@
+{
+  "name": "@iris/recall",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Search and browse LLM CLI transcripts",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "type": "module",
+  "scripts": {
+    "test": "bun test test/search.test.ts"
+  }
+}
