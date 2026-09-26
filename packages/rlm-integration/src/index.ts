@@ -55,7 +55,8 @@ import express, { type Application, type Request, type Response } from "express"
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { createServer, type Server } from "node:http";
+import { createServer as createHttpServer } from "node:http";
+import { createServer as createNetServer, type Server } from "node:net";
 import { route as modelRoute, type Route } from "../../rlm-delegate/src/ask.ts";
 
 declare module "@deepseek-ai/cordis" {
@@ -124,6 +125,19 @@ interface SharedSockets {
  * module scope) and swaps the fiber, and both must find the sockets the
  * previous generation opened rather than bind the port a second time.
  */
+/** Does something already answer HTTP on this port? (a live rlm-integration, or anything else) */
+const portAnswers = (port: number, address: string): Promise<boolean> =>
+	new Promise((resolveProbe) => {
+		const socket = require("node:net").connect({ port, host: address });
+		const done = (answer: boolean) => {
+			socket.destroy();
+			resolveProbe(answer);
+		};
+		socket.setTimeout(300, () => done(false));
+		socket.once("connect", () => done(true));
+		socket.once("error", () => done(false));
+	});
+
 const sharedSockets = (port: number, host: string): SharedSockets => {
 	const all = ((globalThis as any).__rlmIntegrationSockets ??= new Map<string, SharedSockets>()) as Map<
 		string,
@@ -234,9 +248,9 @@ export class RlmIntegration extends Service {
 			return;
 		}
 		if (isDaemonSupervisorProcess()) {
-			// The supervisor is the long-lived owner, but an rlm started without the daemon
-			// may hold the port first. Take it over when that one lets go, instead of
-			// failing the supervisor's boot over a port someone else is already serving.
+			// The supervisor is the long-lived owner. It binds with SO_REUSEPORT beside
+			// an rlm that may hold the port already (see start), so it takes over at
+			// once; the retry below is only for a port held without SO_REUSEPORT.
 			this.startWhenFree();
 			return;
 		}
@@ -382,13 +396,42 @@ export class RlmIntegration extends Service {
 		// `loopback` is a pair of addresses, not one. Anything else is taken
 		// literally, so a caller that really does want one interface still gets it.
 		const wanted = host === "loopback" ? ["127.0.0.1", "::1"] : [host];
+
+		// Sockets bind with SO_REUSEPORT so a successor process (the daemon
+		// supervisor taking over from an in-process rlm, e.g. after /daemon) can
+		// bind while the old owner still listens: the newest bind takes new
+		// connections and the port is never unbound — zero refused. That would
+		// also let every extra rlm steal the port, so an ordinary process first
+		// asks whether someone already serves it and, if so, stays out (as a
+		// failed bind used to make it). The supervisor is the owner by design and
+		// takes over at once.
+		if (!isDaemonSupervisorProcess() && (await portAnswers(port, wanted[0]!))) {
+			this.ctx.logger?.info?.(`rlm-integration: port ${port} is served by another process — this one stays idle`);
+			return;
+		}
 		// The sockets dispatch through `shared.handler`, looked up per request, so
 		// the app behind them can be replaced while they stay open.
 		const dispatch = (req: any, res: any) => (shared.handler as any)(req, res);
 		shared.handler = app;
 		const bind = (address: string) =>
 			new Promise<{ address: string; server: Server | null; error?: string }>((resolve) => {
-				const server = createServer(dispatch);
+				// Bun's node:http ignores SO_REUSEPORT, node:net honours it: listen with
+				// net and hand each connection to an HTTP server that never binds.
+				const http = createHttpServer(dispatch);
+				const connections = new Set<import("node:net").Socket>();
+				const server = createNetServer((socket) => {
+					connections.add(socket);
+					socket.once("close", () => connections.delete(socket));
+					http.emit("connection", socket);
+				});
+				// Closing the listener must also end its kept-alive connections, as
+				// closing an http server that owned them did.
+				const closeListener = server.close.bind(server);
+				server.close = ((callback?: (error?: Error) => void) => {
+					for (const socket of connections) socket.destroy();
+					connections.clear();
+					return closeListener(callback);
+				}) as typeof server.close;
 				const failed = (error: any) => {
 					server.removeAllListeners();
 					try {
@@ -399,7 +442,7 @@ export class RlmIntegration extends Service {
 					resolve({ address, server: null, error: String(error?.code ?? error?.message ?? error) });
 				};
 				server.once("error", failed);
-				server.listen(port, address, () => {
+				server.listen({ port, host: address, reusePort: true } as any, () => {
 					server.removeListener("error", failed);
 					resolve({ address, server });
 				});
