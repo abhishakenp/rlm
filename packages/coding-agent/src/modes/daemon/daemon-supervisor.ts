@@ -982,6 +982,20 @@ export class DaemonSupervisor {
 	 * lease that arrives after we stood down is released at once.
 	 */
 	private async acquireSocketLeaseUnlessPeerRuns(): Promise<DaemonSocketPathLease | undefined> {
+		// A launchd-kept supervisor (RLM_DAEMON_STANDBY=1) must not exit when a
+		// client-started peer owns the socket — KeepAlive would relaunch it every
+		// few seconds. It waits instead, as a hot standby, and takes over the
+		// moment the lock frees (the peer died or shut down).
+		if (process.env.RLM_DAEMON_STANDBY === "1") {
+			for (;;) {
+				try {
+					return await acquireDaemonSocketPathLease(this.socketPath);
+				} catch (error) {
+					if (!/already being held/i.test(String((error as Error)?.message ?? error))) throw error;
+					await new Promise((resolveDelay) => setTimeout(resolveDelay, PEER_SUPERVISOR_PROBE_INTERVAL_MS));
+				}
+			}
+		}
 		const leasePromise = acquireDaemonSocketPathLease(this.socketPath);
 		let settled = false;
 		void leasePromise.then(
@@ -3597,6 +3611,9 @@ export class DaemonSupervisor {
 		const workerEnvironment = createCliSubprocessEnv({
 			...process.env,
 			...launchEnv,
+			// Bun caps concurrent HTTP requests at 256 unless this is set before the
+			// process starts; a worker hosting hundreds of subagents needs more.
+			BUN_CONFIG_MAX_HTTP_REQUESTS: process.env.BUN_CONFIG_MAX_HTTP_REQUESTS || "4096",
 			[DAEMON_WORKER_ROLE_ENV]: "1",
 			[DAEMON_WORKER_TOKEN_ENV]: token,
 			[DAEMON_WORKER_INSTANCE_ID_ENV]: workerInstanceId,
