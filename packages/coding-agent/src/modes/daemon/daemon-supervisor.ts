@@ -738,10 +738,35 @@ function normalizeCapabilities(
 	return normalized;
 }
 
+/**
+ * rlm: a supervisor that lost the launch race to a live, current peer. Two
+ * launchers can start at once after a supervisor dies (the client's
+ * recoverDaemon and an orphaned worker's replacement launch). The loser used
+ * to sit on the socket lock for its whole retry budget (~15 s) and then log
+ * "Daemon supervisor startup failed: Lock file is already being held" — noise
+ * that read as a crash loop and delayed the losing launcher. Seeing the
+ * winner answer is the loser's cue to leave quietly.
+ */
+export class DaemonSupervisorPeerRunningError extends Error {
+	constructor(readonly socketPath: string) {
+		super(`another current daemon supervisor already serves ${socketPath}`);
+		this.name = "DaemonSupervisorPeerRunningError";
+	}
+}
+
+const PEER_SUPERVISOR_PROBE_INTERVAL_MS = 250;
+
 export async function runDaemonSupervisorMode(options: DaemonSupervisorOptions): Promise<never> {
 	const socketPath = normalizeSocketPath(options.socketPath ?? defaultDaemonSocketPath());
 	const supervisor = new DaemonSupervisor(socketPath, options);
-	await supervisor.start();
+	try {
+		await supervisor.start();
+	} catch (error) {
+		if (error instanceof DaemonSupervisorPeerRunningError) {
+			process.exit(0);
+		}
+		throw error;
+	}
 	return new Promise(() => {});
 }
 
@@ -854,7 +879,7 @@ export class DaemonSupervisor {
 			if (!agentDir) {
 				throw new Error("Daemon supervisor config is missing agentDir");
 			}
-			this.socketLease = await acquireDaemonSocketPathLease(this.socketPath);
+			this.socketLease = await this.acquireSocketLeaseUnlessPeerRuns();
 			this.socketLease?.onCompromised((error) => this.handleSocketLeaseCompromised(error));
 			this.assertSocketLeaseHeld();
 			await waitForDaemonStartupFence(this.socketPath);
@@ -935,11 +960,62 @@ export class DaemonSupervisor {
 			this.markReady();
 		} catch (error) {
 			const startupError = error instanceof Error ? error : new Error(String(error));
+			if (startupError instanceof DaemonSupervisorPeerRunningError) {
+				this.log(`Supervisor ${this.generation} stood down: ${startupError.message}`);
+				await this.cleanupSupervisorResources();
+				this.rejectReady(startupError);
+				throw startupError;
+			}
 			this.log(`Daemon supervisor startup failed: ${startupError.stack ?? startupError.message}`);
 			await this.cleanupSupervisorResources();
 			this.rejectReady(startupError);
 			throw startupError;
 		}
+	}
+
+	/**
+	 * Take the socket lock, unless a current supervisor starts answering on the
+	 * socket first — then stand down (see DaemonSupervisorPeerRunningError). A
+	 * lease that arrives after we stood down is released at once.
+	 */
+	private async acquireSocketLeaseUnlessPeerRuns(): Promise<DaemonSocketPathLease | undefined> {
+		const leasePromise = acquireDaemonSocketPathLease(this.socketPath);
+		let settled = false;
+		void leasePromise.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+		const { probeDaemonVersion } = await import("../../cli/daemon-launch.js");
+		const peerRunning = (async (): Promise<boolean> => {
+			while (!settled) {
+				await new Promise((resolveDelay) => setTimeout(resolveDelay, PEER_SUPERVISOR_PROBE_INTERVAL_MS));
+				if (settled) return false;
+				try {
+					const probe = await probeDaemonVersion(this.socketPath, 500);
+					if (probe.status === "current") return true;
+				} catch {
+					// Probe failures mean "not proven": keep waiting on the lock.
+				}
+			}
+			return false;
+		})();
+		const winner = await Promise.race([
+			leasePromise.then((lease) => ({ kind: "lease" as const, lease })),
+			peerRunning.then((running) => ({ kind: running ? ("peer" as const) : ("none" as const) })),
+		]);
+		if (winner.kind === "lease") return winner.lease;
+		if (winner.kind === "peer") {
+			void leasePromise.then(
+				(lease) => lease?.release(),
+				() => {},
+			);
+			throw new DaemonSupervisorPeerRunningError(this.socketPath);
+		}
+		return leasePromise;
 	}
 
 	private listen(): Promise<void> {
