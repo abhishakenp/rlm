@@ -423,7 +423,9 @@ const installSelfWatch = (host: HostState) => {
 const installExecTriggers = (host: HostState) => {
 	for (const t of host.execTriggers ?? []) unwatchFile(t.path, t.listener);
 	host.execTriggers = [];
-	if (isPrintRun()) return;
+	// A daemon worker or supervisor has no tty either, but it is long-lived and
+	// must follow these changes (it is replaced, not exec'd — replaceDaemonProcess).
+	if (isPrintRun() && !daemonRole()) return;
 	const add = (path: string, why: (curr: Stats) => string | null) => {
 		const listener = (curr: Stats, prev: Stats) => {
 			if (curr.mtimeMs === prev.mtimeMs && curr.ino === prev.ino) return;
@@ -510,11 +512,57 @@ const liveSessionFile = (host: HostState): string | undefined => {
 };
 
 const isBusy = (host: HostState): boolean => {
+	// A daemon worker has no chat on screen; rlm-inflight counts every turn the
+	// process is running, across all the sessions it hosts.
+	if (((globalThis as any).__rlmTurnsInFlight?.size ?? 0) > 0) return true;
 	try {
 		return Boolean(liveSession(host)?.isStreaming);
 	} catch {
 		return false;
 	}
+};
+
+/** prime-agent's daemon: this process is its supervisor or one of its workers. */
+const daemonRole = (): "worker" | "supervisor" | undefined => {
+	const argv = process.argv;
+	const index = argv.indexOf("--mode");
+	const daemon = (index >= 0 && argv[index + 1] === "daemon") || argv.includes("--mode=daemon");
+	if (!daemon) return undefined;
+	return process.env.PRIME_AGENT_INTERNAL_DAEMON_WORKER ? "worker" : "supervisor";
+};
+
+/**
+ * Replacing a daemon process is not an execve in place: a worker's and the
+ * supervisor's listening sockets do not survive exec (Bun cannot adopt an
+ * inherited listener), and their argv is a role, not a chat to resume. So:
+ *
+ * - worker: wait until no turn is running, flush (the composition's dispose
+ *   writes sessions and rlm-inflight's journal), and exit. The supervisor's
+ *   recovery relaunches it from its create command on the new code, reopening
+ *   the same session file; anything pending replays from the journal.
+ * - supervisor: send itself SIGTERM — prime-agent's graceful shutdown that
+ *   leaves workers running — and the successor (launchd's KeepAlive restart or
+ *   its standby, or a worker's relaunch) adopts them. The lock records its
+ *   holder, so the successor takes the socket at once.
+ *
+ * Clients ride through both (verified: an attached chat shows nothing; a prompt
+ * sent during the gap is answered).
+ */
+const replaceDaemonProcess = async (host: HostState, role: "worker" | "supervisor", reason: string): Promise<void> => {
+	host.execing = true;
+	say("info", `host: replacing this daemon ${role} — ${reason}`);
+	if (role === "supervisor") {
+		process.emit("SIGTERM" as any);
+		return;
+	}
+	const deadline = Date.now() + 10 * 60_000;
+	while (isBusy(host) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 250));
+	(globalThis as any).__rlmHostExecing = true;
+	await Promise.race([
+		Promise.resolve(host.ctx?.fiber?.dispose?.()).catch(() => {}),
+		new Promise((r) => setTimeout(r, 5000)),
+	]);
+	process.exit(0);
 };
 
 /** Session flags removed before re-adding `--resume <current file>`. */
@@ -582,6 +630,8 @@ const withAgentsView = (argv: string[]): string[] => {
  */
 const reexecImpl = async (host: HostState, reason: string): Promise<void> => {
 	if (host.execing) return;
+	const role = daemonRole();
+	if (role) return replaceDaemonProcess(host, role, reason);
 	const B = (globalThis as any).process;
 	if (typeof B?.execve !== "function") {
 		say("warn", `⚠ ${reason}; this runtime has no process.execve — applies on next launch`, true);

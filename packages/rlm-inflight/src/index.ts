@@ -44,6 +44,15 @@ import {
 } from "../../coding-agent/src/core/inflight-journal.ts";
 
 export const name = "rlm-inflight";
+
+/**
+ * Turns running in this process right now, across every session it hosts. A
+ * daemon worker has no chat on screen, so this is how the host (rlm-host
+ * shell.ts) tells whether replacing the process would cut a turn in half.
+ */
+const turnsInFlight = (): Set<object> =>
+	((globalThis as { __rlmTurnsInFlight?: Set<object> }).__rlmTurnsInFlight ??= new Set());
+export const turnsRunning = (): number => turnsInFlight().size;
 const ID = "rlm-inflight";
 
 /** Set (to the target session file) on a process this row started to resume a session; its CLI prompt is the notice. */
@@ -193,8 +202,11 @@ export const createInflightExtension =
 			(timer as any).unref?.();
 		});
 
+		// One token per session this extension instance watches.
+		const turn = {};
 		pi.on("agent_start", () => {
 			idle = false;
+			turnsInFlight().add(turn);
 			// A brand-new session is written to disk only after its first reply
 			// (session-manager keeps abandoned drafts off disk). A turn that is
 			// actually running is not a draft: put its prompt on disk now, so a
@@ -224,6 +236,7 @@ export const createInflightExtension =
 
 		pi.on("agent_end", (event: any) => {
 			idle = true;
+			turnsInFlight().delete(turn);
 			if (!file) return;
 			writeInflight(file, { open: true, busy: false, depth, parentSession: parent });
 			if (recovering) {
@@ -245,6 +258,7 @@ export const createInflightExtension =
 		});
 
 		pi.on("session_shutdown", () => {
+			turnsInFlight().delete(turn);
 			if (timer) clearInterval(timer);
 			timer = undefined;
 			if (file) writeInflight(file, { open: false, busy: false, depth, parentSession: parent });
