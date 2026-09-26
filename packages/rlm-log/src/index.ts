@@ -37,6 +37,19 @@ export type LogLevel = "debug" | "info" | "warn" | "error";
 
 const LEVELS: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40 };
 
+/**
+ * The agent dir, resolved the way coding-agent's config.ts getAgentDir() does
+ * (RLM_CODING_AGENT_DIR, `~` expanded), falling back to `$RLM_HOME/agent` like
+ * rlm-boot and rlm-delegate, then `~/.rlm/agent`. Inlined rather than imported:
+ * this row loads first and must not pull config.ts's graph in with it. Without
+ * it every scratch or test run wrote into the user's real log.
+ */
+const logAgentDir = (): string => {
+	const env = process.env.RLM_CODING_AGENT_DIR;
+	if (env) return env === "~" ? homedir() : env.startsWith("~/") ? join(homedir(), env.slice(2)) : env;
+	return join(process.env.RLM_HOME ?? join(homedir(), ".rlm"), "agent");
+};
+
 export interface RlmLogConfig {
 	/** Log file. Defaults to ~/.rlm/agent/logs/rlm.jsonl. */
 	file?: string;
@@ -141,7 +154,7 @@ export class RlmLogService extends Service {
 	}
 
 	async [Service.init]() {
-		this.file = this.config.file ?? join(homedir(), ".rlm", "agent", "logs", "rlm.jsonl");
+		this.file = this.config.file ?? join(logAgentDir(), "logs", "rlm.jsonl");
 		const level = this.config.level ?? (process.env.RLM_LOG_DEBUG ? "debug" : "info");
 		this.minLevel = LEVELS[level] ?? LEVELS.info;
 		this.maxBytes = this.config.maxBytes ?? 20 * 1024 * 1024;
