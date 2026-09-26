@@ -89,6 +89,9 @@ declare module "@deepseek-ai/cordis" {
 
 export const name = "rlm-delegate";
 
+/** Graph ids a `--print` client is answering, passed to its daemon worker (see owedFragment). */
+const INFLIGHT_ENV = "RLM_DELEGATE_INFLIGHT";
+
 export interface RlmDelegateConfig {
 	enabled?: boolean;
 	dir?: string;
@@ -721,10 +724,23 @@ export class RlmDelegateService extends Service {
 		if (handle?.dispose) this.teardowns.add(() => handle.dispose());
 	}
 
+	/**
+	 * Requests being answered right now: this process's own, plus those a
+	 * `--print` client recorded before handing the run to a daemon worker. The
+	 * worker builds the prompt, but intake ran in the client; the ids arrive in
+	 * the worker's launch environment (RLM_DELEGATE_INFLIGHT, set by intake).
+	 */
+	private inFlightNow(): Set<string> {
+		const inherited = (process.env[INFLIGHT_ENV] ?? "").split(",").filter(Boolean);
+		return inherited.length ? new Set([...this.inFlight, ...inherited]) : this.inFlight;
+	}
+
 	/** What is still owed, read from disk every time the prompt is built. */
 	owedFragment(): string {
-		const open = this.open().filter((graph) => !this.inFlight.has(graph.id));
-		const questions = this.questions().filter((q) => !this.inFlight.has(q.graph));
+		const inFlight = this.inFlightNow();
+		const headless = this.headless || inFlight !== this.inFlight;
+		const open = this.open().filter((graph) => !inFlight.has(graph.id));
+		const questions = this.questions().filter((q) => !inFlight.has(q.graph));
 		if (!open.length && !questions.length) return "";
 
 		const all = open.flatMap((graph) => graph.tasks.map((task) => ({ graph, task })));
@@ -732,7 +748,7 @@ export class RlmDelegateService extends Service {
 		// end on its answer. Listing everyone else's open tasks as "something can
 		// pick these up now" made it pick them up. The drive and the interactive
 		// session still get the full list.
-		if (this.headless && this.inFlight.size > 0) {
+		if (headless && inFlight.size > 0) {
 			return all.length
 				? `## Still owed\n\n${all.length} task(s) are owed elsewhere — not this run's job. They are on disk and in QUESTIONS.md. Answer what this run was asked and stop.`
 				: "";
@@ -900,6 +916,9 @@ export class RlmDelegateService extends Service {
 		try {
 			const graph = this.store.create(text, [{ id: taskId, title, prompt: text, proof, priority }]);
 			this.inFlight.add(graph.id);
+			// A --print run may hand the prompt to a daemon worker, which builds
+			// the system prompt there; tell it which request it is answering.
+			if (options.headless) process.env[INFLIGHT_ENV] = [...this.inFlight].join(",");
 			this.ctx.emit?.("rlm/delegate-intake", {
 				graph: graph.id,
 				source: options.source,
@@ -946,6 +965,11 @@ export class RlmDelegateService extends Service {
 	 */
 	close(graphId: string, taskId: string, outcome: { ok: boolean; detail?: string }): Graph | null {
 		this.inFlight.delete(graphId);
+		if (process.env[INFLIGHT_ENV]) {
+			const rest = process.env[INFLIGHT_ENV]!.split(",").filter((id) => id && id !== graphId);
+			if (rest.length) process.env[INFLIGHT_ENV] = rest.join(",");
+			else delete process.env[INFLIGHT_ENV];
+		}
 		const graph = this.store.load(graphId);
 		const task = graph?.tasks.find((t) => t.id === taskId);
 		if (!graph || !task) return null;

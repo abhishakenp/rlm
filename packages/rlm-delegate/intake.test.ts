@@ -357,5 +357,35 @@ console.log("\nthe turn answering a request is not told to ask about it");
 		ok(graphs.owedFragment().includes("Reply with exactly: pong"), "the closed request vanished"));
 }
 
+console.log("\na daemon worker building the prompt knows which request its client is answering");
+{
+	// With the daemon as the default, `rlm --print` records the request in the
+	// client but the system prompt is built in a daemon worker. The worker's own
+	// delegate never saw intake(); the ids come in its launch environment.
+	const stateDir = path.join(DIR, "in-flight-worker");
+	const worker: any = new Context();
+	worker.plugin(RlmDelegateService, { dir: stateDir, cwd: ROOT });
+	let envDuring = "";
+	let workerView = "";
+	let root: any;
+	({ root } = await boot(stateDir, {
+		run: async () => {
+			envDuring = process.env.RLM_DELEGATE_INFLIGHT ?? "";
+			workerView = worker.rlmDelegate.owedFragment();
+			return 0;
+		},
+	}));
+	root.rlmDelegate.intake("an older thing nobody said how to check", { source: "voice" });
+	root.rlmDelegate.close(new Store(stateDir).ids()[0], "the-request", { ok: true });
+
+	await root.rlmModes.dispatch(["--print", "Reply with exactly: pong"]);
+
+	t("the client hands the request's id to its worker's environment", () => ok(envDuring.length > 0, "RLM_DELEGATE_INFLIGHT was empty"));
+	t("the worker's prompt leaves the request it is answering out", () => ok(!workerView.includes("pong"), workerView));
+	t("the worker collapses other owed work to a count, as a headless run", () =>
+		ok(workerView.includes("owed elsewhere — not this run's job") && !workerView.includes("an older thing"), workerView));
+	t("the id is cleared once the run closes the request", () => eq(process.env.RLM_DELEGATE_INFLIGHT ?? "", ""));
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);
