@@ -159,6 +159,13 @@ export interface AgentsViewModeOptions {
 	onShutdown?: (reason: "exit" | "agents_view") => void | Promise<void>;
 	/** rlm: told of each chat the view opens. */
 	onInteractiveMode?: (mode: InteractiveMode) => void;
+	/**
+	 * rlm: a chat opened from this view handed itself to the background daemon
+	 * (InteractiveMode.handOverToDaemon). The view ends so the host can reopen
+	 * that session in a daemon worker; without this option the chat just returns
+	 * to the view.
+	 */
+	onHandOverToDaemon?: (session: SessionSummary) => void;
 	/** Told of every agents-view instance as it starts (SURFACE tracks the view on screen). */
 	onAgentsView?: (view: { persistentState: AgentsViewPersistentState }) => void;
 	/**
@@ -756,6 +763,10 @@ async function runAgentsViewLoop(
 				if (selection.sessionId === result.summary.sessionId) {
 					persistentState.selectedRowIdentity = getSummaryIdentity(returnedSession);
 					persistentState.selectedSessionKey = getAgentsViewSelectionKey(returnedSession);
+				}
+				if (interactiveResult.type === "promote_to_daemon" && options.onHandOverToDaemon) {
+					options.onHandOverToDaemon(returnedSession);
+					return;
 				}
 				if (interactiveResult.type === "scoped_agents_view") {
 					const nextScope = { sessionId: source.sessionId, activeSessionId: source.activeSessionId };

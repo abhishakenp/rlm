@@ -71,9 +71,11 @@ export class RlmPrintService extends Service {
 		// the modes row; without one the session row's fresh session is used.
 		// `sessionConfig` is the rest of the command line (--model, --thinking, …).
 		const { sessionManager, sessionConfig, ...printOptions } = options;
-		// Daemon mode (opt-in, RLM_DAEMON=1): upstream runs print in a
-		// client-owned worker; the worker is removed when the run completes.
-		if (process.env.RLM_DAEMON === "1") {
+		// The daemon is the default (RLM_DAEMON=0 opts out): upstream runs print in a
+		// client-owned worker; the worker is removed when the run completes. A
+		// delegate child or pool worker is already rlm's own background process —
+		// it answers in-process instead of starting a second worker per task.
+		if (process.env.RLM_DAEMON !== "0" && !process.env.RLM_DELEGATE_CHILD) {
 			const { runRlmDaemonPrint } = await import("../../coding-agent/src/modes/daemon/rlm-daemon-client.js");
 			return runRlmDaemonPrint({
 				config: (sessionConfig ?? {}) as never,

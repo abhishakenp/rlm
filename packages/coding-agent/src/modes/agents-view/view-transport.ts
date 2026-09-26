@@ -4,7 +4,7 @@
  *
  * The view is upstream's and names one set of symbols — `DaemonClient`,
  * `DaemonAgentConnection.attach`, the saved-session catalog calls. rlm runs it
- * against two hosts: the daemon supervisor (`RLM_DAEMON=1`) and the sessions
+ * against two hosts: the daemon supervisor (the default) and the sessions
  * this process hosts itself (the default), which register under an
  * `inprocess:` key. The in-process host is the default; a socket goes to the
  * daemon only once the daemon client registered it (`useDaemonTransport`), so

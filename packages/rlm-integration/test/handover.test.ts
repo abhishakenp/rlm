@@ -8,6 +8,10 @@ import { expect, test } from "bun:test";
 import { Context, Service } from "@deepseek-ai/cordis";
 import RlmIntegration from "../src/index.ts";
 
+// This process mounts the row itself and serves the port, as with the daemon
+// off; with the daemon on (the default) only its supervisor would listen.
+process.env.RLM_DAEMON = "0";
+
 class FakeConfig extends Service {
 	static provide = "rlmConfig" as const;
 	constructor(ctx: any) {

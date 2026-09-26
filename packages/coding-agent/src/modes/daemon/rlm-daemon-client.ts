@@ -221,7 +221,7 @@ export async function createDaemonClientConnection(options: {
 /**
  * One-shot print through the daemon (upstream main.ts print branch): a
  * client-owned worker runs the prompt; normal completion removes the worker.
- * Opt-in with the rest of the daemon (RLM_DAEMON=1).
+ * The default with the rest of the daemon (RLM_DAEMON=0 opts out).
  */
 export async function runRlmDaemonPrint(options: {
 	config: AgentSessionRuntimeConfig;

@@ -820,7 +820,7 @@ export interface InteractiveModeOptions {
 	/**
 	 * When extensions are not bound locally (daemon chats), load them a second
 	 * time in this process for their UI only (client-extension-ui-host.ts).
-	 * Default: on in daemon mode (RLM_DAEMON=1); RLM_CLIENT_EXTENSION_UI=0 turns it off.
+	 * Default: on for daemon chats (the default; RLM_DAEMON=0 opts out); RLM_CLIENT_EXTENSION_UI=0 turns it off.
 	 */
 	clientExtensionUi?: boolean;
 	/** UI-local services used for settings, auth, resources, and rendering. Defaults to services from localSessionHost. */
@@ -852,7 +852,7 @@ export interface InteractiveModeOptions {
 
 export interface InteractiveModeRunResult {
 	/**
-	 * `promote_to_daemon` (rlm, /daemon): leave this in-process chat so the host
+	 * `promote_to_daemon` (rlm): the background daemon took this in-process chat over; the host
 	 * can reopen the same session in a daemon worker — no restart, same terminal.
 	 */
 	type: "agents_view" | "scoped_agents_view" | "promote_to_daemon";
@@ -1230,6 +1230,7 @@ export class InteractiveMode {
 			}
 		} catch {}
 		this.rlmTuiInputDisposer = this.ui.addInputListener((data: string): { consume?: boolean; data?: string } | undefined => {
+			this.lastInputAt = Date.now();
 			const tui2: any = this.getRlmTui();
 			if (!tui2) return undefined;
 			let panel: any;
@@ -3325,7 +3326,7 @@ export class InteractiveMode {
 	private clientExtensionUiEnabled(): boolean {
 		return (
 			!this.bindLocalSessionExtensions &&
-			(this.options?.clientExtensionUi ?? process.env.RLM_DAEMON === "1") &&
+			(this.options?.clientExtensionUi ?? process.env.RLM_DAEMON !== "0") &&
 			process.env.RLM_CLIENT_EXTENSION_UI !== "0"
 		);
 	}
@@ -5413,11 +5414,6 @@ export class InteractiveMode {
 				if (commandName === "reload" && !commandArgs) {
 					this.editor.setText("");
 					await this.handleReloadCommand();
-					return;
-				}
-				if (commandName === "daemon" && !commandArgs) {
-					this.editor.setText("");
-					await this.requestDaemonPromotion();
 					return;
 				}
 				if (commandName === "update") {
@@ -7579,17 +7575,33 @@ export class InteractiveMode {
 		await this.returnToAgentsView();
 	}
 
+	/** When a key last reached this chat; the daemon handover waits for a quiet terminal. */
+	private lastInputAt = Date.now();
+
 	/**
-	 * /daemon: hand this session to the daemon. Only an in-process chat (it has a
-	 * local session host) can be promoted; a daemon chat already lives there.
+	 * The background daemon takes this in-process chat over on its own — there is
+	 * no command for it. Only when nobody would notice: nothing running, retrying
+	 * or queued, an empty editor with nothing stashed, no dialog open, and no key
+	 * pressed for `quietMs`. A daemon chat has no local session host and never
+	 * qualifies.
 	 */
-	private async requestDaemonPromotion(): Promise<void> {
-		if (!this.localSessionHost || !this.options.returnToAgentsView) {
-			this.showStatus("This session already runs in the daemon.");
-			return;
-		}
-		this.showStatus("Moving this session into the daemon…");
-		await this.returnToAgentsView("promote_to_daemon");
+	canHandOverToDaemon(quietMs = 3000): boolean {
+		if (!this.localSessionHost || !this.options.returnToAgentsView) return false;
+		if (this.isShuttingDown || this.agentsViewRequest) return false;
+		if (this.hasInterruptibleWork() || this.getQueuedActionCount() > 0) return false;
+		if (this.editor.getText().length > 0) return false;
+		const stash = this.promptStashState;
+		if (stash?.stash !== undefined || (stash?.queuedStashes?.length ?? 0) > 0) return false;
+		const ui = this.ui as unknown as { focusedComponent?: unknown; overlayStack?: unknown[] };
+		if ((ui.overlayStack?.length ?? 0) > 0 || (ui.focusedComponent && ui.focusedComponent !== this.editor)) return false;
+		return Date.now() - this.lastInputAt >= quietMs;
+	}
+
+	/** Leave this chat so the host reopens its session in a daemon worker. False when not idle. */
+	handOverToDaemon(): boolean {
+		if (!this.canHandOverToDaemon()) return false;
+		void this.returnToAgentsView("promote_to_daemon");
+		return true;
 	}
 
 	private async returnToAgentsView(request: InteractiveModeRunResult["type"] = "agents_view"): Promise<void> {

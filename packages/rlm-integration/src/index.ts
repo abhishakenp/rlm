@@ -89,11 +89,11 @@ export interface RlmIntegrationConfig {
 	/** Whether to start the server on boot. Default: true. */
 	enabled?: boolean;
 	/**
-	 * Which process serves the port. Default `daemon`: with `RLM_DAEMON=1` only
-	 * prime-agent's daemon supervisor listens — it is the one process that is up
-	 * whenever rlm is — and clients, workers and `--print` runs leave the port
-	 * alone. Without the daemon every process tries and the first to bind wins,
-	 * as before. `any`: always the latter.
+	 * Which process serves the port. Default `daemon`: the daemon is the default,
+	 * so only prime-agent's supervisor listens — it is the one process that is up
+	 * whenever rlm is (launchd keeps it running) — and clients, workers and
+	 * `--print` runs leave the port alone. With `RLM_DAEMON=0` every process
+	 * tries and the first to bind wins, as before. `any`: always the latter.
 	 */
 	owner?: "daemon" | "any";
 }
@@ -243,7 +243,7 @@ export class RlmIntegration extends Service {
 			if (this.takeoverTimer) clearTimeout(this.takeoverTimer);
 			void this.release("fiber disposed");
 		});
-		if ((this.config.owner ?? "daemon") === "daemon" && !isDaemonSupervisorProcess() && process.env.RLM_DAEMON === "1") {
+		if ((this.config.owner ?? "daemon") === "daemon" && !isDaemonSupervisorProcess() && process.env.RLM_DAEMON !== "0") {
 			this.ctx.logger?.info?.("rlm-integration: the daemon supervisor serves the port; not listening in this process");
 			return;
 		}

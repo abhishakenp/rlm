@@ -45,6 +45,14 @@ export interface InProcessAgentsSessionOptions {
 	onAgentsView?: (view: { persistentState: AgentsViewPersistentState }) => void;
 	/** Seed the first agents view's state (selection, expansion, scope, filter) — restored after an execve. */
 	initialAgentsViewState?: Partial<AgentsViewPersistentState>;
+	/**
+	 * The background daemon takes these sessions over on its own once it is up —
+	 * there is no command for it. `isAvailable` answers synchronously (the caller
+	 * keeps a probe result warm); when it says yes and every hosted session is
+	 * idle, the chat on screen hands itself over at a quiet moment and this loop
+	 * returns `promote_to_daemon` for the host to reopen that session in a worker.
+	 */
+	daemonHandover?: { isAvailable: () => boolean; intervalMs?: number };
 }
 
 export async function runInProcessAgentsSession(
@@ -64,6 +72,14 @@ export async function runInProcessAgentsSession(
 		cwd: sessionManager.getCwd(),
 		sessionDir: sessionManager.getSessionDir() || undefined,
 	};
+	// Which chat is on screen, for the daemon handover watcher below.
+	let onScreen: InteractiveMode | undefined;
+	const trackChat = (mode: InteractiveMode) => {
+		onScreen = mode;
+		options.onInteractiveMode?.(mode);
+	};
+	const stopHandoverWatch = watchForDaemonHandover(host, () => onScreen, options.daemonHandover);
+	let handedOver: SessionSummary | undefined;
 	const runView = async (initialSession?: SessionSummary, initialScopeKey?: AgentsViewScopeKey) => {
 		try {
 			await runAgentsViewMode({
@@ -77,8 +93,16 @@ export async function runInProcessAgentsSession(
 				initialSession,
 				initialScopeKey,
 				onShutdown,
-				onInteractiveMode: options.onInteractiveMode,
-				onAgentsView: options.onAgentsView,
+				onInteractiveMode: trackChat,
+				onAgentsView: (view) => {
+					onScreen = undefined;
+					options.onAgentsView?.(view);
+				},
+				onHandOverToDaemon: options.daemonHandover
+					? (session) => {
+							handedOver = session;
+						}
+					: undefined,
 				initialPersistentState: options.initialAgentsViewState,
 			});
 		} catch (error) {
@@ -87,18 +111,36 @@ export async function runInProcessAgentsSession(
 			restoreTerminal();
 			throw error;
 		} finally {
-			// The view exits only when the user quits from it. Disposing every
-			// hosted session can wait on a promise nobody resolves; the watchdog
-			// exits anyway rather than leave a live process behind the prompt.
-			armExitWatchdog("quit from agents view", 0);
-			exitStep("agents host disposeAll");
-			await host.disposeAll();
+			stopHandoverWatch();
+			if (handedOver) {
+				await releaseForDaemon(host);
+			} else {
+				// The view exits only when the user quits from it. Disposing every
+				// hosted session can wait on a promise nobody resolves; the watchdog
+				// exits anyway rather than leave a live process behind the prompt.
+				armExitWatchdog("quit from agents view", 0);
+				exitStep("agents host disposeAll");
+				await host.disposeAll();
+			}
 		}
 	};
+	const handoverResult = (): InteractiveModeRunResult | undefined =>
+		handedOver
+			? {
+					type: "promote_to_daemon",
+					source: {
+						activeSessionId: handedOver.activeSessionId,
+						sessionFile: handedOver.sessionFile,
+						sessionId: handedOver.sessionId,
+						sessionName: handedOver.sessionName,
+						cwd: handedOver.cwd,
+					},
+				}
+			: undefined;
 
 	if (options.openAgentsView) {
 		await runView();
-		return undefined;
+		return handoverResult();
 	}
 
 	const interactiveMode = new InteractiveMode({
@@ -120,32 +162,23 @@ export async function runInProcessAgentsSession(
 		sessionHasChildren: runtime.session.hasRunningRlmChildren(),
 		onShutdown,
 	});
-	options.onInteractiveMode?.(interactiveMode);
+	trackChat(interactiveMode);
 
 	let interactiveResult: InteractiveModeRunResult;
 	try {
 		interactiveResult = await interactiveMode.run();
 	} catch (error) {
+		stopHandoverWatch();
 		restoreTerminal();
 		await host.disposeAll();
 		throw error;
 	}
 
 	if (interactiveResult.type === "promote_to_daemon") {
-		// /daemon: the host reopens this session in a daemon worker. Let the tree
-		// finish what it is doing (no turn cut in half), hand the kernel's
-		// variables over through the session's artifact dir, then release every
-		// runtime so the worker can take the session file.
-		const hosted = (() => {
-			try {
-				return host.findHosted(interactiveResult.source.activeSessionId ?? rootActiveSessionId);
-			} catch {
-				return host.findHosted(rootActiveSessionId);
-			}
-		})();
-		await waitForTreeIdle(hosted.runtime, PROMOTE_IDLE_WAIT_MS);
-		await handOverKernelVariables(hosted.runtime);
-		await host.disposeAll();
+		// The daemon took the first chat over: release every hosted session (idle,
+		// kernel variables handed over on disk) so its worker can open the file.
+		stopHandoverWatch();
+		await releaseForDaemon(host);
 		return interactiveResult;
 	}
 
@@ -164,21 +197,66 @@ export async function runInProcessAgentsSession(
 			: undefined;
 
 	await runView(returnedSummary, initialScopeKey);
-	return interactiveResult;
+	return handoverResult() ?? interactiveResult;
 }
 
-/** Leave the alternate screen, show the cursor, and hand input back cooked. */
-const PROMOTE_IDLE_WAIT_MS = 120_000;
+const HANDOVER_CHECK_MS = 2000;
 
-/** Wait (bounded) until the session and its subagents are idle. */
-async function waitForTreeIdle(runtime: AgentSessionRuntime, timeoutMs: number): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
+/**
+ * Every `intervalMs`, while the daemon is available: if nothing hosted here is
+ * running and the chat on screen is quiet, that chat hands itself over. The
+ * agents view itself never is handed over mid-browse; the next chat opened from
+ * it is. Returns the stop function.
+ */
+function watchForDaemonHandover(
+	host: InProcessAgentsHost,
+	chatOnScreen: () => InteractiveMode | undefined,
+	handover: InProcessAgentsSessionOptions["daemonHandover"],
+): () => void {
+	if (!handover) return () => {};
+	let done = false;
+	const timer = setInterval(() => {
+		if (done) return;
+		try {
+			if (!handover.isAvailable()) return;
+			const chat = chatOnScreen();
+			if (!chat?.canHandOverToDaemon()) return;
+			if (!hostIsIdle(host)) return;
+			if (chat.handOverToDaemon()) done = true;
+		} catch {
+			// A failed check just waits for the next tick.
+		}
+	}, handover.intervalMs ?? HANDOVER_CHECK_MS);
+	timer.unref?.();
+	return () => {
+		done = true;
+		clearInterval(timer);
+	};
+}
+
+function hostIsIdle(host: InProcessAgentsHost): boolean {
+	for (const { runtime } of host.listHosted()) {
 		const session = runtime.session as { isStreaming?: boolean; hasRunningRlmChildren?: () => boolean };
-		if (!session.isStreaming && !session.hasRunningRlmChildren?.()) return;
+		if (session.isStreaming || session.hasRunningRlmChildren?.()) return false;
+	}
+	return true;
+}
+
+/**
+ * Release every hosted session for the daemon: wait (bounded) until nothing is
+ * mid-turn, hand each kernel's variables over through its session's artifact
+ * dir, then dispose the runtimes so a worker can take the session files.
+ */
+async function releaseForDaemon(host: InProcessAgentsHost): Promise<void> {
+	const deadline = Date.now() + PROMOTE_IDLE_WAIT_MS;
+	while (!hostIsIdle(host) && Date.now() < deadline) {
 		await new Promise((resolveDelay) => setTimeout(resolveDelay, 200));
 	}
+	for (const { runtime } of host.listHosted()) await handOverKernelVariables(runtime);
+	await host.disposeAll();
 }
+
+const PROMOTE_IDLE_WAIT_MS = 120_000;
 
 /**
  * The code kernel's variables for this session, serialized (bun:jsc) into the
@@ -203,6 +281,7 @@ async function handOverKernelVariables(runtime: AgentSessionRuntime): Promise<vo
 	}
 }
 
+/** Leave the alternate screen, show the cursor, and hand input back cooked. */
 export function restoreTerminal(): void {
 	try {
 		if (process.stdin.isTTY && process.stdin.setRawMode) process.stdin.setRawMode(false);

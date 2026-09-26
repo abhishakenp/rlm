@@ -10,9 +10,16 @@ import { expect, test } from "bun:test";
 import { join } from "node:path";
 
 const fixture = join(import.meta.dir, "fixtures", "mount.ts");
-const spawnRow = (port: number, lifeMs: number, supervisor = false) =>
+// These ordinary rlm processes serve the port themselves, as with the daemon off
+// (RLM_DAEMON=0); the last test covers the default, where only the supervisor does.
+const spawnRow = (port: number, lifeMs: number, supervisor = false, daemonDefault = false) =>
 	Bun.spawn(["bun", fixture, ...(supervisor ? ["--mode", "daemon"] : [])], {
-		env: { ...process.env, PORT: String(port), LIFE_MS: String(lifeMs) },
+		env: {
+			...process.env,
+			PORT: String(port),
+			LIFE_MS: String(lifeMs),
+			RLM_DAEMON: daemonDefault ? "" : "0",
+		},
 		stdout: "pipe",
 		stderr: "ignore",
 	});
@@ -66,4 +73,14 @@ test("a second ordinary rlm stays idle while the port is served", async () => {
 	expect((await firstLine(second)).running).toBe(false);
 	first.kill();
 	second.kill();
+}, 30_000);
+
+test("with the daemon on (the default), an ordinary rlm leaves the port to the supervisor", async () => {
+	const port = 24000 + Math.floor(Math.random() * 4000);
+	const ordinary = spawnRow(port, 3000, false, true);
+	expect((await firstLine(ordinary)).running).toBe(false);
+	const supervisor = spawnRow(port, 3000, true, true);
+	expect((await firstLine(supervisor)).running).toBe(true);
+	ordinary.kill();
+	supervisor.kill();
 }, 30_000);

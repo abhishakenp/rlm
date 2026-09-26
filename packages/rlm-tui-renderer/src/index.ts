@@ -57,6 +57,80 @@ import {
 } from "../../rlm-host/src/surface.ts";
 import type { AgentSessionServices } from "../../coding-agent/src/core/agent-session-services.js";
 
+/**
+ * The background daemon is the default: every interactive chat, resume and
+ * print runs in a resident worker under the launchd-kept supervisor.
+ * `RLM_DAEMON=0` keeps a process on in-process sessions.
+ */
+const daemonEnabled = (): boolean => process.env.RLM_DAEMON !== "0";
+
+/**
+ * Is the daemon supervisor up and current? Kept warm by one poll per process
+ * (on globalThis, so every renderer generation shares it) because the handover
+ * watchers ask synchronously every couple of seconds.
+ */
+type DaemonProbe = { available: boolean; timer?: ReturnType<typeof setInterval>; socketPath?: string };
+const DAEMON_PROBE_KEY = Symbol.for("rlm.renderer.daemon-probe");
+const DAEMON_PROBE_MS = 3000;
+function daemonProbe(): DaemonProbe {
+	const g = globalThis as Record<symbol, unknown>;
+	const probe = (g[DAEMON_PROBE_KEY] ??= { available: false }) as DaemonProbe;
+	if (!probe.timer && daemonEnabled()) {
+		const tick = async () => {
+			try {
+				const [{ probeDaemonVersion }, { defaultDaemonSocketPath }] = await Promise.all([
+					import("../../coding-agent/src/cli/daemon-launch.js"),
+					import("../../coding-agent/src/modes/daemon/daemon-socket.js"),
+				]);
+				probe.socketPath ??= defaultDaemonSocketPath();
+				const result = await probeDaemonVersion(probe.socketPath, 500);
+				probe.available = result.status === "current";
+			} catch {
+				probe.available = false;
+			}
+		};
+		void tick();
+		probe.timer = setInterval(() => void tick(), DAEMON_PROBE_MS);
+		probe.timer.unref?.();
+	}
+	return probe;
+}
+
+/**
+ * A chat started before the in-process loop learned to hand itself to the
+ * daemon (a process that was already running when this code landed) has no
+ * watcher of its own. Hot reload patches classes, not a function that is
+ * already mid-await, so the renderer row watches for it instead — only for the
+ * first chat, the one that older loop can hand over.
+ */
+function watchLegacyChatForDaemon(): () => void {
+	const timer = setInterval(() => {
+		try {
+			const live = surface().interactive as any;
+			if (!daemonEnabled() || !live.running || live.handoverWatch) return;
+			if (!daemonProbe().available) return;
+			const chat = live.instance as
+				| { canHandOverToDaemon?: () => boolean; handOverToDaemon?: () => boolean; promptStashSessionId?: string }
+				| undefined;
+			const rootSessionId = live.runtime?.session?.sessionId;
+			if (!chat?.canHandOverToDaemon?.() || !rootSessionId || chat.promptStashSessionId !== rootSessionId) return;
+			const hosts = (globalThis as Record<symbol, unknown>)[Symbol.for("rlm.agents-view.in-process-hosts")] as
+				| Map<string, { listHosted(): Array<{ runtime: any }> }>
+				| undefined;
+			for (const host of hosts?.values() ?? []) {
+				for (const { runtime } of host.listHosted()) {
+					if (runtime.session?.isStreaming || runtime.session?.hasRunningRlmChildren?.()) return;
+				}
+			}
+			chat.handOverToDaemon?.();
+		} catch {
+			// A failed check waits for the next tick.
+		}
+	}, 2000);
+	timer.unref?.();
+	return () => clearInterval(timer);
+}
+
 export interface RlmRendererConfig {
 	cwd?: string;
 }
@@ -79,7 +153,7 @@ export interface RlmRendererStartOptions {
 	sessionConfig?: Record<string, unknown>;
 	/**
 	 * Attach to prime-agent's daemon instead of hosting the sessions in this
-	 * process. Opt-in while it settles: `RLM_DAEMON=1` in the environment.
+	 * process. The default; `RLM_DAEMON=0` keeps a process in-process.
 	 */
 	daemon?: boolean;
 	cwd?: string;
@@ -171,6 +245,9 @@ export class RlmRendererService extends Service {
 		attachRow("renderer", this);
 		try {
 			this.ctx.effect?.(() => () => detachRow("renderer", this));
+		} catch {}
+		try {
+			this.ctx.effect?.(() => watchLegacyChatForDaemon());
 		} catch {}
 		if (this.running && this.instance) {
 			this.ctx.logger?.info(`rlm-tui-renderer: attached to the running chat (hot swap)`);
@@ -322,7 +399,7 @@ export class RlmRendererService extends Service {
 		// lives in a resident worker under the daemon supervisor, so closing the chat
 		// detaches instead of ending it. The in-process path below remains for when
 		// the daemon cannot be brought up.
-		if (opts.daemon ?? process.env.RLM_DAEMON === "1") {
+		if (opts.daemon ?? daemonEnabled()) {
 			const attached = await this.startDaemonClient(opts);
 			if (attached) return attached;
 		}
@@ -393,6 +470,8 @@ export class RlmRendererService extends Service {
 		const sessionDir = rootRuntime.session.sessionManager.getSessionDir() || undefined;
 		const cwd = rootRuntime.session.sessionManager.getCwd();
 		this.running = true;
+		// This loop watches for the daemon itself; the row's fallback watcher is for older loops.
+		(surface().interactive as any).handoverWatch = true;
 		// The host's last-resort execve (rlm-host shell.ts) asks the Surface what
 		// the next image needs to look identical. It already saves the view kind
 		// and the chat's editor text; this adds the agents view's own state.
@@ -430,6 +509,9 @@ export class RlmRendererService extends Service {
 					live.view = "agents";
 					live.agentsView = view as never;
 				},
+				// The background daemon takes these sessions over on its own once it
+				// is up (launchd keeps it running) — no command, no restart.
+				daemonHandover: daemonEnabled() ? { isAvailable: () => daemonProbe().available } : undefined,
 				// A default model that couldn't be used is announced, never swapped silently.
 				modelFallbackMessage: rootRuntime.modelFallbackMessage,
 				// Whichever chat is open is the one panel updates repaint. Written to
@@ -451,9 +533,9 @@ export class RlmRendererService extends Service {
 		this.sessionEventUnsub = undefined;
 		surface().interactive.surfaceForwarding = false;
 
-		// /daemon: the in-process loop released the session (idle, kernel
-		// variables handed over on disk); reopen the same session file in a daemon
-		// worker and keep chatting — same process, same terminal, no restart.
+		// The daemon took the session over: the in-process loop released it (idle,
+		// kernel variables handed over on disk); reopen the same session file in a
+		// daemon worker and keep chatting — same process, same terminal, no restart.
 		const promotedFile = result?.type === "promote_to_daemon" ? result.source.sessionFile : undefined;
 		if (promotedFile) {
 			const next = {
@@ -463,12 +545,11 @@ export class RlmRendererService extends Service {
 				initialMessages: undefined,
 				sessionManager: SessionManager.open(promotedFile, sessionDir),
 			};
-			process.env.RLM_DAEMON = "1";
-			const promoted = await this.startDaemonClient({ ...next, daemon: true });
+			const current = rowOwner<RlmRendererService>("renderer") ?? this;
+			const promoted = await current.startDaemonClient({ ...next, daemon: true });
 			if (promoted) return promoted;
 			// The daemon could not be brought up: stay in-process on the same session.
-			delete process.env.RLM_DAEMON;
-			return this.start({ ...next, daemon: false });
+			return current.start({ ...next, daemon: false });
 		}
 
 		return result as InteractiveModeRunResult;
@@ -480,7 +561,9 @@ export class RlmRendererService extends Service {
 	 * failures propagate like any other.
 	 */
 	private async startDaemonClient(opts: RlmRendererStartOptions): Promise<InteractiveModeRunResult | undefined> {
-		const agent = this.ctx.get("rlmAgent") as {
+		// Reached from a start() that began on an older generation (hot swap):
+		// its fiber is gone, so ask the current one for services.
+		const agent = (rowOwner<RlmRendererService>("renderer") ?? this).ctx.get("rlmAgent") as {
 			createServices: (options: { cwd: string }) => Promise<AgentSessionServices>;
 		};
 		const [{ ensureInteractiveDaemonRunning }, { defaultDaemonSocketPath }, client, services, { SessionManager }] =
