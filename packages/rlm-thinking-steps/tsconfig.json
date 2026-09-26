@@ -10,14 +10,29 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "allowImportingTsExtensions": true,
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "baseUrl": ".",
     "paths": {
-      "@mariozechner/pi-coding-agent": ["../coding-agent/src/index.ts"],
-      "@mariozechner/pi-tui": ["../tui/src/index.ts"],
-      "@mariozechner/pi-ai": ["../ai/src/index.ts"],
-      "@earendil-works/pi-tui/*": ["../tui/src/*"]
+      "@earendil-works/pi-coding-agent": [
+        "../coding-agent/src/index.ts"
+      ],
+      "@earendil-works/pi-coding-agent/*": [
+        "../coding-agent/*"
+      ],
+      "@earendil-works/pi-tui": [
+        "../tui/src/index.ts"
+      ],
+      "@earendil-works/pi-tui/*": [
+        "../tui/src/*"
+      ],
+      "@earendil-works/pi-ai": [
+        "../ai/src/index.ts"
+      ]
     }
   },
-  "include": ["./**/*.ts"]
+  "include": [
+    "./**/*.ts"
+  ]
 }
