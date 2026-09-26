@@ -26,7 +26,7 @@
  * one token other rows depend on:
  *
  *   - **`rlmHeadless`** is always provided, and answers `on`. A row that would
- *     rather do less than disappear asks it — `rlm-gitpixel` does exactly that,
+ *     rather do less than disappear asks it — `rlm-pixel` does exactly that,
  *     and skips the repository re-index it otherwise runs at every
  *     `session_start`.
  *   - **`rlmLive`** is provided **only when a person is there**. It carries
@@ -89,7 +89,7 @@
  * it, and they come up, which is the one behaviour `inject` got backwards.
  */
 import { statSync } from "node:fs";
-import { homedir } from "node:os";
+import { freemem, homedir, totalmem } from "node:os";
 import { delimiter, join } from "node:path";
 import { Service } from "@deepseek-ai/cordis";
 
@@ -165,6 +165,20 @@ export interface RlmHeadlessConfig {
 	 * too, and rlm spawns one process per task exactly as it always did.
 	 */
 	childPoolSlots?: number;
+	/**
+	 * Below this fraction of memory free, a worker takes one task at a time.
+	 *
+	 * The whole of the sizing rule now that the static eight is gone. Above the
+	 * floor a worker is not capped in advance and the OS refuses what it cannot
+	 * give — `EMFILE`, `ENOMEM` — which the pool catches. Twenty percent is the
+	 * point the laptop starts to lag, and it is deliberately the same number the
+	 * delegate's `capacity()` uses for its own headroom floor.
+	 */
+	workerMemoryFloor?: number;
+	/** How often a pooled worker says it is still alive, in milliseconds. */
+	workerHeartbeatMs?: number;
+	/** Silence this long from a pooled worker and it is treated as dead. */
+	workerHeartbeatTimeoutMs?: number;
 }
 
 /**
@@ -206,21 +220,43 @@ export interface RlmHeadlessConfig {
 const DEFAULT_CHILD_FLAGS = "--max-semi-space-size=2 --optimize-for-size";
 
 /**
- * How many tasks one pooled worker holds at once.
+ * How many tasks one pooled worker holds at once — measured, not guessed.
  *
- * The whole argument for a pool is in one measurement: a real delegated child
- * sampled every 700 ms reaches 143 MB at 1.4 s and is flat from there through
- * the model call. The boot is the cost and the task is not, so eight tasks in
- * one process cost about what one task in one process costs, and eight
- * processes cost eight times that for no reason.
+ * This was `8`, and the argument for it was a real measurement: a delegated
+ * child sampled every 700 ms reaches 143 MB at 1.4 s and is flat from there
+ * through the model call, so the boot is the cost and the task is not. That part
+ * still holds. What did not hold is the number: eight was a fact about the
+ * machine it was written on, and a fact about one machine is wrong on every
+ * other one — a 96 GB box is throttled by it and a tight laptop is sunk by it.
  *
- * Eight rather than "all of them" because a worker is also the unit of blast
- * radius: the `code` tool is a vm with `require` in scope, so a task can take
- * its worker down, and everything sharing that worker is re-queued when it
- * does. Eight is the number where the fixed cost is amortised and a bad task
- * costs one boot, not the fleet.
+ * So the question it answers is asked of the machine instead, and it is a memory
+ * question: below the floor, one task at a time; above it, uncapped, and the OS
+ * refuses what it cannot give. The blast-radius argument that produced the eight
+ * is not lost — it moved to `maxTasksPerWorker` in the pool, which is where it
+ * belongs, because retiring a worker after N tasks is about a worker's lifetime
+ * and not about how many things it may do at once.
+ *
+ * `0` and `1` in the config still mean "no pool", which is the whole of the
+ * switch and is unchanged.
  */
-const DEFAULT_POOL_SLOTS = 8;
+const DEFAULT_MEMORY_FLOOR = 0.2;
+
+/**
+ * What a worker may hold at once, right now, on this machine.
+ *
+ * `MAX_SAFE_INTEGER` is "not capped in advance" said in a number, because the
+ * value goes down the worker's command line and a person reading `ps` should be
+ * able to tell the difference between a limit and the absence of one.
+ */
+const poolSlotsNow = (floor: number): number => {
+	try {
+		const total = totalmem();
+		if (!total) return 1;
+		return freemem() / total < floor ? 1 : Number.MAX_SAFE_INTEGER;
+	} catch {
+		return 1;
+	}
+};
 
 /**
  * What an unwatched child is run by.
@@ -356,9 +392,29 @@ export const configFields = [
 	{
 		key: "childPoolSlots",
 		type: "number",
-		default: DEFAULT_POOL_SLOTS,
 		description:
-			"How many delegated tasks one long-lived worker process holds at once. A delegated child used to be one process per task, ~110-125 MB each, and the memory went almost entirely on booting the composition so the process was ready to do a task — measured flat from 1.4 s onward, right through the model call. Pooling pays that boot once for the fleet instead of once per task. 0 or 1 turns the pool off and every task gets its own process again.",
+			"How many delegated tasks one long-lived worker process holds at once. A delegated child used to be one process per task, ~110-125 MB each, and the memory went almost entirely on booting the composition so the process was ready to do a task — measured flat from 1.4 s onward, right through the model call. Pooling pays that boot once for the fleet instead of once per task. Leave it unset and the number is measured from the machine instead of guessed: one task at a time while memory is below the floor, uncapped above it, with the OS refusing what it cannot give. Setting it overrules the measurement; 0 or 1 turns the pool off and every task gets its own process again.",
+	},
+	{
+		key: "workerMemoryFloor",
+		type: "number",
+		default: DEFAULT_MEMORY_FLOOR,
+		description:
+			"Below this fraction of memory free, a pooled worker takes one task at a time. This replaced a hardcoded eight, which was a fact about the machine it was written on and therefore wrong on every other one. Twenty percent is where the laptop starts to lag, and it is deliberately the same figure the delegate's capacity rule uses — two floors that disagree is how a fleet ends up throttled by whichever one nobody remembered.",
+	},
+	{
+		key: "workerHeartbeatMs",
+		type: "number",
+		default: 5000,
+		description:
+			"How often a pooled worker says it is still alive. A pid that exists is not a worker that works: wedged in a native call or spinning inside a tool that never returns, it holds its tasks and answers nothing, and the only bound on that used to be the forty-five-minute per-attempt timeout. 0 switches it off.",
+	},
+	{
+		key: "workerHeartbeatTimeoutMs",
+		type: "number",
+		default: 15000,
+		description:
+			"Silence this long from a pooled worker and it is killed and its task handed to another one, exactly as if it had crashed. Three missed beats by default. Anything below twice the heartbeat interval is raised to it, because a bound tighter than the thing it measures fires on healthy workers.",
 	},
 	{
 		key: "token",
@@ -610,8 +666,32 @@ export class RlmHeadlessService extends Service {
 	 */
 	childPoolSlots(): number {
 		const raw = this.config.childPoolSlots;
-		const slots = typeof raw === "number" && Number.isFinite(raw) ? Math.floor(raw) : DEFAULT_POOL_SLOTS;
-		return slots > 1 ? slots : 0;
+		// A number in the config is a person overruling the measurement, and it
+		// still wins — including `0` and `1`, which are how the pool is turned off.
+		if (typeof raw === "number" && Number.isFinite(raw)) {
+			const slots = Math.floor(raw);
+			return slots > 1 ? slots : 0;
+		}
+		return poolSlotsNow(this.config.workerMemoryFloor ?? DEFAULT_MEMORY_FLOOR);
+	}
+
+	/** How often a pooled worker should say it is still alive. */
+	childHeartbeatMs(): number {
+		const raw = this.config.workerHeartbeatMs;
+		return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 5_000;
+	}
+
+	/**
+	 * Silence this long from a pooled worker and it is treated as dead.
+	 *
+	 * Never less than twice the interval: a bound tighter than the thing it
+	 * measures fires on healthy workers, and a fleet that retires healthy workers
+	 * is more expensive than no heartbeat at all.
+	 */
+	childHeartbeatTimeoutMs(): number {
+		const raw = this.config.workerHeartbeatTimeoutMs;
+		const asked = typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 15_000;
+		return Math.max(asked, this.childHeartbeatMs() * 2);
 	}
 
 	/**
