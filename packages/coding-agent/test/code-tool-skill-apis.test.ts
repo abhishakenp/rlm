@@ -39,6 +39,7 @@ describe("code tool — the skills' kernel APIs are bound", () => {
 			{ message: "x", receiver_role: "child", receiver_name: "a" },
 		],
 		[`await agent_message.list_agents()`, "agent_message.list_agents", {}],
+		[`await agent_message.wait_for_parent(5000)`, "agent_message.wait_for_parent", { timeout_ms: 5000 }],
 		[`await agent_observe.recent_messages("kid", 6)`, "agent_observe.recent", { target: "kid", limit: 6 }],
 		[`await goal.create("ship", { token_budget: 5 })`, "goal.create", { objective: "ship", token_budget: 5 }],
 		[`await compact.run("keep tests")`, "compact.run", { instructions: "keep tests" }],

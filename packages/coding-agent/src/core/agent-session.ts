@@ -1413,6 +1413,12 @@ export class AgentSession {
 	private _rlmTaskContextSnapshot: Record<string, any> | null = null;
 	private _repliedToParentSinceTask: boolean | undefined;
 	private _parentReplyCount = 0;
+	/**
+	 * Cells blocked in `agent_message.wait_for_parent`. A parent message that
+	 * arrives while one waits is handed to it directly: queued as a steer it
+	 * would sit behind the very tool call that is waiting for it.
+	 */
+	private _parentMessageWaiters: Array<(message: AgentSessionMessage) => void> = [];
 	private _subagentRuntimeHost?: SubagentRuntimeHost;
 	/** Fleet identity for this agent — used for distributed spawning. */
 	private _fleetIdentity: import("./fleet-runtime/agent-identity.js").AgentIdentityRecord | undefined;
@@ -5245,9 +5251,53 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 		}
 	}
 
+	/**
+	 * Block until the parent sends this session an agent message, or until the
+	 * timeout. The message is returned to the waiting cell instead of being
+	 * queued as a turn, so it ends up in the transcript as that cell's result.
+	 */
+	waitForParentAgentMessage(
+		timeoutMs = 30_000,
+		signal?: AbortSignal,
+	): Promise<{ timedOut: boolean; message?: string; messageId?: string; details?: Record<string, unknown>; elapsedMs: number }> {
+		const started = Date.now();
+		if (!(timeoutMs > 0) || signal?.aborted) return Promise.resolve({ timedOut: true, elapsedMs: 0 });
+		return new Promise((resolve) => {
+			const done = (result: Parameters<typeof resolve>[0]) => {
+				clearTimeout(timer);
+				signal?.removeEventListener("abort", onAbort);
+				this._parentMessageWaiters = this._parentMessageWaiters.filter((waiter) => waiter !== deliver);
+				resolve(result);
+			};
+			const deliver = (message: AgentSessionMessage) =>
+				done({
+					timedOut: false,
+					message: message.details.message,
+					messageId: message.details.id,
+					details: { from: message.details.from, fromRelationship: message.details.fromRelationship },
+					elapsedMs: Date.now() - started,
+				});
+			const onAbort = () => done({ timedOut: true, elapsedMs: Date.now() - started });
+			const timer = setTimeout(onAbort, timeoutMs);
+			signal?.addEventListener("abort", onAbort, { once: true });
+			this._parentMessageWaiters.push(deliver);
+		});
+	}
+
+	/** Hand a parent message to a waiting cell; true when one took it. */
+	private _deliverToParentWaiter(customMessage: AgentSessionMessage | undefined): boolean {
+		if (customMessage?.details.fromRelationship !== "parent") return false;
+		const waiter = this._parentMessageWaiters.shift();
+		if (!waiter) return false;
+		this._repliedToParentSinceTask = false;
+		waiter(customMessage);
+		return true;
+	}
+
 	async acceptAgentMessagePrompt(text: string, options?: PromptOptions): Promise<void> {
 		const customMessage =
 			options?.customMessage && isAgentSessionMessage(options.customMessage) ? options.customMessage : undefined;
+		if (this._deliverToParentWaiter(customMessage)) return;
 		await this._prompt(text, {
 			...options,
 			resumeIfIdle: false,
@@ -5267,6 +5317,7 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 		customMessage?: AgentSessionMessage,
 	): Promise<boolean> {
 		const agentMessageId = customMessage?.details.id ?? parseAgentSessionMessagePromptId(text);
+		if (this._deliverToParentWaiter(customMessage)) return true;
 		if (streamingBehavior === "steer") {
 			await this._queuePreparedPrompt("steer", text, undefined, {
 				agentMessageId,
@@ -9936,6 +9987,16 @@ Prefer the smallest effective edit. Only persist genuinely reusable findings —
 					},
 				}),
 			);
+			handlers["agent_message.wait_for_parent"] = async (payload) => {
+				const raw = payload.timeout_ms ?? payload.timeoutMs;
+				if (raw !== undefined && (typeof raw !== "number" || !Number.isFinite(raw))) {
+					throw new Error("agent_message.wait_for_parent timeout_ms must be a number");
+				}
+				return (await this.waitForParentAgentMessage(raw as number | undefined)) as unknown as Record<
+					string,
+					unknown
+				>;
+			};
 		}
 		if (this._agentObserveController) {
 			Object.assign(

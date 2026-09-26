@@ -33,6 +33,11 @@ if child is not None:
   for the current agent's parent, siblings, and children. It includes inactive
   family members and sorts parent, siblings by name, then children by name; it
   does not expose a global daemon session list.
+- `await agent_message.wait_for_parent(timeout_ms=30000)` — blocks this cell until
+  the parent sends this session a message, then returns `{ timedOut, message,
+  messageId, details, elapsedMs }`. Use it after asking the parent a question
+  with `send(..., receiver_role="parent")`: the reply is handed to the waiting
+  cell directly instead of queuing behind it. On timeout, `timedOut` is true.
 - `await agent_message.send(message, receiver_role="parent" | "sibling" | "child", receiver_name=None)` — sends one direct
   text message to an active session. Sending to an idle completed subagent
   starts an ordinary follow-up turn in that same child session and context.

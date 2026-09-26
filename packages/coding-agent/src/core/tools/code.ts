@@ -789,6 +789,7 @@ const SKILL_APIS: Record<string, { skill: string; methods: Record<string, [strin
 		methods: {
 			list_agents: ["agent_message.list_agents", []],
 			send: ["agent_message.send", ["message", "receiver_role", "receiver_name"]],
+			wait_for_parent: ["agent_message.wait_for_parent", ["timeout_ms"]],
 		},
 	},
 	agent_observe: {
