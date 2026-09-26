@@ -28,6 +28,7 @@ import { adopt, hotData } from "../../rlm-hmr/src/hot.ts";
 import { alwaysStatus, ensureAlwaysReady } from "./cli.ts";
 import { AlwaysEventClient, type SttEvent, socketPath } from "./event-client.ts";
 import { type FocusState, FocusWatcher } from "./focus-watcher.ts";
+import { eligibleToOwn, OwnerLease } from "./owner.ts";
 
 export { AlwaysEventClient, socketPath } from "./event-client.ts";
 export type { AlwaysState, SttEvent } from "./event-client.ts";
@@ -87,6 +88,81 @@ declare module "@deepseek-ai/cordis" {
 	}
 }
 
+/**
+ * Holds the machine-wide lease (owner.ts) and, only while it holds it, the
+ * daemon connection and the focus helper. Adopted across hot swaps, so a
+ * reload never drops the socket; a non-owner retries every few seconds and
+ * takes over within one tick of the owner exiting.
+ */
+class AlwaysOwnership {
+	client?: AlwaysEventClient;
+	watcher?: FocusWatcher;
+	private readonly lease = new OwnerLease();
+	private timer?: ReturnType<typeof setInterval>;
+	private busy = false;
+	private stopped = false;
+	private readonly onExit = () => this.lease.release();
+
+	constructor(
+		private readonly make: {
+			prepare: () => Promise<void>;
+			client: () => AlwaysEventClient;
+			watcher: () => FocusWatcher;
+		},
+		private readonly log: (level: "info" | "warn", msg: string) => void,
+		private readonly retryMs = 3000,
+	) {}
+
+	get owned(): boolean {
+		return !!this.client;
+	}
+
+	start(): this {
+		void this.tick();
+		this.timer = setInterval(() => void this.tick(), this.retryMs);
+		(this.timer as any).unref?.();
+		process.once("exit", this.onExit);
+		return this;
+	}
+
+	private async tick(): Promise<void> {
+		if (this.stopped || this.busy) return;
+		this.busy = true;
+		try {
+			if (this.owned) {
+				if (!this.lease.holds()) this.drop("lease taken by another process");
+				return;
+			}
+			if (!(await this.lease.tryAcquire())) return;
+			await this.make.prepare();
+			if (this.stopped) return;
+			this.client = this.make.client();
+			this.watcher = this.make.watcher();
+			this.log("info", `[always] owner (pid ${process.pid}): driving the Always daemon`);
+		} catch (e: any) {
+			this.log("warn", `[always] ownership tick failed: ${e?.message ?? e}`);
+		} finally {
+			this.busy = false;
+		}
+	}
+
+	private drop(why: string): void {
+		this.client?.stop();
+		this.watcher?.stop();
+		this.client = undefined;
+		this.watcher = undefined;
+		this.log("info", `[always] stood down: ${why}`);
+	}
+
+	stop(): void {
+		this.stopped = true;
+		if (this.timer) clearInterval(this.timer);
+		process.removeListener("exit", this.onExit);
+		if (this.owned) this.drop("row stopped");
+		this.lease.release();
+	}
+}
+
 export class Always extends Service {
 	static inject = [] as const;
 	static provide = "always" as const;
@@ -95,8 +171,11 @@ export class Always extends Service {
 	private shared = hotData<Shared>("always:shared");
 	private transcriptHandlers = new Set<TranscriptHandler>();
 	private focusHandlers = new Set<FocusHandler>();
-	private client!: AlwaysEventClient;
-	private watcher!: FocusWatcher;
+	private ownership?: AlwaysOwnership;
+
+	private get client(): AlwaysEventClient | undefined {
+		return this.ownership?.client;
+	}
 
 	constructor(ctx: any, config: AlwaysConfig = {}) {
 		super(ctx, "always");
@@ -120,43 +199,53 @@ export class Always extends Service {
 			this.focusHandlers.clear();
 		});
 
-		if (this.config.startDaemon !== false) {
-			const ready = await ensureAlwaysReady();
-			if (!ready.ok) ctx.logger?.warn?.(`[always] daemon not ready: ${ready.error ?? "not running"}`);
+		// Only one process on the machine drives the daemon (owner.ts). Headless
+		// runs, delegate children and daemon workers never compete; an eligible
+		// process that isn't the owner stays idle and takes over if the owner goes.
+		if (!eligibleToOwn()) {
+			ctx.logger?.info?.("[always] not eligible to drive Always in this process (headless/worker)");
+			return;
 		}
-
-		this.client = adopt(
+		const config = this.config;
+		const log = (level: "info" | "warn", msg: string) => ctx.logger?.[level]?.(msg);
+		this.ownership = adopt(
 			ctx,
-			"always:client",
-			() => {
-				const c = new AlwaysEventClient({
-					path: this.config.socketPath ?? socketPath(),
-					wakeWord: this.config.wakeWord ?? "iris",
-					// Route to Iris until the focus helper reports; it fires at once.
-					consumeMode: true,
-					onEvent: (e) => shared.onStt?.(e),
-					onAlwaysState: () => shared.onState?.(),
-					onReconnect: () => shared.onReconnect?.(),
-				});
-				c.start();
-				return c;
-			},
-			(c) => c.stop(),
-		);
-		this.watcher = adopt(
-			ctx,
-			"always:focus",
-			() => {
-				const w = new FocusWatcher({
-					binPath: this.config.focusBin,
-					intervalMs: this.config.focusIntervalMs ?? 300,
-					onChange: (s) => shared.onFocus?.(s),
-					onError: (e) => shared.onFocusError?.(e),
-				});
-				w.start();
-				return w;
-			},
-			(w) => w.stop(),
+			"always:ownership",
+			() =>
+				new AlwaysOwnership(
+					{
+						prepare: async () => {
+							if (config.startDaemon === false) return;
+							const ready = await ensureAlwaysReady();
+							if (!ready.ok) log("warn", `[always] daemon not ready: ${ready.error ?? "not running"}`);
+						},
+						client: () => {
+							const c = new AlwaysEventClient({
+								path: config.socketPath ?? socketPath(),
+								wakeWord: config.wakeWord ?? "iris",
+								// Route to Iris until the focus helper reports; it fires at once.
+								consumeMode: true,
+								onEvent: (e) => shared.onStt?.(e),
+								onAlwaysState: () => shared.onState?.(),
+								onReconnect: () => shared.onReconnect?.(),
+							});
+							c.start();
+							return c;
+						},
+						watcher: () => {
+							const w = new FocusWatcher({
+								binPath: config.focusBin,
+								intervalMs: config.focusIntervalMs ?? 300,
+								onChange: (s) => shared.onFocus?.(s),
+								onError: (e) => shared.onFocusError?.(e),
+							});
+							w.start();
+							return w;
+						},
+					},
+					log,
+				).start(),
+			(o) => o.stop(),
 		);
 		// A swapped-in generation re-derives routing from what the old one saw.
 		if (shared.lastFocus) this.recompute("reload");

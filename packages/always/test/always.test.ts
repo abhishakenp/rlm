@@ -12,6 +12,7 @@ import { Context } from "@deepseek-ai/cordis";
 import { AlwaysEventClient } from "../src/event-client.ts";
 import { FocusWatcher } from "../src/focus-watcher.ts";
 import Always from "../src/index.ts";
+import { eligibleToOwn, OwnerLease } from "../src/owner.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const until = async (cond: () => boolean, ms = 3000) => {
@@ -53,6 +54,9 @@ class FakeDaemon {
 let dir: string;
 beforeAll(() => {
 	dir = mkdtempSync(join(tmpdir(), "always-test-"));
+	// The owner lease lives under RLM_HOME; never the real ~/.rlm.
+	process.env.RLM_HOME = join(dir, "rlm-home");
+	delete process.env.RLM_HEADLESS;
 });
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -203,4 +207,54 @@ describe("Always row", () => {
 		for (const c of daemon.clients) c.destroy();
 		await daemon.close();
 	}, 15_000);
+});
+
+describe("one owner per machine", () => {
+	test("a second lease cannot take a live holder; it takes over once released", async () => {
+		const leaseDir = join(dir, "lease-a");
+		const a = new OwnerLease(leaseDir);
+		const b = new OwnerLease(leaseDir);
+		expect(await a.tryAcquire(10)).toBe(true);
+		expect(await b.tryAcquire(10)).toBe(false);
+		a.release();
+		expect(await b.tryAcquire(10)).toBe(true);
+		expect(a.holds()).toBe(false);
+		b.release();
+	});
+
+	test("a holder whose process is gone is stale and replaced", async () => {
+		const leaseDir = join(dir, "lease-b");
+		const { mkdirSync } = await import("node:fs");
+		mkdirSync(leaseDir, { recursive: true });
+		// pid 1 is launchd: alive, but a different start time → not the recorded holder.
+		writeFileSync(join(leaseDir, "owner.json"), JSON.stringify({ pid: 1, start: "Thu Jan  1 00:00:00 1970", token: "ghost" }));
+		const b = new OwnerLease(leaseDir);
+		expect(await b.tryAcquire(10)).toBe(true);
+		b.release();
+	});
+
+	test("headless runs, delegate children and daemon workers never drive Always", () => {
+		expect(eligibleToOwn({}, ["bun", "cordis-shell.mjs"])).toBe(true);
+		expect(eligibleToOwn({ RLM_HEADLESS: "1" }, [])).toBe(false);
+		expect(eligibleToOwn({ RLM_DELEGATE_CHILD: "1" }, [])).toBe(false);
+		expect(eligibleToOwn({ PRIME_AGENT_INTERNAL_DAEMON_WORKER: "1" }, [])).toBe(false);
+		expect(eligibleToOwn({}, ["bun", "cordis-shell.mjs", "--pool-worker"])).toBe(false);
+	});
+
+	test("an ineligible process mounts the row without touching the daemon", async () => {
+		const daemon = new FakeDaemon(join(dir, "idle.sock"));
+		await daemon.listen();
+		process.env.RLM_HEADLESS = "1";
+		try {
+			const root: any = new Context();
+			root.plugin(Always, { socketPath: daemon.path, startDaemon: false, focusBin: join(dir, "nope") });
+			expect(await until(() => !!root.always)).toBe(true);
+			await sleep(300);
+			expect(daemon.clients.length).toBe(0);
+			expect(root.always.daemonConnected).toBe(false);
+		} finally {
+			delete process.env.RLM_HEADLESS;
+			await daemon.close();
+		}
+	});
 });
