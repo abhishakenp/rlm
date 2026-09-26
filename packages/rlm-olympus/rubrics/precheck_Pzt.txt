@@ -1,0 +1,19 @@
+
+**--output_path Flag (JUnit XML mode)**
+- test.sh MUST parse a \`--output_path <path>\` flag before the mode argument
+- ERROR if test.sh does not accept --output_path
+- The flag should be parsed before the base/new mode argument (e.g. \`./test.sh --output_path results.xml base\`)
+- WARN if --output_path is ignored or hardcoded
+
+**JUnit XML Output**
+- Test commands MUST produce JUnit XML output at the path specified by --output_path
+- ERROR if no JUnit XML reporter is configured
+- Common patterns to look for:
+  - pytest: \`--junitxml="$OUTPUT_PATH"\`
+  - vitest: \`--reporter=junit --outputFile="$OUTPUT_PATH"\`
+  - jest: \`--reporters=jest-junit\` with JEST_JUNIT_OUTPUT_DIR/JEST_JUNIT_OUTPUT_NAME env vars
+  - go test: \`go-junit-report > "$OUTPUT_PATH"\`
+  - mocha: \`--reporter mocha-junit-reporter --reporter-options mochaFile="$OUTPUT_PATH"\`
+  - deno: \`--junit-path="$OUTPUT_PATH"\`
+- WARN if the XML output path is hardcoded instead of using the --output_path value
+- Do NOT use set -e in test.sh — test runners exit non-zero on failure, and JUnit XML must be written first

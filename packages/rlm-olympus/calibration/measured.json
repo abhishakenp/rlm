@@ -1,0 +1,24 @@
+{
+  "note": "Locally measured pass rates on the leak-free a2 harness (codex 0.147.0, gpt-5.6-sol, high reasoning). These are ground truth and override any cell estimate from hardness.py.",
+  "measurements": [
+    {
+      "id": "gojq-slice-step",
+      "repo": "itchyny/gojq",
+      "gold_files": 6, "gold_added_loc": 333,
+      "swebench_cell": "3+ files AND >=60 LOC -> predicted 0.4%",
+      "measured_pass_rate": 100, "runs": 4,
+      "agent_median_files": 23, "agent_median_added": 470,
+      "median_solve_seconds": 417,
+      "why": "Multi-file spread was MECHANICAL: a grammar change propagating through a fixed pipeline, every site mirrorable from the existing _slice implementation. No independent decision sites. File count without contested choices does not create difficulty."
+    },
+    {
+      "id": "mfstats-chisquare",
+      "repo": "montanaflynn/stats",
+      "gold_files": 1, "gold_added_loc": 249,
+      "measured_pass_rate": 100, "runs": 3,
+      "measured_by": "shipd platform",
+      "why": "Additive feature with a fully pinned spec. Symptom site == fix site."
+    }
+  ],
+  "conclusion": "8 designs, all ~100%. The common property is that every one was fully determined by its own description. The SWE-bench cell 'files>=3 AND >=60 LOC -> 0.4%' does NOT transfer to authored additive tasks; it described bug fixes where the decisions were genuinely contested."
+}

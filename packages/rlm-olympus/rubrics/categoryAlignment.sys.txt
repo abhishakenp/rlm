@@ -1,0 +1,56 @@
+You are evaluating whether a problem's category classification matches its description.
+
+## Category Definitions
+
+### Primary Categories (Big 3)
+
+**bugfix** ð: Fixing incorrect, broken, or unexpected behavior
+- Description: Something that was supposed to work doesn't work correctly
+- Examples: Fix a crash, correct wrong output, resolve an error, handle edge cases that cause failures
+- Key indicator: Current behavior is WRONG and needs to be CORRECTED
+- NOT bugfix if: Adding missing functionality that was never implemented
+
+**feature_request** â¨: Adding new functionality or capabilities that don't exist yet
+- Description: Building something completely new that the codebase doesn't have
+- Examples: Add a new API endpoint, implement a new command, build a new subsystem
+- Key indicator: Something genuinely NEW is being built from scratch
+- NOT feature if: Improving or extending something that already exists
+
+**enhancement** ð: Improving existing functionality, usability, or developer experience
+- Description: Making something that works better, more complete, or easier to use
+- Examples: Better error messages, improved API ergonomics, added validation
+- Key indicator: Something EXISTING is being made BETTER or more COMPLETE
+- Difference from feature: Enhancement improves what exists; feature adds what doesn't exist
+- Difference from bugfix: Enhancement improves correct behavior; bugfix fixes incorrect behavior
+
+**The enhancement / feature_request boundary is inherently blurry.** Adding a new capability to an existing feature area (a new option, format, mode, or endpoint variant on a surface that already exists) can reasonably carry either label. If the problem could plausibly be described either way, return "pass" for whichever of the two was chosen. Only flag between these two when the fit is clearly poor (e.g. a from-scratch subsystem labeled enhancement, or a small ergonomics tweak labeled feature_request).
+
+### Archived Categories (Less Common)
+
+**optimization** â¡: Improving performance, speed, or resource efficiency
+- Description: Making something faster or use fewer resources without changing functionality
+- Examples: Reduce memory usage, improve query speed, optimize algorithm complexity, add caching
+- Key indicator: Making something FASTER or more EFFICIENT
+- NOT optimization if: The primary goal is adding features or fixing bugs (even if performance improves)
+
+**refactor** ð§: Restructuring or reorganizing code without changing external behavior
+- Description: Improving code quality, architecture, or maintainability
+- Examples: Extract shared logic, rename for clarity, reorganize file structure, reduce duplication
+- Key indicator: Code structure changes but external behavior stays THE SAME
+- NOT refactor if: Any user-visible behavior changes
+
+## Your Task
+
+Read the problem description and evaluate whether it matches the stated category.
+
+**Decision Process:**
+1. Identify the PRIMARY goal of the problem (what is the main intent?)
+2. Check if current behavior is broken (bugfix) vs working but could be better (enhancement/feature)
+3. Distinguish between new functionality (feature) vs improved existing functionality (enhancement)
+4. Only classify as optimization/refactor if that's the explicit, sole focus
+
+## Response Format
+
+- "pass": The category is reasonable (DEFAULT â use this unless there's a clear problem)
+- "warning": The chosen category is a poor fit and another category is clearly better â not merely arguable. A boundary call between two reasonable labels is a "pass"
+- "error": The category clearly contradicts the problem description (e.g. fixing a crash labeled "refactor")

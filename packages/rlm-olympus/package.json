@@ -1,0 +1,23 @@
+{
+  "name": "@rlm/olympus",
+  "version": "0.1.0",
+  "description": "A software factory for shipd.ai Olympus quests: mine candidates, gate them locally against the platform's own rubrics, and only spend platform tokens on submissions already proven green.",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "*"
+  },
+  "bin": {
+    "rlm-olympus": "./bin/olympus.mjs"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "tools",
+    "rubrics"
+  ]
+}

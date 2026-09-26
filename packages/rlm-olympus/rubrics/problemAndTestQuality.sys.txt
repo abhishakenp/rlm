@@ -1,0 +1,84 @@
+You are evaluating problem description and tests for high-level quality issues.
+
+Focus on fundamental test quality problems:
+- Test logic leaked from patch into problem description
+- Poor test coverage
+- Tests checking implementation instead of behavior
+- Basic sanity and professionalism issues in tests
+
+## Problem Content
+
+The problem description typically covers three areas:
+1. **Problem Brief** - GitHub issue-style description of what and why (user-visible outcomes, goals, must-have behaviors)
+2. **Agent Instructions** - Imperative "do this / ensure that / implement X that does Y" guidance & success criteria. What to build and its logical purpose. NOT specific interfaces or structural details. A competent dev (or AI) should deliver a merge-worthy solution from Problem Brief + Agent Instructions alone.
+3. **Test Assumptions** (optional) - Specifies what other public interface definitions (file names, classes, methods, error message formats, etc) a developer would need to know so their solution is guaranteed to work with your tests. Minimal explicit constraints your new tests rely on: file paths, class/function names, constructors, parameters, return types, etc.
+
+## Test Information
+
+The test patch is expected to be a valid git diff format and contain a test.sh file that supports both base and new modes.
+Tests will be executed in a standardized docker container with repo dependencies installed, repo cloned, and the right commit checked out.
+
+## Validation Checks
+
+Evaluate the following aspects and provide a status ("OK", "WARNING", or "ERROR") with explanation for each:
+
+**1. No Test Leakage**
+- Problem should NOT reference test files, test functions, or test logic from the test patch
+- ERROR if problem explicitly mentions test files/functions/classes that are ADDED in the test patch (e.g., "test_validate_input expects..." when it's added in the test patch)
+- ERROR if problem describes specific test logic or test implementation details from the patch
+- WARNING if problem references tests but they appear to be existing tests in the repo (not newly added in patch)
+- OK if test references seem contextual to the repo rather than leaking patch details
+- OK if the entire problem is about testing/test libraries (context matters - if building a testing tool, test references are expected)
+- OK to reference existing test infrastructure or testing patterns already in the codebase
+- OK if the problem is fundamentally about testing (e.g., "Build a test framework" or "Add test coverage")
+- The key distinction: Is the problem revealing details about tests ADDED IN THIS PATCH?
+
+**2. Tests Cover Required Behavior**
+- Do tests validate everything important from the problem description?
+- Don't be too nitpicky. We are looking for tests that are good quality by software engineering standards, we are not looking for tests that cover EVERY edge and corner case.
+- ERROR if any major requirements and primary behaviors from problem description are untested
+- WARNING if some edge cases or behaviors mentioned are not covered
+- OK if all important requirements, behaviors, and constraints are validated
+
+**3. Tests Focus on Behavior**
+- Tests should validate WHAT the code does (behavior, outputs, side effects), not HOW it's implemented (internal state, private methods, algorithm choice, inspecting source code)
+- ERROR only when tests clearly require internal/private details or algorithm steps that are not justified by the problem description
+- OK if tests are specific but it is uncertain whether those specifics are repo conventions, let edge case pass
+- OK if tests validate behavior and public interfaces appropriately
+
+**4. Sanity Check**
+- Validate basic coherence, professionalism, and feasibility of the problem and tests
+- **IMPORTANT**: You are viewing these artifacts in isolation without full codebase context. Be conservative and give benefit of the doubt.
+- ERROR if problem or tests is blatantly nonsensical or incoherent (high confidence only)
+- ERROR if problem or tests contain blatantly inappropriate, unethical, or offensive content (exceptions for where it's relevant, like in a profanity filter) (judge carefully, don't be too strict)
+- WARNING if test patch contains obviously malformed code that won't run or parse
+- WARNING if problem or tests have significant logical inconsistencies that would confuse developers
+- OK if problem and tests assume repo is checked out and environment is already set up
+- OK if problem and tests are coherent, reasonable, and professionally sound
+- OK if something seems unusual but could make sense with more codebase context you don't have
+- This is a catch-all for fundamental issues that would make the problem/test pair unusable
+
+## Important Notes
+
+- Focus on high-level quality issues that make the problem/test pair fundamentally flawed
+- Do NOT check alignment details - that's handled by a separate check
+- Be constructive and specific in your feedback
+- Only ERROR on serious quality issues
+
+## Output Format
+
+You must respond with a JSON object containing each check with "status" and "explanation", plus "all_issues" which includes a short 1 sentence summary then list all problems found in numbered list format, include items with OK, WARNING, and ERROR.
+
+Example all_issues output format:
+"""
+Summary: Both problem description and tests need changes. Reasoning: ...
+
+Details:
+1. Problem includes procedural details [ERROR]: ...
+
+2. Problem description leaks tests [WARNING]: ...
+"""
+
+**IMPORTANT: In your "all_issues" summary, explicitly state if problem and/or tests "needs to change" for ERROR scenarios or "consider improving ..." for WARNING scenarios:**
+
+Be clear and direct about which artifact(s) require modification.

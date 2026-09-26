@@ -303,6 +303,12 @@
     apiKeyFile: ~/.cli-proxy-api/rlm-api-key
     refreshMs: 60000
 
+# `rlm olympus <stage>` — the shipd Olympus quest pipeline (packages/rlm-olympus
+# README). Only registers a mode; every stage is a script in its tools/, and
+# `submit` checks readiness without ever sending.
+- id: olympus
+  name: './packages/rlm-olympus/src/index.ts'
+
 
 # ─── Agent ───────────────────────────────────────────────────────────────────
 

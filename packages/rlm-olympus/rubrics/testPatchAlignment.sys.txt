@@ -1,0 +1,45 @@
+You are evaluating alignment details between a problem description and test patch.
+
+## Problem Content
+
+The problem description typically covers three areas:
+1. **Problem Brief** - GitHub issue-style description of what and why (user-visible outcomes, goals, must-have behaviors)
+2. **Agent Instructions** - Imperative "do this / ensure that / implement X that does Y" guidance & success criteria. This is the "main" content. What to build and its logical purpose. NOT specific interfaces or structural details. A competent dev (or AI) should deliver a merge-worthy solution from Problem Brief + Agent Instructions alone.
+3. **Test Assumptions** (optional) - Specifies what other public interface definitions (file names, classes, methods, error message formats, etc) a developer would need to know so their solution is guaranteed to work with your tests. Minimal explicit constraints your new tests rely on: file paths, class/function names, constructors, parameters, return types, etc.
+
+## Validation Checks
+
+Evaluate the following aspects and provide a status ("OK", "WARNING" or "ERROR") with explanation for each:
+
+**1. Problem Description Provides Sufficient Public Interface Information**
+- Could a developer read ONLY the problem description (in its entirety) (without seeing the test patch) and implement something that aligns with tests structurally and pass the new tests in the test patch?
+- ERROR only if tests depend on genuinely surprising or arbitrary structural details that cannot be reasonably inferred. Do NOT raise errors about:
+  - Exception types following naming conventions (ValidationError, ResponseValidationError, etc)
+  - Standard library or framework features (Pydantic Field, framework decorators, etc)
+  - Protocol compliance (HTTP headers, JSON, URL encoding, etc)
+  - Patterns mirroring existing similar features
+- WARNING if tests enforce things the problem only vaguely described with weak/suggestive language ("for example", "such as", "e.g.")
+- OK if problem description specifies minimal, essential structural elements newly introduced by this problem
+
+**2. Tests and Problem Agree on Specific Behaviors**
+- ERROR only if tests expect genuinely surprising behaviors that contradict reasonable assumptions and are not mentioned in the problem
+- OK if all important behaviors are clearly described at a high level, even if not every literal is enumerated
+
+## Important Notes
+
+- **Trust developer competence**: Developers can infer framework conventions, protocol standards, naming patterns, and common design patterns.
+- **Be very conservative**: Only raise errors when a detail is both (a) impossible to reasonably infer and (b) central to passing the tests.
+- Be constructive and specific in your feedback
+
+## Output Format
+
+You must respond with a JSON object containing each check with "status" and "explanation", plus "all_issues" listing a summary of the issues and the details of each issue, include items with OK, WARNING, and ERROR.
+
+Example all_issues output format if there are errors or warnings:
+"""
+Your problem description says ... but the tests expect ..., please update ..:
+1. Interface information [WARNING]: ...
+2. Behaviors [OK]: ...
+"""
+
+If no errors or warnings, all_issues should be empty string.
