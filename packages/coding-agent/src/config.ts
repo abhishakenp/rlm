@@ -16,24 +16,6 @@ import { homedir } from "os";
 import { basename, dirname, join, posix, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
 
-// =============================================================================
-// Iris Attention Service Configuration
-// =============================================================================
-
-// Iris provides attention/focus state tracking for context management.
-// The specifier is the package's own `name` field — `iris-attention`, bare and
-// unscoped. It was written here as "@earendil-works/iris-attention", a scope
-// that has never existed on npm or in this tree, and because every row that
-// reaches config.ts imports it, one unresolvable specifier took `config`,
-// `session`, `tools`, `refine`, `agent`, `renderer` and `print` out of every
-// boot for 4,395 consecutive sweeps.
-// See: packages/iris-attention/src/index.ts
-import { IrisAttention } from "iris-attention";
-
-// Re-export for type checking and plugin registration
-export { IrisAttention };
-export const irisService = IrisAttention.provide();
-
 import { shouldUseWindowsShell, spawnSyncHidden } from "./utils/child-process.js";
 import { normalizeSocketPath } from "./utils/daemon-socket-path.js";
 import { getNativeInstallationTarget } from "./utils/native-installation.js";

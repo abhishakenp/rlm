@@ -33,12 +33,7 @@
 	// `export class IrisVoice` with no body. Both arrived in one commit,
 	// 05d3e56 "[rlm] Various workspace changes: iris family package".
 	//
-	// Excluded rather than deleted: they are somebody's unfinished work and
-	// removing them is not this change's call. Fix them and delete these two
-	// lines — nothing else has to change.
 	"exclude": [
-		"**/dist/**",
-		"packages/rlm-iris-tab-nav/**",
-		"packages/iris-voice/**"
+		"**/dist/**"
 	]
 }

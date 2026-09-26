@@ -73,7 +73,6 @@
         "glob": "^13.0.1",
         "hosted-git-info": "^9.0.2",
         "ignore": "^7.0.5",
-        "iris-attention": "workspace:*",
         "jiti": "^2.7.0",
         "js-yaml": "^4",
         "marked": "^18.0.7",
@@ -99,16 +98,6 @@
       },
       "optionalDependencies": {
         "@mariozechner/clipboard": "^0.3.9",
-      },
-    },
-    "packages/iris-attention": {
-      "name": "iris-attention",
-      "version": "1.0.0",
-      "dependencies": {
-        "@deepseek-ai/cordis": "*",
-      },
-      "devDependencies": {
-        "@types/node": "^22.0.0",
       },
     },
     "packages/rlm-agent": {
@@ -214,6 +203,10 @@
         "@deepseek-ai/cordis-plugin-loader": "*",
       },
     },
+    "packages/rlm-inflight": {
+      "name": "@rlm/inflight",
+      "version": "0.1.0",
+    },
     "packages/rlm-integration": {
       "name": "@rlm/integration",
       "version": "0.1.0",
@@ -224,31 +217,6 @@
       "devDependencies": {
         "@types/node": "^20.0.0",
         "typescript": "^5.0.0",
-      },
-    },
-    "packages/rlm-iris": {
-      "name": "rlm-iris",
-      "version": "0.0.1",
-      "dependencies": {
-        "@deepseek-ai/cordis": "^4.0.1",
-      },
-      "devDependencies": {
-        "@types/node": "^20.0.0",
-        "typescript": "^5.0.0",
-      },
-    },
-    "packages/rlm-iris-always": {
-      "name": "rlm-iris-always",
-      "version": "0.1.0",
-      "dependencies": {
-        "@deepseek-ai/cordis": "*",
-      },
-    },
-    "packages/rlm-iris-tab-nav": {
-      "name": "rlm-iris-tab-nav",
-      "version": "0.0.1",
-      "dependencies": {
-        "@deepseek-ai/cordis": "^4.0.1",
       },
     },
     "packages/rlm-learn": {
@@ -372,6 +340,11 @@
     "packages/rlm-thinking-steps": {
       "name": "@rlm/thinking-steps",
       "version": "1.0.11",
+      "dependencies": {
+        "@earendil-works/pi-ai": "workspace:*",
+        "@earendil-works/pi-coding-agent": "workspace:*",
+        "@earendil-works/pi-tui": "workspace:*",
+      },
     },
     "packages/rlm-tools": {
       "name": "@rlm/tools",
@@ -642,6 +615,8 @@
     "@rlm/hmr": ["@rlm/hmr@workspace:packages/rlm-hmr"],
 
     "@rlm/host": ["@rlm/host@workspace:packages/rlm-host"],
+
+    "@rlm/inflight": ["@rlm/inflight@workspace:packages/rlm-inflight"],
 
     "@rlm/integration": ["@rlm/integration@workspace:packages/rlm-integration"],
 
@@ -1065,8 +1040,6 @@
 
     "ipaddr.js": ["ipaddr.js@1.9.1", "", {}, "sha512-0KI/607xoxSToH7GjN1FfSbLoU0+btTicjsQSWQlh/hZykN8KpmMf7uYwPW3R+akZ6R/w18ZlXSHBYXiYUPO3g=="],
 
-    "iris-attention": ["iris-attention@workspace:packages/iris-attention"],
-
     "is-core-module": ["is-core-module@2.16.2", "", { "dependencies": { "hasown": "^2.0.3" } }, "sha512-evOr8xfXKxE6qSR0hSXL2r3sd7ALj8+7jQEUvPYcm5sgZFdJ+AYzT6yNmJenvIYQBgIGwfwz08sL8zoL7yq2BA=="],
 
     "is-extglob": ["is-extglob@2.1.1", "", {}, "sha512-SbKbANkN603Vi4jEZv49LeVJMn4yGwsbzZworEoyEiutsN3nJYdbO36zfhGJ6QEDpOZIFkDtnq5JRxmvl3jsoQ=="],
@@ -1267,12 +1240,6 @@
 
     "rlm-code": ["rlm-code@workspace:packages/rlm-code"],
 
-    "rlm-iris": ["rlm-iris@workspace:packages/rlm-iris"],
-
-    "rlm-iris-always": ["rlm-iris-always@workspace:packages/rlm-iris-always"],
-
-    "rlm-iris-tab-nav": ["rlm-iris-tab-nav@workspace:packages/rlm-iris-tab-nav"],
-
     "rolldown": ["rolldown@1.2.7", "", { "dependencies": { "@oxc-project/types": "=0.148.0", "@rolldown/pluginutils": "^1.0.0" }, "optionalDependencies": { "@rolldown/binding-android-arm-eabi": "1.2.7", "@rolldown/binding-android-arm64": "1.2.7", "@rolldown/binding-darwin-arm64": "1.2.7", "@rolldown/binding-darwin-x64": "1.2.7", "@rolldown/binding-freebsd-x64": "1.2.7", "@rolldown/binding-linux-arm-gnueabihf": "1.2.7", "@rolldown/binding-linux-arm64-gnu": "1.2.7", "@rolldown/binding-linux-arm64-musl": "1.2.7", "@rolldown/binding-linux-ppc64-gnu": "1.2.7", "@rolldown/binding-linux-s390x-gnu": "1.2.7", "@rolldown/binding-linux-x64-gnu": "1.2.7", "@rolldown/binding-linux-x64-musl": "1.2.7", "@rolldown/binding-openharmony-arm64": "1.2.7", "@rolldown/binding-win32-arm64-msvc": "1.2.7", "@rolldown/binding-win32-x64-msvc": "1.2.7" }, "bin": { "rolldown": "./bin/cli.mjs" } }, "sha512-g0EtLvBjTUB7jhyV0S/TCup3v/XSVl45vUIGbOGU4QPiyjTenCe4mKuFvW9fEgYmS2Fo42AUssRmNuMziXdrig=="],
 
     "run-parallel": ["run-parallel@1.2.0", "", { "dependencies": { "queue-microtask": "^1.2.2" } }, "sha512-5l4VyZR86LZ/lDxZTR6jqL8AFE2S0IFLMP26AbjsLVADxHdhB/c0GUsH+y39UfCi3dzz8OlQuPmnaJOMoDHQBA=="],
@@ -1455,8 +1422,6 @@
 
     "hosted-git-info/lru-cache": ["lru-cache@11.5.2", "", {}, "sha512-4pfM1Ff0x50o0tQwb5ucw/RzNyD0/YJME6IVcStalZuMWxdt3sR3huStTtxz4PUmvZfRguvDejasvQ2kifR11g=="],
 
-    "iris-attention/@types/node": ["@types/node@22.20.1", "", { "dependencies": { "undici-types": "~6.21.0" } }, "sha512-EANqOCF9QFyra+4pfxUcX9STKJpCLjMbObVzljIJomAWSnuSIEAvyzEU53GaajbXJEgdh0iEcPL+DGvpUd4k1Q=="],
-
     "micromatch/picomatch": ["picomatch@2.3.2", "", {}, "sha512-V7+vQEJ06Z+c5tSye8S+nHUfI51xoXIXjHQ99cQtKUkQqqO1kO/KCJUfZXuB47h/YBlDhah2H3hdUGXn8ie0oA=="],
 
     "node-fetch/data-uri-to-buffer": ["data-uri-to-buffer@4.0.1", "", {}, "sha512-0R9ikRb668HB7QDxT1vkpuUBtqc53YyAwMwGeUFKRojY/NWKvdZ+9UYtRfGmhqNbRkTSVpMbmyhXipFFv2cb/A=="],
@@ -1468,10 +1433,6 @@
     "parse5-htmlparser2-tree-adapter/parse5": ["parse5@6.0.1", "", {}, "sha512-Ofn/CTFzRGTTxwpNEs9PP93gXShHcTq255nzRYSKe8AkVpZY7e1fpmTfOyoIvjP5HG7Z2ZM7VS9PPhQGW2pOpw=="],
 
     "path-scurry/lru-cache": ["lru-cache@11.5.2", "", {}, "sha512-4pfM1Ff0x50o0tQwb5ucw/RzNyD0/YJME6IVcStalZuMWxdt3sR3huStTtxz4PUmvZfRguvDejasvQ2kifR11g=="],
-
-    "rlm-iris/@types/node": ["@types/node@20.19.43", "", { "dependencies": { "undici-types": "~6.21.0" } }, "sha512-6oYBAi5ikg4Pl+kGsoYtawUMBT2zZMCvPNF7pVLnHZfd1zf38DRiWn/gT01RYCdUqkv7Fhr+C9ot4/tb+2sVvA=="],
-
-    "rlm-iris/typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
 
     "send/debug": ["debug@2.6.9", "", { "dependencies": { "ms": "2.0.0" } }, "sha512-bC7ElrdJaJnPbAP+1EotYvqZsb3ecl5wi6Bfi6BJTUcNowp6cvspg0jXznRTKDjm/E7AdgFBVeAPVMNcKGsHMA=="],
 
@@ -1494,10 +1455,6 @@
     "express/debug/ms": ["ms@2.0.0", "", {}, "sha512-Tpp60P6IUJDTuOq/5Z8cdskzJujfwqfOTkrwIwj7IRISpnkJnT6SyJ4PCPnGMoFjC9ddhal5KVIYtAt97ix05A=="],
 
     "finalhandler/debug/ms": ["ms@2.0.0", "", {}, "sha512-Tpp60P6IUJDTuOq/5Z8cdskzJujfwqfOTkrwIwj7IRISpnkJnT6SyJ4PCPnGMoFjC9ddhal5KVIYtAt97ix05A=="],
-
-    "iris-attention/@types/node/undici-types": ["undici-types@6.21.0", "", {}, "sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ=="],
-
-    "rlm-iris/@types/node/undici-types": ["undici-types@6.21.0", "", {}, "sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ=="],
 
     "send/debug/ms": ["ms@2.0.0", "", {}, "sha512-Tpp60P6IUJDTuOq/5Z8cdskzJujfwqfOTkrwIwj7IRISpnkJnT6SyJ4PCPnGMoFjC9ddhal5KVIYtAt97ix05A=="],
 

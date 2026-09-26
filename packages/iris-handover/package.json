@@ -1,7 +1,0 @@
-{
-  "name": "iris-handover",
-  "description": "Handover primitive for iris voice reload",
-  "version": "0.1.0",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts"
-}

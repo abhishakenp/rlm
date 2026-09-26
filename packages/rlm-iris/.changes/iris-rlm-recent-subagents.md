@@ -1,1 +1,0 @@
-- Added `/rlm status` slash command in the TUI, exposing `recent` as a non-empty array of `completedAt`-stamped subagents when any have finished recently; return `iris()` method now returns a `recent` field alongside `graphs` and `subagents`

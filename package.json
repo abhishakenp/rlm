@@ -12,7 +12,6 @@
     "packages/ai",
     "packages/agent",
     "packages/coding-agent",
-    "packages/iris-attention",
     "packages/rlm-*"
   ],
   "scripts": {
@@ -20,7 +19,7 @@
     "dev": "node cordis-shell.mjs",
     "skills:check": "node --import tsx scripts/check-skills.ts",
     "test:skills-gate": "node --import tsx --test scripts/check-skills.test.ts",
-    "check:types": "bun --cwd packages/rlm-iris run build"
+    "check:types": "bunx tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
