@@ -1,4 +1,5 @@
 import { exec, execSync } from "child_process";
+import * as fs from "fs";
 import { Service } from "@deepseek-ai/cordis";
 import { join } from "path";
 
@@ -9,6 +10,10 @@ export class DelegateSpawner extends Service {
 
   constructor(ctx: any) {
     super(ctx);
+    // Cleanup was `[Service.dispose]`, which cordis 4 does not define — a method
+    // named "undefined" that never ran, so the child outlived the row. The
+    // effect's disposer is what cordis runs when the fiber goes.
+    ctx.effect(() => () => void this.stopDelegate());
     this.startDelegate();
   }
 
@@ -80,9 +85,6 @@ export class DelegateSpawner extends Service {
     }
   }
 
-  async [Service.dispose]() {
-    await this.stopDelegate();
-  }
 }
 
 export default DelegateSpawner;
