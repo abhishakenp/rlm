@@ -90,6 +90,7 @@ import type {
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.js";
 import { emptyGoalState, formatGoalUsage, GOAL_CONTEXT_PREVIEW_LABEL, type GoalState } from "../../core/goals.js";
 import type { KernelSentAgentMessage } from "../../core/kernel/index.js";
+import type { ClientExtensionUiHost } from "../daemon/client-extension-ui-host.js";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.js";
 import { runMcpManagementCommand } from "../../core/mcp/mcp-command.js";
 import {
@@ -816,6 +817,12 @@ export interface InteractiveModeOptions {
 	localSessionHost?: InteractiveModeLocalSessionHost;
 	/** Bind extension handlers in the local session host. Disabled for gateway-backed clients. */
 	bindLocalSessionExtensions?: boolean;
+	/**
+	 * When extensions are not bound locally (daemon chats), load them a second
+	 * time in this process for their UI only (client-extension-ui-host.ts).
+	 * Default: on in daemon mode (RLM_DAEMON=1); RLM_CLIENT_EXTENSION_UI=0 turns it off.
+	 */
+	clientExtensionUi?: boolean;
 	/** UI-local services used for settings, auth, resources, and rendering. Defaults to services from localSessionHost. */
 	uiServices?: InteractiveModeUiServices;
 	/**
@@ -872,6 +879,8 @@ export class InteractiveMode {
 	private agentConnection: AgentConnection;
 	private localSessionHost: InteractiveModeLocalSessionHost | undefined;
 	private bindLocalSessionExtensions: boolean;
+	private clientExtensionUi: ClientExtensionUiHost | undefined;
+	private clientExtensionUiStarting: Promise<void> | undefined;
 	private ui: TUI;
 	private chatContainer: Container;
 	private shortcutGuideContainer: Container;
@@ -3162,6 +3171,7 @@ export class InteractiveMode {
 			await this.refreshConnectionCatalog();
 			this.setupAutocompleteProvider();
 			this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: true });
+			if (this.clientExtensionUiEnabled()) await this.startClientExtensionUi();
 		}
 		this.subscribeToAgent();
 		await Promise.all([this.refreshConnectionQueue(), this.refreshHeartbeatCatalog().catch(() => undefined)]);
@@ -3299,6 +3309,65 @@ export class InteractiveMode {
 		this.syncWorkingLoader();
 	}
 
+	/**
+	 * Daemon chats: run the extensions' UI half here (client-extension-ui-host.ts).
+	 * Replaces any previous host (session replaced → new instances for the new session).
+	 */
+	/**
+	 * Daemon chats only: an in-process chat binds its extensions locally, and a chat
+	 * without either (tests, embedders) must not grow a second extension runtime.
+	 * Checked before awaiting, so a chat without it keeps its event ordering exactly.
+	 */
+	private clientExtensionUiEnabled(): boolean {
+		return (
+			!this.bindLocalSessionExtensions &&
+			(this.options?.clientExtensionUi ?? process.env.RLM_DAEMON === "1") &&
+			process.env.RLM_CLIENT_EXTENSION_UI !== "0"
+		);
+	}
+
+	private async startClientExtensionUi(): Promise<void> {
+		if (!this.clientExtensionUiEnabled()) return;
+		const previous = this.clientExtensionUi;
+		this.clientExtensionUi = undefined;
+		const start = (async () => {
+			await previous?.dispose("resume");
+			const { ClientExtensionUiHost } = await import("../daemon/client-extension-ui-host.js");
+			const host = await ClientExtensionUiHost.start(
+				{
+					cwd: this.getCurrentCwd(),
+					agentDir: getAgentDir(),
+					settingsManager: this.settingsManager,
+					modelRegistry: this.modelRegistry,
+					ui: this.createExtensionUIContext(),
+					getSessionFile: () => this.connectionState?.sessionFile,
+					getModel: () => this.getCurrentModel(),
+					getThinkingLevel: () => this.connectionState?.thinkingLevel ?? "off",
+					isIdle: () => !this.isAgentStreaming(),
+					abort: () => void this.agentConnection.abort(),
+					getContextUsage: () => this.getConnectionContextUsage() as any,
+					onError: (error) => this.showError(`Extension "${error.extensionPath}" (${error.event}): ${error.error}`),
+					onLoaded: () => {
+						this.toolDefinitionCache.clear();
+						this.ui.requestRender();
+					},
+				},
+				previous ? "resume" : "startup",
+			);
+			if (this.isShuttingDown) {
+				await host.dispose("quit");
+				return;
+			}
+			this.clientExtensionUi = host;
+			this.defaultEditor.onExtensionShortcut = (data: string) =>
+				this.clientExtensionUi?.handleShortcut(data, this.keybindings.getEffectiveConfig()) ?? false;
+		})().catch((error) => {
+			this.showError(`Extension UI failed to start: ${error instanceof Error ? error.message : String(error)}`);
+		});
+		this.clientExtensionUiStarting = start;
+		await start;
+	}
+
 	private getCachedToolDefinition(toolName: string): ToolExecutionDefinition | undefined {
 		return this.toolDefinitionCache.get(toolName);
 	}
@@ -3310,7 +3379,7 @@ export class InteractiveMode {
 		const definition = this.createToolExecutionDefinition(
 			toolName,
 			await this.agentConnection.getToolDefinition(toolName),
-			this.localSessionHost?.getToolRendererDefinition(toolName),
+			this.localSessionHost?.getToolRendererDefinition(toolName) ?? this.clientExtensionUi?.getToolRendererDefinition(toolName),
 		);
 		this.toolDefinitionCache.set(toolName, definition);
 		return definition;
@@ -3427,7 +3496,7 @@ export class InteractiveMode {
 				const definition = this.createToolExecutionDefinition(
 					toolName,
 					await this.agentConnection.getToolDefinition(toolName),
-					this.localSessionHost?.getToolRendererDefinition(toolName),
+					this.localSessionHost?.getToolRendererDefinition(toolName) ?? this.clientExtensionUi?.getToolRendererDefinition(toolName),
 				);
 				this.toolDefinitionCache.set(toolName, definition);
 			}),
@@ -5631,6 +5700,7 @@ export class InteractiveMode {
 					// Published on arrival, not from the render queue below: listeners
 					// time things (tokens/sec), and a slow render would bunch them up.
 					publishDisplayedSessionEvent(this, event.event as { type: string });
+					this.clientExtensionUi?.handleSessionEvent(event.event as { type: string });
 					const run = this.sessionEventQueue.then(() =>
 						generation === this.sessionEventGeneration ? this.handleEvent(event.event) : undefined,
 					);
@@ -6917,7 +6987,7 @@ export class InteractiveMode {
 			message,
 			this.bindLocalSessionExtensions
 				? this.getLocalSessionHost().getExtensionRunner().getMessageRenderer(message.customType)
-				: undefined,
+				: this.clientExtensionUi?.getMessageRenderer(message.customType),
 			this.getMarkdownThemeWithSettings(),
 		);
 	}
@@ -10715,6 +10785,9 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 	}
 
 	stop(options: { preserveAltScreen?: boolean } = {}): void {
+		const clientExtensionUi = this.clientExtensionUi;
+		this.clientExtensionUi = undefined;
+		void clientExtensionUi?.dispose("quit");
 		this.teardownRlmTuiIntegration();
 		this.unregisterSignalHandlers();
 		this.clearCtrlCExitHint({ render: false });
