@@ -978,6 +978,8 @@ export class InteractiveMode {
 	// Serializes session event handling; see subscribeToAgent
 	private sessionEventQueue: Promise<void> = Promise.resolve();
 	private sessionEventGeneration = 0;
+	// The initial transcript render in flight, if any; see renderInitialMessages
+	private initialRenderPromise: Promise<void> | undefined = undefined;
 	private fastModeToggleQueue: Promise<void> = Promise.resolve();
 
 	private pendingTools = new Map<string, ToolExecutionComponent>();
@@ -5637,6 +5639,10 @@ export class InteractiveMode {
 					const generation = ++this.sessionEventGeneration;
 					const run = this.sessionEventQueue.then(async () => {
 						if (generation !== this.sessionEventGeneration) return;
+						// Let an in-flight initial render finish before clearing the
+						// chat for the new session.
+						await this.initialRenderPromise?.catch(() => undefined);
+						if (generation !== this.sessionEventGeneration) return;
 						this.resetSideQuestion();
 						this.resetExtensionUI();
 						this.applyConnectionStateSnapshot(event.state);
@@ -5653,6 +5659,10 @@ export class InteractiveMode {
 					const run = this.sessionEventQueue.then(async () => {
 						if (generation !== this.sessionEventGeneration) return false;
 						await this.refreshCommandCatalogForCurrentSession?.();
+						if (generation !== this.sessionEventGeneration) return false;
+						// Never rebuild the transcript while an initial render is
+						// mid-flight; queue behind it instead.
+						await this.initialRenderPromise?.catch(() => undefined);
 						if (generation !== this.sessionEventGeneration) return false;
 						await this.renderResyncedSession(event.snapshot);
 						return true;
@@ -7187,31 +7197,49 @@ export class InteractiveMode {
 	}
 
 	async renderInitialMessages(): Promise<void> {
-		const snapshot = await this.agentConnection.getInitialSnapshot();
-		const context = this.getSessionContextFromConnectionSnapshot(snapshot);
-		const state = snapshot.state;
-		const streamingMessage = snapshot.streamingMessage;
-		this.rlmNodeId = snapshot.parent?.childId;
-		this.seedSubagentSummary(snapshot.children);
-		this.setSessionHasMessages(context.messages.length > 0);
-		this.applyConnectionStateSnapshot(state);
-		this.restoreTurnStartFromMessages(context.messages);
-		// Render system prompt + runtime vars FIRST — they go into the LLM
-		// before any user message. Correct sequence: system → user → thinking
-		// → assistant → tools. Vars appear inline as they're created.
-		this.renderContextVarsInline();
-		await this.renderSessionContext(context, {
-			updateFooter: true,
-			populateHistory: true,
-			limitTranscript: true,
-		});
-		await this.restoreStreamingMessageFromSnapshot(streamingMessage);
+		// Serialize with any in-flight initial render: resync/replacement handlers
+		// re-enter this method, and two concurrent transcript builds race the
+		// chat container.
+		const previousRender = this.initialRenderPromise;
+		const render = (async () => {
+			await previousRender?.catch(() => undefined);
+			const snapshot = await this.agentConnection.getInitialSnapshot();
+			const context = this.getSessionContextFromConnectionSnapshot(snapshot);
+			const state = snapshot.state;
+			const streamingMessage = snapshot.streamingMessage;
+			this.rlmNodeId = snapshot.parent?.childId;
+			this.seedSubagentSummary(snapshot.children);
+			this.setSessionHasMessages(context.messages.length > 0);
+			this.applyConnectionStateSnapshot(state);
+			this.restoreTurnStartFromMessages(context.messages);
+			// Render system prompt + runtime vars FIRST — they go into the LLM
+			// before any user message. Correct sequence: system → user → thinking
+			// → assistant → tools. Vars appear inline as they're created.
+			this.renderContextVarsInline();
+			await this.renderSessionContext(context, {
+				updateFooter: true,
+				populateHistory: true,
+				limitTranscript: true,
+			});
+			await this.restoreStreamingMessageFromSnapshot(streamingMessage);
 
-		// Show compaction info if session was compacted
-		const compactionCount = state.compactionCount;
-		if (compactionCount > 0) {
-			const times = compactionCount === 1 ? "1 time" : `${compactionCount} times`;
-			this.showStatus(`Session compacted ${times}`);
+			// Show compaction info if session was compacted
+			const compactionCount = state.compactionCount;
+			if (compactionCount > 0) {
+				const times = compactionCount === 1 ? "1 time" : `${compactionCount} times`;
+				this.showStatus(`Session compacted ${times}`);
+			}
+		})();
+		this.initialRenderPromise = render;
+		try {
+			await render;
+		} finally {
+			if (this.initialRenderPromise === render) {
+				this.initialRenderPromise = undefined;
+				// Release deferred events even if the last queued render failed. Do not
+				// await listener delivery: session-replaced handlers share that queue.
+				void this.agentConnection.flushBufferedSessionEvents?.();
+			}
 		}
 	}
 
