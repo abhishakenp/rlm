@@ -130,6 +130,7 @@ import {
 import { type TruncationResult, truncateTail } from "../../core/tools/truncate.js";
 import { PRIME_BUTTERFLY_LOGO } from "../../themes/prime-logo.js";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog.js";
+import { armExitWatchdog, exitStep } from "../../utils/exit-watchdog.js";
 import { copyToClipboard } from "../../utils/clipboard.js";
 import { readClipboardImage } from "../../utils/clipboard-image.js";
 import { parseGitUrl } from "../../utils/git.js";
@@ -7433,18 +7434,30 @@ export class InteractiveMode {
 		this.isShuttingDown = true;
 		this.unregisterSignalHandlers();
 		this.clearCtrlCExitHint({ render: false });
+		// Every await below is a promise somebody else resolves; if one never
+		// does, the watchdog exits anyway instead of leaving a live process
+		// behind a terminal already handed back (utils/exit-watchdog.ts).
+		armExitWatchdog("quit", 0);
 
-		// Fetch while the connection is still alive; exit must not fail on a stats error.
-		const sessionStats = await this.agentConnection.getSessionStats().catch(() => undefined);
+		// Fetch while the connection is still alive; exit must not fail on a stats
+		// error, and the hint is not worth waiting more than a second for.
+		exitStep("session stats");
+		const sessionStats = await Promise.race([
+			this.agentConnection.getSessionStats().catch(() => undefined),
+			new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 1000)),
+		]);
 
 		// Drain any in-flight Kitty key release events before stopping.
 		// This prevents escape sequences from leaking to the parent shell over slow SSH.
+		exitStep("drain input");
 		await this.ui.terminal.drainInput(1000);
 
 		this.stop();
 		try {
+			exitStep("connection dispose");
 			await this.agentConnection.dispose();
 		} finally {
+			exitStep("session teardown (onShutdown exit)");
 			await this.options.onShutdown?.("exit");
 		}
 		const resumeHint = formatResumeHint(sessionStats);

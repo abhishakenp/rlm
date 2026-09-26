@@ -15,6 +15,7 @@
  */
 import type { AgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
+import { armExitWatchdog, exitStep } from "../../utils/exit-watchdog.js";
 import { InteractiveMode, type InteractiveModeRunResult } from "../interactive/interactive-mode.js";
 import { ClientPromptStashStore } from "../interactive/prompt-stash-state.js";
 import { type AgentsViewPersistentState, runAgentsViewMode } from "./agents-view-mode.js";
@@ -86,7 +87,11 @@ export async function runInProcessAgentsSession(
 			restoreTerminal();
 			throw error;
 		} finally {
-			// The view exits only when the user quits from it.
+			// The view exits only when the user quits from it. Disposing every
+			// hosted session can wait on a promise nobody resolves; the watchdog
+			// exits anyway rather than leave a live process behind the prompt.
+			armExitWatchdog("quit from agents view", 0);
+			exitStep("agents host disposeAll");
 			await host.disposeAll();
 		}
 	};
