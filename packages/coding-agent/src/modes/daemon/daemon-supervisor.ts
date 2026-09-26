@@ -755,6 +755,9 @@ export class DaemonSupervisorPeerRunningError extends Error {
 }
 
 const PEER_SUPERVISOR_PROBE_INTERVAL_MS = 250;
+/** Commands that carry user input: worth waiting for a recovering worker rather than dropping. */
+const SESSION_INPUT_COMMANDS = new Set<string>(["prompt", "steer", "follow_up"]);
+const SESSION_INPUT_RECOVERY_WAIT_MS = 30_000;
 
 export async function runDaemonSupervisorMode(options: DaemonSupervisorOptions): Promise<never> {
 	const socketPath = normalizeSocketPath(options.socketPath ?? defaultDaemonSocketPath());
@@ -5240,6 +5243,49 @@ export class DaemonSupervisor {
 		return worker.descriptor.lifecycle;
 	}
 
+	/**
+	 * rlm: a prompt typed while its worker is coming back must not bounce with
+	 * "Session worker is failed". The attached client's reattach (with launch
+	 * env) is what starts a resident worker's recovery, and a prompt sent right
+	 * after the crash can arrive before that — nothing to join yet. So for user
+	 * input, give recovery a bounded window to start and finish, then forward;
+	 * a worker that never comes back still fails the prompt, as before.
+	 */
+	private async waitForRecoveringWorker(worker: ResidentWorker): Promise<void> {
+		const deadline = Date.now() + SESSION_INPUT_RECOVERY_WAIT_MS;
+		const started = Date.now();
+		const done = (why: string) => {
+			if (Date.now() - started > 50 || why !== "ready") {
+				this.log(`Input for worker ${worker.descriptor.workerId} waited ${Date.now() - started}ms for recovery: ${why}`);
+			}
+		};
+		while (Date.now() < deadline) {
+			if (worker.client && worker.descriptor.lifecycle === "ready") return done("ready");
+			if (this.isWorkerStopping(worker) || this.shuttingDown) return done("stopping");
+			const state = this.effectiveWorkerState(worker);
+			if (state !== "failed" && state !== "recovering" && state !== "starting") return done(`state ${state}`);
+			if (
+				state === "failed" &&
+				!worker.recovery &&
+				!this.canRetryFailedWorker(worker) &&
+				(worker.descriptor.consecutiveFailures ?? 0) >= WORKER_RETRY_DELAYS_MS.length
+			) {
+				// Crash-loop protection already gave up on this worker; waiting would only stall the user.
+				return done("crash budget exhausted");
+			}
+			if (this.canRetryFailedWorker(worker)) {
+				await this.retryWorkerRecovery(worker).catch(() => {});
+				continue;
+			}
+			if (worker.recovery) {
+				await worker.recovery.catch(() => {});
+				continue;
+			}
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+		}
+		done("timed out");
+	}
+
 	private requireAvailableWorkerClient(worker: ResidentWorker, allowStopping = false): DaemonWorkerClient {
 		if (
 			!worker.client ||
@@ -5532,6 +5578,9 @@ export class DaemonSupervisor {
 		} else if (worker.recovery) {
 			// Join a concurrent touch's in-flight recovery instead of throwing mid-ladder.
 			await worker.recovery;
+		}
+		if (SESSION_INPUT_COMMANDS.has(command.type)) {
+			await this.waitForRecoveringWorker(worker);
 		}
 		const client = this.requireAvailableWorkerClient(worker, command.type === "kill");
 		const response = await client.request(withoutCommandId(command), timeoutMs);
