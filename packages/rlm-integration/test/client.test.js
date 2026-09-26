@@ -1,5 +1,5 @@
-// Tests for the rlm-integration client (src/client.ts) — what Iris uses to reach
-// rlm on :20130 instead of calling model providers itself. A local server stands
+// Tests for rlm's SDK client (src/client.ts) — how any program reaches rlm on
+// :20130 instead of calling model providers itself. A local server stands
 // in for the integration row, so these run without a live rlm.
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import createClient, { RlmIntegrationClientImpl } from "../src/client.ts";
@@ -64,5 +64,54 @@ describe("rlm-integration client", () => {
 			"messages is required",
 		);
 		expect(seen.length).toBe(before);
+	});
+});
+
+describe("rlm SDK client: delegate and sessions", () => {
+	let api;
+	const hits = [];
+	beforeAll(() => {
+		api = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			async fetch(req) {
+				const url = new URL(req.url);
+				const text = await req.text();
+				hits.push({ method: req.method, path: url.pathname, body: text ? JSON.parse(text) : undefined });
+				return Response.json({ ok: true });
+			},
+		});
+	});
+	afterAll(() => api.stop(true));
+	const client = () => createClient(`http://127.0.0.1:${api.port}/`);
+
+	it("maps every method to its endpoint and verb", async () => {
+		const c = client();
+		await c.delegate({ prompt: "do it", timeout: 5000 });
+		await c.createSession({ prompt: "first", goal: "goal" });
+		await c.listSessions();
+		await c.spawn("g/1", { prompt: "next" });
+		await c.cancelSession("g/1");
+		await c.deleteSession("g/1");
+		expect(hits.map((h) => `${h.method} ${h.path}`)).toEqual([
+			"POST /v1/delegate",
+			"POST /v1/sessions",
+			"GET /v1/sessions",
+			"POST /v1/sessions/g%2F1/spawn",
+			"POST /v1/sessions/g%2F1/cancel",
+			"DELETE /v1/sessions/g%2F1",
+		]);
+		expect(hits[0].body).toEqual({ prompt: "do it", timeout: 5000 });
+	});
+
+	it("refuses an empty prompt before touching the network", () => {
+		const before = hits.length;
+		expect(() => client().delegate({ prompt: "  " })).toThrow("prompt is required");
+		expect(() => client().spawn("x", { prompt: "" })).toThrow("prompt is required");
+		expect(hits.length).toBe(before);
+	});
+
+	it("strips a trailing slash from the base URL", () => {
+		expect(client().baseUrl.endsWith("/")).toBe(false);
 	});
 });

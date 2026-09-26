@@ -1,10 +1,12 @@
 /**
- * @rlm/integration — RLM AI capabilities exposed to external applications.
+ * @rlm/integration — rlm's SDK: its capabilities over HTTP, for any program.
  *
- * This plugin makes RLM's AI routing available to external apps (notably Iris)
- * that should not contain AI logic directly. Rather than calling Perplexity,
- * OpenRouter, or Gemini APIs directly from Iris, Iris makes HTTP calls to this
- * integration layer, which routes through RLM's model registry.
+ * This row makes rlm's model routing and delegation available to programs that
+ * should not carry AI logic or provider keys of their own. A caller makes HTTP
+ * requests here; this layer routes them through rlm's model registry and its
+ * delegate journal. It is agent-neutral: nothing here knows who the caller is.
+ * The typed client is `./client` (`createClient()`); consumer-specific code —
+ * which session to use, how to phrase requests — lives in the consumer.
  *
  * ## What it provides
  *
@@ -23,23 +25,17 @@
  *   services that both believe they own a port is a bind error at boot for
  *   whichever loses the race. It is config either way.
  *
- * - A client library (exported from "./client") that Iris can use to call
- *   the integration server with the same interface as a direct API call.
+ * - A typed client (exported from "./client") covering every endpoint above,
+ *   versioned by `RLM_SDK_PROTOCOL`.
  *
  * - Cordis service registration so the server starts/stops with RLM.
  *
  * ## Why this matters
  *
- * The request that created this plugin: "Iris herself should contain no AI at
- * all — instead build an rlm-integration plugin pointing at ~/proj/rlm."
- *
- * Before this, Iris called Perplexity, OpenRouter, and Gemini directly from:
- *     core/skills/deep_research/impl.js    — perplexity + openrouter /chat/completions
- *     core/skills/web_search/impl.js        — perplexity /chat/completions
- *     core/skills/capture_screen/impl.js    — gemini /v1beta/models/...:generateContent
- *
- * After this, Iris calls POST http://localhost:20130/v1/chat/completions with the
- * same request shape, and this layer routes it through RLM's model registry.
+ * A caller that holds no AI of its own (Iris is the first: ~/proj/sensei/iris-mama
+ * reaches rlm through this API from its own adapter) gets models and a durable job
+ * journal without holding provider keys. The caller-specific integration lives
+ * on the caller's side; this row stays generic so any agent or tool can use it.
  *
  * ## RLM as the boundary
  *
