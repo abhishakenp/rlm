@@ -27,7 +27,7 @@ const leftBusy = (file: string, busy = true) =>
 	);
 
 /** A minimal `pi` + ctx that records what the extension does. */
-const fakeSession = (file: string, header: Record<string, unknown>, entries: number) => {
+const fakeSession = (file: string, header: Record<string, unknown>, entries: number, bookkeeping = 0) => {
 	const handlers = new Map<string, (e: any, ctx: any) => void>();
 	const sent: Array<{ message: any; options: any }> = [];
 	const pi = {
@@ -38,7 +38,11 @@ const fakeSession = (file: string, header: Record<string, unknown>, entries: num
 		sessionManager: {
 			getSessionFile: () => file,
 			getHeader: () => ({ type: "session", ...header }),
-			getEntries: () => Array.from({ length: entries }, (_, i) => ({ id: String(i) })),
+			getEntries: () => [
+				// What a real fresh session holds before its first message.
+				...Array.from({ length: bookkeeping }, (_, i) => ({ id: `b${i}`, type: i % 2 ? "session_state" : "service_tier_change" })),
+				...Array.from({ length: entries }, (_, i) => ({ id: String(i), type: "message" })),
+			],
 		},
 	};
 	const fire = (event: string, payload: any = {}) => handlers.get(event)?.({ type: event, ...payload }, ctx);
@@ -125,6 +129,27 @@ describe("rlm-inflight", () => {
 		});
 		const spawned: string[] = [];
 		const s = fakeSession(child, { parentSession: root, rlmDepth: 1 }, 0);
+		createInflightExtension({ spawner: (f) => spawned.push(f), pollMs: 60_000 })(s.pi);
+		s.fire("session_start", { reason: "startup" });
+		s.fire("agent_start");
+		s.fire("agent_end", { messages: [assistant("child answer")] });
+		expect(inboxHasMail(root)).toBe(false);
+		expect(spawned).toHaveLength(0);
+		s.fire("session_shutdown");
+	});
+
+	it("a fresh child that already holds bookkeeping entries is still a live parent's child, not an orphan", () => {
+		// Real sessions write service_tier_change/session_state before the first
+		// message; treating those as "resumed" posted every child's result to its
+		// live parent's inbox — a second delivery and an extra parent turn each.
+		const root = sessionFile(join(dir, "root.jsonl"), { id: "root" });
+		const child = sessionFile(join(getSessionArtifactPathForFile(root), "sub-c", "c.jsonl"), {
+			id: "c",
+			parentSession: root,
+			rlmDepth: 1,
+		});
+		const spawned: string[] = [];
+		const s = fakeSession(child, { parentSession: root, rlmDepth: 1 }, 0, 3);
 		createInflightExtension({ spawner: (f) => spawned.push(f), pollMs: 60_000 })(s.pi);
 		s.fire("session_start", { reason: "startup" });
 		s.fire("agent_start");

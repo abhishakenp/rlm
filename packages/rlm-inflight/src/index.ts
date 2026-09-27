@@ -166,7 +166,12 @@ export const createInflightExtension =
 			const header = sm.getHeader?.() ?? {};
 			depth = header.rlmDepth ?? 0;
 			parent = header.parentSession;
-			const resumed = (sm.getEntries?.() ?? []).length > 0;
+			// Resumed means it already holds conversation. A brand-new session
+			// starts with bookkeeping entries (service_tier_change, session_state,
+			// model_change) before any message; counting those made every fresh
+			// subagent an "orphan" that posted its result to its live parent's
+			// inbox — a second delivery and an extra parent turn per child.
+			const resumed = (sm.getEntries?.() ?? []).some((e: any) => e?.type === "message");
 			// Only the session this process was started for; its fresh in-process
 			// children are ordinary live children and must not count.
 			const spawnedByUs = process.env[SPAWNED_ENV] === file;
