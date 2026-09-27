@@ -11,8 +11,9 @@
  * `rlm-boot` row can unload the composition, and exits with the child's code.
  */
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { existsSync, fstatSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const host = globalThis.__rlmHost;
 
@@ -34,8 +35,20 @@ if (!(major > 22 || (major === 22 && minor >= 8))) {
 	);
 }
 
-const localTsx = join(host.root, "node_modules", "tsx", "dist", "loader.mjs");
-if (!existsSync(localTsx)) die("missing node_modules/tsx — run `bun install` first");
+// tsx sits beside the package, not inside it: a source checkout has
+// <repo>/node_modules/tsx, an `npm i -g` install has <prefix>/lib/node_modules/
+// with rlm-sh and tsx as siblings. Resolve through node's own lookup (which
+// walks up past the package root) and fall back to the checkout layout.
+const tsxLoader = (() => {
+	const candidates = [join(host.root, "node_modules", "tsx", "dist", "loader.mjs")];
+	try {
+		// `tsx/package.json` is exported by the package; the loader lives beside it.
+		const req = createRequire(join(host.root, "package.json"));
+		candidates.push(join(dirname(req.resolve("tsx/package.json")), "dist", "loader.mjs"));
+	} catch {}
+	for (const c of candidates) if (existsSync(c)) return c;
+	die("missing node_modules/tsx — install dependencies first (npm/bun install)");
+})();
 
 // Descriptors above stdio that the environment names, passed at the same number:
 // a daemon worker's startup gate arrives as fd 3+ and is named by
@@ -62,9 +75,10 @@ const stdio = ["inherit", "inherit", "inherit"];
 for (const fd of extra) stdio[fd] = fd;
 for (let i = 3; i < stdio.length; i++) stdio[i] ??= "ignore";
 
+const workspaceResolve = join(host.root, "packages", "rlm-host", "src", "workspace-resolve.mjs");
 const child = spawn(
 	process.execPath,
-	["--expose-internals", "--import", localTsx, host.bootstrap, ...process.argv.slice(2)],
+	["--expose-internals", "--import", tsxLoader, "--import", workspaceResolve, host.bootstrap, ...process.argv.slice(2)],
 	{ stdio, env: process.env },
 );
 for (const signal of ["SIGINT", "SIGTERM"]) {
