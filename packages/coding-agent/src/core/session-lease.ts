@@ -99,17 +99,37 @@ function leaseDirectory(agentDir: string, sessionPath: string): string {
 	return join(agentDir, "session-leases", `${key}.lock`);
 }
 
-export function canonicalSessionPath(sessionPath: string): string {
-	const resolvedPath = resolve(sessionPath);
+// realpathSync is a filesystem round-trip, and the daemon canonicalizes every
+// spawn-ledger edge on each roster flush — once per child update — so at 500
+// subagents one worker spent 97% of its CPU in realpathSync. A path that
+// resolved is stable for the life of the process (session files are not
+// re-pointed through symlinks); a path that did not exist yet is cached only
+// briefly so its file appearing is noticed.
+const CANONICAL_CACHE_MAX = 20_000;
+const CANONICAL_MISS_TTL_MS = 1_000;
+const canonicalCache = new Map<string, { path: string; until: number }>();
+
+function canonicalizeUncached(resolvedPath: string): { path: string; exists: boolean } {
 	try {
-		return realpathSync(resolvedPath);
+		return { path: realpathSync(resolvedPath), exists: true };
 	} catch {
 		try {
-			return join(realpathSync(dirname(resolvedPath)), basename(resolvedPath));
+			return { path: join(realpathSync(dirname(resolvedPath)), basename(resolvedPath)), exists: false };
 		} catch {
-			return resolvedPath;
+			return { path: resolvedPath, exists: false };
 		}
 	}
+}
+
+export function canonicalSessionPath(sessionPath: string): string {
+	const resolvedPath = resolve(sessionPath);
+	const now = Date.now();
+	const hit = canonicalCache.get(resolvedPath);
+	if (hit && hit.until > now) return hit.path;
+	const { path, exists } = canonicalizeUncached(resolvedPath);
+	if (canonicalCache.size >= CANONICAL_CACHE_MAX) canonicalCache.clear();
+	canonicalCache.set(resolvedPath, { path, until: exists ? Number.POSITIVE_INFINITY : now + CANONICAL_MISS_TTL_MS });
+	return path;
 }
 
 // An unreadable owner may hold a live lease. Only a missing owner is safely absent.

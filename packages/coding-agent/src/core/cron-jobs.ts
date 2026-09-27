@@ -713,6 +713,16 @@ export class AgentCronJobStore {
 	}
 
 	claimDue(dueAt = new Date(), claimedAt = dueAt): AgentCronDispatch[] {
+		// claimDueInState only touches due jobs, so with none due there is nothing
+		// to claim — skip the per-store file locks. The daemon registers one store
+		// per session and wakes the scheduler on each registration; locking every
+		// store on every wake made spawning N subagents cost ~N²/2 lock cycles
+		// (31% of a 500-subagent worker's CPU) with no jobs scheduled at all. A job
+		// that becomes due after this unlocked read is claimed, under the lock, on
+		// the scheduler's next tick.
+		if (!this.readJobs().some((job) => isDueJob(job, dueAt))) {
+			return [];
+		}
 		return this.mutateStates((state) => claimDueInState(state, dueAt, claimedAt));
 	}
 

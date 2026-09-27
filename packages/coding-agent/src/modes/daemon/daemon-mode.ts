@@ -272,6 +272,18 @@ export type {
 export { defaultDaemonSocketPath } from "./daemon-socket.js";
 
 const structuredLog = getLogger("coding-agent.daemon");
+
+// findSessionBySessionFile scans every hosted session per lookup; resolving each
+// session's file on every pass was 15% of a 500-subagent worker's CPU. The file
+// is fixed per session, so resolve it once (re-resolved if it ever changes).
+const resolvedSessionFiles = new WeakMap<object, { file: string; resolved: string }>();
+const resolvedSessionFile = (state: object, file: string): string => {
+	const cached = resolvedSessionFiles.get(state);
+	if (cached && cached.file === file) return cached.resolved;
+	const resolved = resolve(file);
+	resolvedSessionFiles.set(state, { file, resolved });
+	return resolved;
+};
 const WORKER_SNAPSHOT_TERMINAL_DRAIN_TIMEOUT_MS = 1_000;
 const UPDATE_RESTART_PREPARE_TIMEOUT_MS = 90_000;
 const MAX_SESSION_SNAPSHOT_STABILIZATION_RETRIES = 3;
@@ -534,6 +546,8 @@ export class AgentDaemon {
 	private socketIdentity?: DaemonSocketIdentity;
 	private readonly clients = new Set<DaemonSocketClient>();
 	private readonly sessions = new Map<string, ActiveSessionState>();
+	/** Resolved session file → hosted state; a hint for findSessionBySessionFile. */
+	private readonly sessionFileIndex = new Map<string, ActiveSessionState>();
 	private readonly openingSessions = new Map<string, Promise<ActiveSessionState>>();
 	/** Covers path resolution through publication in openingSessions, before the runtime promise exists. */
 	private readonly reservingSessionOpens = new Map<string, Promise<void>>();
@@ -2595,13 +2609,28 @@ export class AgentDaemon {
 			return undefined;
 		}
 		const target = resolve(sessionFile);
-		for (const state of this.sessions.values()) {
-			const file = state.runtime.session.sessionFile;
-			if (file && resolve(file) === target) {
-				return state;
+		// Every child update of every hosted subagent looks its session up here;
+		// scanning all sessions each time made spawning N subagents O(N²) in the
+		// worker. The index is only a hint: a hit is re-checked against the live
+		// state (a runtime replacement changes a session's file in place), and a
+		// miss falls back to the scan, which rebuilds the index.
+		const hinted = this.sessionFileIndex.get(target);
+		if (hinted && this.sessions.get(hinted.activeSessionId) === hinted) {
+			const file = hinted.runtime.session.sessionFile;
+			if (file && resolvedSessionFile(hinted, file) === target) {
+				return hinted;
 			}
 		}
-		return undefined;
+		let found: ActiveSessionState | undefined;
+		this.sessionFileIndex.clear();
+		for (const state of this.sessions.values()) {
+			const file = state.runtime.session.sessionFile;
+			if (!file) continue;
+			const resolvedFile = resolvedSessionFile(state, file);
+			this.sessionFileIndex.set(resolvedFile, state);
+			if (!found && resolvedFile === target) found = state;
+		}
+		return found;
 	}
 
 	private getSessionState(id: string): ActiveSessionState {

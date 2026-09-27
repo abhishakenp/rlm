@@ -187,3 +187,27 @@ describe("session leases", () => {
 		expect(acquireSessionLease(join(agentDir, "session.jsonl"), agentDir, {})).toBeUndefined();
 	});
 });
+
+describe("canonicalSessionPath cache", () => {
+	it("follows a symlinked directory, and notices a file that appears after a miss", async () => {
+		const root = mkdtempSync(join(tmpdir(), "canon-cache-"));
+		try {
+			const real = join(root, "real");
+			mkdirSync(real);
+			const link = join(root, "link");
+			symlinkSync(real, link);
+			const file = join(link, "s.jsonl");
+			// Missing file: canonicalised through its directory, cached briefly.
+			const before = canonicalSessionPath(file);
+			expect(before.endsWith(join("real", "s.jsonl"))).toBe(true);
+			writeFileSync(join(real, "s.jsonl"), "{}\n");
+			await new Promise((r) => setTimeout(r, 1_100));
+			const after = canonicalSessionPath(file);
+			expect(after.endsWith(join("real", "s.jsonl"))).toBe(true);
+			// Existing file: the same answer on repeat calls.
+			expect(canonicalSessionPath(file)).toBe(after);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
