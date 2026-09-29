@@ -44,6 +44,7 @@ import {
 	connectFleetHost,
 	disconnectFleetHost,
 	sshIntoFleetHost,
+	getFleetRunsStatus,
 } from "./fleet-operations.js";
 import {
 	configureRuntimePlugin,
@@ -67,6 +68,7 @@ type FleetSubcommand =
 	| "disconnect"
 	| "ssh"
 	| "status"
+	| "runs"
 	| "bootstrap"
 	| "runtimes"
 	| "setup"
@@ -116,6 +118,12 @@ export async function handleFleetCommand(args: string[]): Promise<void> {
 			break;
 		case "status":
 			await statusHost(rest);
+			break;
+		case "runs":
+			await runsStatus(rest);
+			break;
+		case "runs":
+			await runsStatus(rest);
 			break;
 		case "bootstrap":
 			await bootstrapHostCmd(rest);
@@ -608,6 +616,74 @@ async function bootstrapHostCmd(args: string[]): Promise<void> {
 		console.error(chalk.red(`✗ ${result.message}`));
 		process.exitCode = 1;
 	}
+}
+
+// ─── runs ─────────────────────────────────────────────────────────
+
+async function runsStatus(args: string[]): Promise<void> {
+	const json = args.includes("--json");
+	const hostFilter = args.find((a) => !a.startsWith("--"));
+	
+	let statuses = await getFleetRunsStatus();
+	
+	// Filter by host if specified
+	if (hostFilter) {
+		statuses = statuses.filter((s) => s.host === hostFilter);
+	}
+	
+	if (json) {
+		console.log(JSON.stringify({ runs: statuses }, null, 2));
+		return;
+	}
+	
+	if (statuses.length === 0) {
+		console.log(chalk.dim("No fleet runs recorded. Spawn agents with host='<name>' in rlm()"));
+		return;
+	}
+	
+	console.log(chalk.bold("\n  Fleet Runs Status\n"));
+	console.log(
+		`  ${"HOST".padEnd(18)} ${"RUNNING".padEnd(9)} ${"COMPLETED".padEnd(10)} ${"FAILED".padEnd(8)} ${"LATEST TASK".padEnd(20)} ${"GEN".padEnd(5)} ${"CONCLUSION".padEnd(12)} ${"AGE"}`,
+	);
+	console.log(
+		`  ${"-".repeat(18)} ${"-".repeat(9)} ${"-".repeat(10)} ${"-".repeat(8)} ${"-".repeat(20)} ${"-".repeat(5)} ${"-".repeat(12)} ${"-".repeat(8)}`,
+	);
+	
+	for (const s of statuses) {
+		const hostCol = s.host === "local" ? chalk.cyan(s.host.padEnd(18)) : chalk.green(s.host.padEnd(18));
+		const running = s.running > 0 ? chalk.yellow(String(s.running).padEnd(9)) : "-".padEnd(9);
+		const completed = s.completed > 0 ? chalk.green(String(s.completed).padEnd(10)) : "-".padEnd(10);
+		const failed = s.failed > 0 ? chalk.red(String(s.failed).padEnd(8)) : "-".padEnd(8);
+		
+		if (s.latestRun) {
+			const taskName = s.latestRun.taskName.slice(0, 18).padEnd(20);
+			const gen = String(s.latestRun.generation).padEnd(5);
+			const conclusion = s.latestRun.conclusion;
+			const conclusionColor =
+				conclusion === "success"
+					? chalk.green
+					: conclusion === "running"
+						? chalk.yellow
+						: conclusion === "error"
+							? chalk.red
+							: chalk.dim;
+			const age = formatAge(s.latestRun.age);
+			
+			console.log(
+				`  ${hostCol} ${running} ${completed} ${failed} ${chalk.dim(taskName)} ${gen.padEnd(5)} ${conclusionColor(conclusion.padEnd(12))} ${chalk.dim(age)}`,
+			);
+		} else {
+			console.log(`  ${hostCol} ${running} ${completed} ${failed}  ${chalk.dim("-".repeat(58))}`);
+		}
+	}
+	console.log();
+}
+
+function formatAge(seconds: number): string {
+	if (seconds < 60) return `${seconds}s`;
+	if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+	if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
+	return `${Math.floor(seconds / 86400)}d`;
 }
 
 // ─── interactive TUI ───────────────────────────────────────────────
