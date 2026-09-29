@@ -1,0 +1,103 @@
+# Fleet Queue Promoter — S2 Queue-Drain Scheduler
+
+name: Fleet Queue Drain
+
+on:
+  schedule:
+    - cron: '*/2 * * * *'
+  workflow_dispatch:
+  repository_dispatch:
+    types: [queue-check]
+  workflow_run:
+    types: [completed]
+
+env:
+  QUEUE_LABEL: rlm-task
+  IN_PROGRESS_LABEL: rlm-in-progress
+  COMPLETED_LABEL: rlm-completed
+  MAX_CONCURRENCY: 5
+
+jobs:
+  check-slots:
+    runs-on: ubuntu-latest
+    outputs:
+      active_runs: ${ steps.count.outputs.active_runs }
+      slots_available: ${ steps.count.outputs.slots_available }
+    steps:
+      - name: Count active runs
+        id: count
+        run: |
+          ACTIVE=$(gh run list --status in_progress --json id --jq 'length')
+          ACTIVE=${ACTIVE:-0}
+          MAX=${ env.MAX_CONCURRENCY }
+          SLOTS=$((MAX - ACTIVE))
+          [ ${SLOTS} -lt 0 ] && SLOTS=0
+          echo "active_runs=${ACTIVE}" >> ${GITHUB_OUTPUT}
+          echo "slots_available=${SLOTS}" >> ${GITHUB_OUTPUT}
+
+  read-queue:
+    needs: check-slots
+    if: needs.check-slots.outputs.slots_available != '0'
+    runs-on: ubuntu-latest
+    outputs:
+      queue_count: ${ steps.read.outputs.queue_count }
+    steps:
+      - name: Read queued issues
+        id: read
+        run: |
+          ISSUES=$(gh issue list --label "${ env.QUEUE_LABEL }" --state open --json number,title --jq 'sort_by(.createdAt)')
+          if [ -z "${ISSUES}" ]; then
+            echo "queue_count=0" >> ${GITHUB_OUTPUT}
+          else
+            echo "[${ISSUES}]" > queue.json
+            COUNT=$(cat queue.json | jq 'length')
+            echo "queue_count=${COUNT}" >> ${GITHUB_OUTPUT}
+
+  promote:
+    needs: [check-slots, read-queue]
+    if: needs.check-slots.outputs.slots_available != '0' && needs.read-queue.outputs.queue_count != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        index: [0, 1, 2]
+    steps:
+      - name: Check slot
+        run: |
+          IDX=${ matrix.index }
+          SLOT=${ needs.check-slots.outputs.slots_available }
+          [ ${IDX} -ge ${SLOT} ] && echo "SKIP=true" >> ${GITHUB_OUTPUT} || echo "SKIP=false" >> ${GITHUB_OUTPUT}
+
+      - name: Get issue
+        if: steps.check-slot.outputs.SKIP != 'true'
+        id: issue
+        run: |
+          IDX=${ matrix.index }
+          CNT=$(cat queue.json | jq 'length' 2>/dev/null || echo 0)
+          if [ ${CNT} -le ${IDX} ]; then
+            echo "NO_ISSUE=true" >> ${GITHUB_OUTPUT}
+          else
+            ISSUE=$(cat queue.json | jq ".[${IDX}]")
+            echo "NO_ISSUE=false" >> ${GITHUB_OUTPUT}
+            echo "NUM=$(echo ${ISSUE} | jq -r '.number')" >> ${GITHUB_OUTPUT}
+          fi
+
+      - name: Dispatch run
+        if: steps.issue.outputs.NO_ISSUE != 'true'
+        id: dispatch
+        run: |
+          NUM=${ steps.issue.outputs.NUM }
+          RUN_ID="run-$(date +%s)-${NUM}"
+          echo "run_id=${RUN_ID}" >> ${GITHUB_OUTPUT}
+          echo "Dispatching issue #${NUM}"
+
+      - name: Update labels
+        if: steps.issue.outputs.NO_ISSUE != 'true'
+        run: gh issue edit ${ steps.issue.outputs.NUM } --add-label rlm-in-progress --remove-label rlm-task
+
+      - name: Comment
+        if: steps.issue.outputs.NO_ISSUE != 'true'
+        run: |
+          gh issue comment ${ steps.issue.outputs.NUM } --body "## Promotion Status
+
+Promoted to run: ${ steps.dispatch.outputs.run_id }
+Time: $(date -u)"
