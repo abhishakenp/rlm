@@ -53,6 +53,8 @@ export interface SpawnRequest {
 	parent?: AgentIdentity;
 	/** Depth in the recursion tree. */
 	depth: number;
+	/** Predecessor run ID to clean up (for superseded runs). */
+	predecessorRunId?: number;
 }
 
 /** Spawn result — what the runtime returns immediately. */
