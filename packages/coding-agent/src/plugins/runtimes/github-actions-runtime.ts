@@ -139,7 +139,7 @@ export class GitHubActionsRuntime implements AgentRuntime {
 		await this.setRepositorySecrets(repo, token, credentialKeys);
 
 		const workDir = request.workDir ?? `.rlm/sessions/fleet/${agentId}`;
-		const runId = await this.triggerWorkflow(repo, token, workflowYaml, agentId, gistUrl, workDir);
+		const runId = await this.triggerWorkflow(repo, token, workflowYaml, agentId, gistUrl, workDir, request.predecessorRunId);
 
 		let currentStatus: AgentStatusInfo = { status: "running" };
 		const eventListeners = new Set<(event: AgentEvent) => void>();
@@ -236,13 +236,23 @@ export class GitHubActionsRuntime implements AgentRuntime {
 			"        description: 'Work directory relative to HOME'",
 			"        required: true",
 			`        default: '${workDir}'`,
+			"      cleanup_failed:",
+			"        description: 'Clean up predecessor run on infra failure'",
+			"        required: false",
+			"        type: boolean",
+			"        default: 'false'",
+			"      predecessor_run_id:",
+			"        description: 'Predecessor run ID to clean up'",
+			"        required: false",
+			"        type: string",
+			"        default: ''",
 			"",
 			"jobs:",
 			"  agent:",
 			"    runs-on: ubuntu-latest",
 			"    env:",
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub Actions syntax
 			"      AGENT_ID: ${{ github.event.inputs.agent_id }}",
+			"      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
 		];
 
 		for (const k of credentialKeys) {
@@ -251,6 +261,56 @@ export class GitHubActionsRuntime implements AgentRuntime {
 
 		lines.push(
 			"    steps:",
+			// Cleanup predecessor run step
+			"      - name: Cleanup Predecessor Run",
+			'        if: github.event.inputs.cleanup_failed == \'true\' && github.event.inputs.predecessor_run_id != \'\'',
+			"        run: |",
+			"          PRED_RUN_ID=${{ github.event.inputs.predecessor_run_id }}",
+			'          echo "=== Predecessor Run Cleanup ==="',
+			'          echo "Predecessor Run ID: $PRED_RUN_ID"',
+			"",
+			"          # Fetch predecessor run info",
+			'          RUN_INFO=$(gh api repos/${{ github.repository }}/actions/runs/$PRED_RUN_ID --jq \'{conclusion: .conclusion, status: .status, created_at: .created_at, html_url: .html_url}\')',
+			'          CONCLUSION=$(echo "$RUN_INFO" | jq -r \'.conclusion\')',
+			'          RUN_STATUS=$(echo "$RUN_INFO" | jq -r \'.status\')',
+			'          echo "Predecessor Run Conclusion: $CONCLUSION"',
+			'          echo "Predecessor Run Status: $RUN_STATUS"',
+			'          echo "Predecessor Run URL: https://github.com/${{ github.repository }}/actions/runs/$PRED_RUN_ID"',
+			"",
+			"          # Fetch predecessor run artifacts",
+			'          echo ""',
+			'          echo "=== Predecessor Run Artifacts ==="',
+			'          ARTIFACTS=$(gh api repos/${{ github.repository }}/actions/runs/$PRED_RUN_ID/artifacts --jq \'.artifacts[] | {name: .name, id: .id, created_at: .created_at}\')',
+			"          if [ -n \"$ARTIFACTS\" ]; then",
+			'            echo "$ARTIFACTS" | jq -r \'. | "Artifact: (.name) (ID: (.id), created: (.created_at))"\'',
+			"          else",
+			'            echo "No artifacts found for predecessor run"',
+			"          fi",
+			"",
+			"          # Log artifact evidence to file for retention",
+			'          echo "{\\"predecessor_run_id\\": \\"$PRED_RUN_ID\\", \\"conclusion\\": \\"$CONCLUSION\\", \\"status\\": \\"$RUN_STATUS\\", \\"artifacts\\": $ARTIFACTS}" > /tmp/predecessor_cleanup_evidence.json',
+			"",
+			"          # Cancel if still running",
+			"          if [ \"$RUN_STATUS\" = \"in_progress\" ] || [ \"$RUN_STATUS\" = \"queued\" ]; then",
+			'            echo "Cancelling predecessor run..."',
+			"            gh api -X POST repos/${{ github.repository }}/actions/runs/$PRED_RUN_ID/cancel",
+			"          fi",
+			"",
+			"          # Delete the predecessor run",
+			'          echo "Deleting predecessor run record..."',
+			"            gh api -X DELETE repos/${{ github.repository }}/actions/runs/$PRED_RUN_ID",
+			'          echo "Predecessor run $PRED_RUN_ID deleted successfully"',
+			"        env:",
+			"          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+			"",
+			"      - name: Upload Cleanup Evidence",
+			'        if: github.event.inputs.cleanup_failed == \'true\' && github.event.inputs.predecessor_run_id != \'\'',
+			"        uses: actions/upload-artifact@v4",
+			"        with:",
+			"          name: predecessor-cleanup-evidence-${{ github.run_id }}",
+			"          path: /tmp/predecessor_cleanup_evidence.json",
+			"          if-no-files-found: ignore",
+			"",
 			"      - name: Setup Node",
 			"        uses: actions/setup-node@v4",
 			"        with:",
@@ -258,7 +318,6 @@ export class GitHubActionsRuntime implements AgentRuntime {
 			"",
 			"      - name: Download and Extract Agent Bundle",
 			"        run: |",
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub Actions syntax
 			'          curl -sL "${{ github.event.inputs.gist_url }}" -o /tmp/bundle.b64',
 			"          base64 -d /tmp/bundle.b64 > /tmp/bundle.tar.gz",
 			"          mkdir -p /tmp/agent-bundle",
@@ -272,7 +331,6 @@ export class GitHubActionsRuntime implements AgentRuntime {
 			"        run: |",
 			"          bash $BUNDLE_DIR/run.sh",
 			"        env:",
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub Actions syntax
 			"          AGENT_ID: ${{ github.event.inputs.agent_id }}",
 		);
 
@@ -292,9 +350,7 @@ export class GitHubActionsRuntime implements AgentRuntime {
 			"        if: always()",
 			"        uses: actions/upload-artifact@v4",
 			"        with:",
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub Actions syntax
 			"          name: agent-work-${{ github.run_id }}",
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub Actions syntax
 			"          path: ${{ steps.workdir.outputs.work_path }}/",
 			"          if-no-files-found: ignore",
 			"",
@@ -302,7 +358,6 @@ export class GitHubActionsRuntime implements AgentRuntime {
 			"        if: always()",
 			"        uses: actions/upload-artifact@v4",
 			"        with:",
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub Actions syntax
 			"          name: agent-logs-${{ github.run_id }}",
 			"          path: |",
 			"            /tmp/agent-bundle/",
@@ -311,6 +366,7 @@ export class GitHubActionsRuntime implements AgentRuntime {
 
 		return `${lines.join("\n")}\n`;
 	}
+
 
 	private getGhToken(): string | undefined {
 		try {
@@ -357,6 +413,7 @@ export class GitHubActionsRuntime implements AgentRuntime {
 		agentId: string,
 		gistUrl: string,
 		workDir: string,
+		predecessorRunId?: number,
 	): Promise<number> {
 		const workflowFile = ".github/workflows/prime-agent.yml";
 
@@ -394,7 +451,13 @@ export class GitHubActionsRuntime implements AgentRuntime {
 		const triggerUrl = `https://api.github.com/repos/${repo}/actions/workflows/prime-agent.yml/dispatches`;
 		const triggerBody = JSON.stringify({
 			ref: defaultBranch,
-			inputs: { agent_id: agentId, gist_url: gistUrl, work_dir: workDir },
+			inputs: { 
+				agent_id: agentId, 
+				gist_url: gistUrl, 
+				work_dir: workDir,
+				cleanup_failed: predecessorRunId !== undefined ? 'true' : 'false',
+				predecessor_run_id: predecessorRunId?.toString() ?? '',
+			},
 		});
 		const triggerHeaders = { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" };
 
