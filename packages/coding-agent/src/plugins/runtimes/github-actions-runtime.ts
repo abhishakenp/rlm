@@ -470,7 +470,109 @@ export class GitHubActionsRuntime implements AgentRuntime {
 		setTimeout(poll, 3000);
 	}
 
-	private async cancelRun(repo: string, token: string, runId: number): Promise<void> {
+	
+
+	/**
+	 * List workflow runs for the configured repo.
+	 * Used by 'prime-agent fleet status github-actions'.
+	 */
+	async listWorkflowRuns(options?: {
+		token?: string;
+		repo?: string;
+		perPage?: number;
+	}): Promise<{
+		task: string;
+		generation: number;
+		conclusion: string | null;
+		age: string;
+		status: string;
+		runId: number;
+		runNumber: number;
+		createdAt: string;
+	}[]> {
+		const token = options?.token ?? this.config.token ?? process.env.GITHUB_TOKEN ?? this.getGhToken();
+		const repo = options?.repo ?? this.config.repo;
+
+		if (!token) throw new Error("No GitHub token. Set GITHUB_TOKEN or configure via fleet.");
+		if (!repo) throw new Error("No repo configured. Run 'prime-agent fleet setup github-actions'.");
+
+		const perPage = options?.perPage ?? 30;
+		const url = "https://api.github.com/repos/" + repo + "/actions/workflows/prime-agent.yml/runs?per_page=" + perPage;
+		const resp = await fetch(url, {
+			headers: {
+				Authorization: "Bearer " + token,
+				Accept: "application/vnd.github+json",
+				"X-GitHub-Api-Version": "2022-11-28",
+			},
+		});
+
+		if (!resp.ok) {
+			throw new Error("Failed to fetch runs: " + resp.status + " " + resp.statusText);
+		}
+
+		const data = (await resp.json()) as {
+			workflow_runs: Array<{
+				id: number;
+				name: string;
+				run_number: number;
+				status: string;
+				conclusion: string | null;
+				created_at: string;
+				updated_at: string;
+				display_title: string;
+				event: string;
+				head_branch: string;
+			}>;
+		};
+
+		// Aggregate to latest run per task (using run_number as task identifier)
+		// GHA workflow runs use run_number as the generation counter
+		// Group by run_number to get the latest attempt
+		const runsByTask = new Map<number, typeof data.workflow_runs[0]>();
+		for (const run of data.workflow_runs) {
+			const existing = runsByTask.get(run.run_number);
+			if (!existing || new Date(run.created_at) > new Date(existing.created_at)) {
+				runsByTask.set(run.run_number, run);
+			}
+		}
+
+		const result: {
+			task: string;
+			generation: number;
+			conclusion: string | null;
+			age: string;
+			status: string;
+			runId: number;
+			runNumber: number;
+			createdAt: string;
+		}[] = [];
+
+		for (const [runNumber, run] of runsByTask) {
+			// Use display_title as task name if available, otherwise "Run #N"
+			const task = run.display_title || "Run #" + runNumber;
+
+			// Format age as relative time
+			const age = formatAge(new Date(run.created_at));
+
+			result.push({
+				task,
+				generation: runNumber,
+				conclusion: run.conclusion,
+				age,
+				status: run.status,
+				runId: run.id,
+				runNumber: run.run_number,
+				createdAt: run.created_at,
+			});
+		}
+
+		// Sort by generation descending (most recent first)
+		result.sort((a, b) => b.generation - a.generation);
+
+		return result;
+	}
+
+private async cancelRun(repo: string, token: string, runId: number): Promise<void> {
 		if (!runId) return;
 		try {
 			await fetch(`https://api.github.com/repos/${repo}/actions/runs/${runId}/cancel`, {
@@ -790,4 +892,27 @@ export async function setupGitHubActions(
 			config: newConfig,
 		};
 	}
+
+
+/** Format a date as a relative age string. */
+function formatAge(date: Date): string {
+	const now = new Date();
+	const diffMs = now.getTime() - date.getTime();
+	const diffSec = Math.floor(diffMs / 1000);
+	const diffMin = Math.floor(diffSec / 60);
+	const diffHour = Math.floor(diffMin / 60);
+	const diffDay = Math.floor(diffHour / 24);
+
+	if (diffDay > 0) {
+		return diffDay + "d ago";
+	}
+	if (diffHour > 0) {
+		return diffHour + "h ago";
+	}
+	if (diffMin > 0) {
+		return diffMin + "m ago";
+	}
+	return diffSec + "s ago";
+}
+
 }

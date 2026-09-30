@@ -292,7 +292,9 @@ export async function runPluginSetupWithPath(
 	} catch (err) {
 		return { success: false, message: `Setup failed: ${err}` };
 	}
-}
+
+
+
 
 /** Persist config to a plugin's companion JSON (flat format). */
 export function savePluginConfig(name: string, config: Record<string, unknown>): void {
@@ -305,6 +307,27 @@ export function savePluginConfig(name: string, config: Record<string, unknown>):
 	const merged = { ...existing, ...config, enabled: true };
 	writeFileSync(configPath, JSON.stringify(merged, null, 2));
 }
+
+/**
+ * Read the plugin config for a given plugin.
+ * Returns the config object if it exists, or undefined.
+ */
+export function getPluginConfig(name: string): Record<string, unknown> | undefined {
+	const userDir = userRuntimesDir();
+	const configPath = join(userDir, name + ".json");
+	if (!existsSync(configPath)) {
+		return undefined;
+	}
+	try {
+		const raw = readFileSync(configPath, "utf-8");
+		const parsed = JSON.parse(raw);
+		return parsed as Record<string, unknown>;
+	} catch {
+		return undefined;
+	}
+}
+
+
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
