@@ -546,6 +546,115 @@ async function disconnectHostCmd(args: string[]): Promise<void> {
 
 // ─── status ────────────────────────────────────────────────────────
 
+// ─── GHA runs status ────────────────────────────────────────────────
+
+async function statusGhaRuns(
+	member: FleetMember,
+	args: string[],
+): Promise<void> {
+	const json = args.includes("--json");
+	const repo = member.config?.repo as string | undefined;
+	const token = (member.config?.token as string) ?? process.env.GITHUB_TOKEN;
+
+	if (!repo) {
+		console.error(chalk.red(`No repo configured for ${member.name}. Run: prime-agent fleet config ${member.name} repo owner/repo`));
+		process.exitCode = 1;
+		return;
+	}
+
+	// Load the GHA runtime to use its listWorkflowRuns method
+	const { GitHubActionsRuntime } = await import("../../plugins/runtimes/github-actions-runtime.js");
+
+	const runtime = new GitHubActionsRuntime({ token, repo });
+
+	let runs;
+	try {
+		runs = await runtime.listWorkflowRuns({ token, repo });
+	} catch (err) {
+		console.error(chalk.red("Failed to fetch runs: " + (err instanceof Error ? err.message : String(err))));
+		process.exitCode = 1;
+		return;
+	}
+
+	if (json) {
+		console.log(JSON.stringify({ member: member.name, repo, runs }, null, 2));
+		return;
+	}
+
+	console.log(chalk.bold(`\n  Fleet Status — ${member.name} (${repo})`));
+	console.log();
+
+	if (runs.length === 0) {
+		console.log(chalk.dim("  No workflow runs found."));
+		console.log();
+		return;
+	}
+
+	// Table header
+	const taskCol = "TASK";
+	const genCol = "GEN";
+	const statusCol = "STATUS";
+	const conclusionCol = "CONCLUSION";
+	const ageCol = "AGE";
+
+	console.log(
+		"  " +
+		taskCol.padEnd(30) +
+		genCol.padEnd(6) +
+		statusCol.padEnd(10) +
+		conclusionCol.padEnd(12) +
+		ageCol,
+	);
+	console.log(
+		"  " +
+		"—".repeat(30) +
+		" " +
+		"—".repeat(4) +
+		" " +
+		"—".repeat(8) +
+		" " +
+		"—".repeat(10) +
+		" " +
+		"—".repeat(8),
+	);
+
+	for (const run of runs) {
+		const task = run.task.length > 28 ? run.task.slice(0, 25) + "..." : run.task;
+		const gen = "#" + run.generation;
+
+		const statusColor =
+			run.status === "completed"
+				? chalk.green
+				: run.status === "in_progress"
+					? chalk.yellow
+					: chalk.dim;
+		const statusDisplay = statusColor(run.status.padEnd(10));
+
+		const conclusionColor =
+			run.conclusion === "success"
+				? chalk.green
+				: run.conclusion === "failure"
+					? chalk.red
+					: run.conclusion === "cancelled"
+						? chalk.dim
+						: chalk.dim;
+		const conclusionDisplay = conclusionColor((run.conclusion ?? "—").padEnd(12));
+
+		console.log(
+			"  " +
+			task.padEnd(30) +
+			gen.padEnd(6) +
+			statusDisplay +
+			" " +
+			conclusionDisplay +
+			" " +
+			run.age,
+		);
+	}
+
+	console.log();
+}
+
 async function statusHost(args: string[]): Promise<void> {
 	const hostname = args[0];
 	if (!hostname) {
@@ -553,6 +662,17 @@ async function statusHost(args: string[]): Promise<void> {
 		process.exitCode = 1;
 		return;
 	}
+
+	// Check if this is a github-actions member
+	await importRuntimeMembers();
+	const member = await getFleetMember(hostname);
+
+	if (member?.transport === "github-actions") {
+		await statusGhaRuns(member, args);
+		return;
+	}
+
+	// Fall back to SSH host status for other hosts
 	const json = args.includes("--json");
 	const result = await checkFleetHostStatus(hostname);
 
@@ -588,8 +708,6 @@ async function statusHost(args: string[]): Promise<void> {
 	if (result.piVersion) console.log(`  Pi version:   ${result.piVersion}`);
 	console.log();
 }
-
-// ─── bootstrap ─────────────────────────────────────────────────────
 
 async function bootstrapHostCmd(args: string[]): Promise<void> {
 	const hostname = args[0];
