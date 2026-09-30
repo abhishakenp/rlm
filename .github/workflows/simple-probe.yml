@@ -1,0 +1,15 @@
+name: Simple Probe Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      probe_id:
+        description: 'Probe ID'
+        required: true
+        type: string
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Hello from probe ${{ inputs.probe_id }}"
