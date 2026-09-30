@@ -42,6 +42,12 @@ export interface GitHubActionsRuntimeConfig {
 	repo?: string;
 	gatewayUrl?: string;
 	gatewayAuthToken?: string;
+	/** Maximum concurrent workflow runs before queueing (default: 10) */
+	maxConcurrent?: number;
+	/** Label for queued task issues (default: rlm-task) */
+	queueLabel?: string;
+	/** Disable queuing - throw error instead (default: false) */
+	noQueue?: boolean;
 }
 
 export class GitHubActionsRuntime implements AgentRuntime {
@@ -135,11 +141,67 @@ export class GitHubActionsRuntime implements AgentRuntime {
 				"No repo configured. Run `prime-agent fleet runtimes install github-actions` or provision via the provisioner.",
 			);
 
+		// Check concurrency ceiling and queue if hit
+		const queueLabel = this.config.queueLabel ?? process.env.RLM_QUEUE_LABEL ?? "rlm-task";
+		let issueNumber: number | undefined;
+
+		if (!this.config.noQueue && (await this.isCeilingHit(repo, token))) {
+			console.log(`[github-actions] Concurrency ceiling hit, filing queued issue`);
+			issueNumber = await this.fileQueuedIssue(repo, token, request, agentId);
+
+			// Return a "queued" identity - the actual run will happen via queue-promoter
+			const queuedIdentity: AgentIdentity = {
+				...identity,
+				label: `[QUEUED] ${identity.label}`,
+			};
+
+			// Create a status endpoint that checks for issue comments (promotion signal)
+			const statusEndpoint: AgentStatusEndpoint = {
+				poll: async () => {
+					// Poll the issue for promotion status
+					try {
+						const issueResp = await fetch(`https://api.github.com/repos/${repo}/issues/${issueNumber}`, {
+							headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" },
+						});
+						if (issueResp.ok) {
+							const issue = (await issueResp.json()) as { state: string; comments: number };
+							if (issue.state === "closed") {
+								return { status: "running" as AgentStatus, durationMs: 0 };
+							}
+						}
+					} catch {}
+					return { status: "queued" as AgentStatus, durationMs: 0 };
+				},
+				subscribe: (listener) => {
+					const interval = setInterval(async () => {
+						const status = await statusEndpoint.poll?.();
+						if (status && status.status !== "queued") {
+							listener({ type: "status", status: status.status, info: status });
+							clearInterval(interval);
+						}
+					}, 10000);
+					return () => clearInterval(interval);
+				},
+				abort: async () => {
+					// Close the issue to cancel the queued task
+					if (issueNumber) {
+						await this.closeQueuedIssue(repo, token, issueNumber, "", "cancelled");
+					}
+				},
+				requestFile: async () => "",
+				sendFile: async () => {
+					throw new Error("Cannot send files to a queued task");
+				},
+			};
+
+			return { identity: queuedIdentity, statusEndpoint };
+		}
+
 		// Set credentials as GitHub repository secrets (not embedded in YAML)
 		await this.setRepositorySecrets(repo, token, credentialKeys);
 
 		const workDir = request.workDir ?? `.rlm/sessions/fleet/${agentId}`;
-		const runId = await this.triggerWorkflow(repo, token, workflowYaml, agentId, gistUrl, workDir);
+		const runId = await this.triggerWorkflow(repo, token, workflowYaml, agentId, gistUrl, workDir, issueNumber);
 
 		let currentStatus: AgentStatusInfo = { status: "running" };
 		const eventListeners = new Set<(event: AgentEvent) => void>();
@@ -228,25 +290,34 @@ export class GitHubActionsRuntime implements AgentRuntime {
 			"    inputs:",
 			"      agent_id:",
 			"        description: 'Agent ID'",
-			"        required: true",
+			"        required: false",
 			"      gist_url:",
 			"        description: 'Bundle Gist URL'",
-			"        required: true",
+			"        required: false",
 			"      work_dir:",
 			"        description: 'Work directory relative to HOME'",
-			"        required: true",
+			"        required: false",
 			`        default: '${workDir}'`,
+			"      issue_number:",
+			"        description: 'Linked issue number for closing after completion'",
+			"        required: false",
+			"  repository_dispatch:",
+			"    types:",
+			"      - rlm-promote",
 			"",
 			"jobs:",
 			"  agent:",
 			"    runs-on: ubuntu-latest",
 			"    env:",
 			// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub Actions syntax
-			"      AGENT_ID: ${{ github.event.inputs.agent_id }}",
+			"      AGENT_ID: ${{ github.event.inputs.agent_id || github.event.client_payload.issue_number || '' }}",
+			"      INPUT_GIST_URL: ${{ github.event.inputs.gist_url || '' }}",
+			"      INPUT_WORK_DIR: ${{ github.event.inputs.work_dir || '' }}",
+			"      INPUT_ISSUE_NUMBER: ${{ github.event.inputs.issue_number || '' }}",
 		];
 
 		for (const k of credentialKeys) {
-			lines.push(`      ${k}: \${{ secrets.${k} }}`);
+			lines.push(`      ${k}: ${{ secrets.${k} }}`);
 		}
 
 		lines.push(
@@ -258,8 +329,12 @@ export class GitHubActionsRuntime implements AgentRuntime {
 			"",
 			"      - name: Download and Extract Agent Bundle",
 			"        run: |",
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub Actions syntax
-			'          curl -sL "${{ github.event.inputs.gist_url }}" -o /tmp/bundle.b64',
+			"          GIST_URL="$INPUT_GIST_URL"",
+			"          if [ -z "$GIST_URL" ]; then",
+			"            echo "No gist URL provided"",
+			"            exit 1",
+			"          fi",
+			"          curl -sL "$GIST_URL" -o /tmp/bundle.b64",
 			"          base64 -d /tmp/bundle.b64 > /tmp/bundle.tar.gz",
 			"          mkdir -p /tmp/agent-bundle",
 			"          tar xzf /tmp/bundle.tar.gz -C /tmp/agent-bundle",
@@ -273,11 +348,11 @@ export class GitHubActionsRuntime implements AgentRuntime {
 			"          bash $BUNDLE_DIR/run.sh",
 			"        env:",
 			// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub Actions syntax
-			"          AGENT_ID: ${{ github.event.inputs.agent_id }}",
+			"          AGENT_ID: ${{ github.event.inputs.agent_id || '' }}",
 		);
 
 		for (const k of credentialKeys) {
-			lines.push(`          ${k}: \${{ secrets.${k} }}`);
+			lines.push(`          ${k}: ${{ secrets.${k} }}`);
 		}
 
 		lines.push(
@@ -286,7 +361,8 @@ export class GitHubActionsRuntime implements AgentRuntime {
 			"        if: always()",
 			"        id: workdir",
 			"        run: |",
-			`          echo "work_path=$HOME/${workDir}" >> $GITHUB_OUTPUT`,
+			`          WORK_PATH="$HOME/${INPUT_WORK_DIR:-'${workDir}'}"`,
+			'          echo "work_path=$WORK_PATH" >> $GITHUB_OUTPUT',
 			"",
 			"      - name: Upload Work Directory",
 			"        if: always()",
@@ -307,6 +383,14 @@ export class GitHubActionsRuntime implements AgentRuntime {
 			"          path: |",
 			"            /tmp/agent-bundle/",
 			"          if-no-files-found: ignore",
+			"",
+			"      - name: Close Linked Issue",
+			"        if: env.INPUT_ISSUE_NUMBER != ''",
+			"        run: |",
+			"          gh issue comment "$INPUT_ISSUE_NUMBER" \",
+			// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub Actions syntax
+			"            --body "Run completed: [${{ github.run_id }}](<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}>)"",
+			"          gh issue close "$INPUT_ISSUE_NUMBER" --repo "${{ github.repository }}"",
 		);
 
 		return `${lines.join("\n")}\n`;
@@ -350,6 +434,161 @@ export class GitHubActionsRuntime implements AgentRuntime {
 	// detectRepo() removed — GitHub Actions runtime now requires a dedicated
 	// repo configured via setup(). No more cwd repo fallback.
 
+
+	/**
+	 * Check how many workflow runs are currently active (queued or in_progress).
+	 */
+	private async countActiveRuns(repo: string, token: string): Promise<number> {
+		try {
+			const resp = await fetch(
+				`https://api.github.com/repos/${repo}/actions/runs?status=in_progress&per_page=100`,
+				{ headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" } },
+			);
+			if (!resp.ok) return 0;
+			const inProgress = ((await resp.json()) as { total_count: number }).total_count;
+
+			const queuedResp = await fetch(
+				`https://api.github.com/repos/${repo}/actions/runs?status=queued&per_page=100`,
+				{ headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" } },
+			);
+			const queued = queuedResp.ok ? ((await queuedResp.json()) as { total_count: number }).total_count : 0;
+
+			return inProgress + queued;
+		} catch {
+			return 0;
+		}
+	}
+
+	/**
+	 * Check if the concurrency ceiling has been reached.
+	 */
+	private async isCeilingHit(repo: string, token: string): Promise<boolean> {
+		const maxConcurrent = this.config.maxConcurrent ?? parseInt(process.env.RLM_MAX_CONCURRENT ?? "10", 10);
+		const activeRuns = await this.countActiveRuns(repo, token);
+		return activeRuns >= maxConcurrent;
+	}
+
+	/**
+	 * File a GitHub Issue for a queued task.
+	 * Returns the issue number.
+	 */
+	private async fileQueuedIssue(
+		repo: string,
+		token: string,
+		request: SpawnRequest,
+		agentId: string,
+	): Promise<number> {
+		const queueLabel = this.config.queueLabel ?? process.env.RLM_QUEUE_LABEL ?? "rlm-task";
+		const workDir = request.workDir ?? `.rlm/sessions/fleet/${agentId}`;
+
+		// Format the issue body with spawn parameters
+		const issueBody = `<!-- rlm-queued: true -->
+```
+rlm-queued: true
+spawn-params:
+  prompt: |
+    ${request.prompt.replace(/"/g, '\"').replace(/\n/g, '\n')}
+  model: ${request.model ?? "default"}
+  name: ${request.name ?? ""}
+  depth: ${request.depth}
+  parent-agent-id: ${request.parent?.agentId ?? ""}
+  work-dir: ${workDir}
+  agent-id: ${agentId}
+
+queued-at: ${new Date().toISOString()}
+```
+
+<!-- Add comments to this issue to track promotion status. -->
+`;
+
+		const title = `[RLM Task] ${request.name ?? request.prompt.slice(0, 80)}`;
+
+		const resp = await fetch(`https://api.github.com/repos/${repo}/issues`, {
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${token}`,
+				Accept: "application/vnd.github+json",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({
+				title,
+				body: issueBody,
+				labels: [queueLabel],
+			}),
+		});
+
+		if (!resp.ok) {
+			const errText = await resp.text();
+			throw new Error(`Failed to file queued issue: ${resp.status} ${errText}`);
+		}
+
+		const data = (await resp.json()) as { number: number };
+		console.log(`[github-actions] Filed queued issue #${data.number}`);
+		return data.number;
+	}
+
+	/**
+	 * Close a queued issue and add a comment linking to the run.
+	 */
+	private async closeQueuedIssue(repo: string, token: string, issueNumber: number, runUrl: string, conclusion?: string): Promise<void> {
+		try {
+			// Add comment with run link
+			await fetch(`https://api.github.com/repos/${repo}/issues/${issueNumber}/comments`, {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${token}`,
+					Accept: "application/vnd.github+json",
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({
+					body: conclusion
+						? `Run completed: [${conclusion}](<${runUrl}>)`
+						: `Run completed: [${runUrl}>](<${runUrl}>)`,
+				}),
+			});
+
+			// Close the issue
+			await fetch(`https://api.github.com/repos/${repo}/issues/${issueNumber}`, {
+				method: "PATCH",
+				headers: {
+					Authorization: `Bearer ${token}`,
+					Accept: "application/vnd.github+json",
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({ state: "closed", state_reason: "completed" }),
+			});
+
+			console.log(`[github-actions] Closed issue #${issueNumber}, run: ${runUrl}`);
+		} catch (err) {
+			console.error(`[github-actions] Failed to close issue #${issueNumber}:`, err);
+		}
+	}
+
+	/**
+	 * Trigger a workflow for a promoted issue.
+	 * Reads spawn params from the issue body.
+	 */
+	private async triggerWorkflowForIssue(
+		repo: string,
+		token: string,
+		issueNumber: number,
+		workflowFile: string,
+		gistUrl: string,
+	): Promise<number> {
+		// Get the issue to extract spawn params
+		const issueResp = await fetch(`https://api.github.com/repos/${repo}/issues/${issueNumber}`, {
+			headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" },
+		});
+
+		if (!issueResp.ok) {
+			throw new Error(`Failed to fetch issue #${issueNumber}: ${issueResp.status}`);
+		}
+
+		const issue = (await issueResp.json()) as { body: string; title: string };
+		const runId = await this.triggerWorkflow(repo, token, "", "", gistUrl, "");
+
+		return runId;
+	}
 	private async triggerWorkflow(
 		repo: string,
 		token: string,
@@ -357,6 +596,7 @@ export class GitHubActionsRuntime implements AgentRuntime {
 		agentId: string,
 		gistUrl: string,
 		workDir: string,
+		issueNumber?: number,
 	): Promise<number> {
 		const workflowFile = ".github/workflows/prime-agent.yml";
 
@@ -394,7 +634,7 @@ export class GitHubActionsRuntime implements AgentRuntime {
 		const triggerUrl = `https://api.github.com/repos/${repo}/actions/workflows/prime-agent.yml/dispatches`;
 		const triggerBody = JSON.stringify({
 			ref: defaultBranch,
-			inputs: { agent_id: agentId, gist_url: gistUrl, work_dir: workDir },
+			inputs: { agent_id: agentId, gist_url: gistUrl, work_dir: workDir, issue_number: issueNumber?.toString() ?? '' },
 		});
 		const triggerHeaders = { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" };
 

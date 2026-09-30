@@ -1,0 +1,90 @@
+name: Queue Promoter
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force promote next issue regardless of concurrency'
+        required: false
+        default: 'false'
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get configuration
+        id: config
+        run: |
+          MAX_CONCURRENT="${RLM_MAX_CONCURRENT:-10}"
+          QUEUE_LABEL="${RLM_QUEUE_LABEL:-rlm-task}"
+          echo "max_concurrent=$MAX_CONCURRENT" >> $GITHUB_OUTPUT
+          echo "queue_label=$QUEUE_LABEL" >> $GITHUB_OUTPUT
+
+      - name: Count active workflow runs
+        id: active-runs
+        run: |
+          ACTIVE_RUNS=$(gh run list --status in_progress,queued --json id --jq 'length')
+          echo "active_runs=$ACTIVE_RUNS" >> $GITHUB_OUTPUT
+          echo "Current active runs: $ACTIVE_RUNS"
+
+      - name: Check if promotion needed
+        id: check
+        run: |
+          ACTIVE=${ACTIVE_RUNS:-0}
+          MAX=${MAX_CONCURRENT:-10}
+          FORCE="${{ github.event.inputs.force }}"
+          
+          if [ "$FORCE" = "true" ] || [ "$ACTIVE" -lt "$MAX" ]; then
+            echo "promote_needed=true" >> $GITHUB_OUTPUT
+          else
+            echo "Slots full ($ACTIVE/$MAX). No promotion needed."
+            echo "promote_needed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Find oldest queued issue
+        if: steps.check.outputs.promote_needed == 'true'
+        id: find-issue
+        run: |
+          ISSUE_DATA=$(gh issue list \
+            --label "${QUEUE_LABEL}" \
+            --state open \
+            --json number,title,body,createdAt \
+            --jq 'sort_by(.createdAt) | .[0]' \
+            --limit 1)
+          
+          if [ -z "$ISSUE_DATA" ] || [ "$ISSUE_DATA" = "null" ]; then
+            echo "No queued issues found."
+            echo "issue_number=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          ISSUE_NUMBER=$(echo "$ISSUE_DATA" | jq -r '.number')
+          echo "Found queued issue: #$ISSUE_NUMBER"
+          echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+          
+          echo "$ISSUE_DATA" > /tmp/queued-issue.json
+
+      - name: Dispatch promotion event
+        if: steps.find-issue.outputs.issue_number != ''
+        id: dispatch
+        run: |
+          ISSUE_NUM="${{ steps.find-issue.outputs.issue_number }}"
+          
+          gh api repos/${{ github.repository }}/dispatches \
+            --field event_type=rlm-promote \
+            --field client_payload="{\"issue_number\": $ISSUE_NUM}"
+          
+          echo "Dispatched promotion for issue #$ISSUE_NUM"
+          
+          gh issue comment "$ISSUE_NUM" \
+            --body "Promoting to workflow run. Will dispatch shortly."
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Queue Promoter Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Active runs: ${{ steps.active-runs.outputs.active_runs }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Max concurrent: ${{ steps.config.outputs.max_concurrent }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Promotion triggered: ${{ steps.check.outputs.promote_needed }}" >> $GITHUB_STEP_SUMMARY
