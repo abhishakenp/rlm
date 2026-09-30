@@ -122,9 +122,6 @@ export async function handleFleetCommand(args: string[]): Promise<void> {
 		case "runs":
 			await runsStatus(rest);
 			break;
-		case "runs":
-			await runsStatus(rest);
-			break;
 		case "bootstrap":
 			await bootstrapHostCmd(rest);
 			break;
