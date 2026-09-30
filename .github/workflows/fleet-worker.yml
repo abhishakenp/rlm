@@ -1,0 +1,42 @@
+name: Fleet Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Linked GitHub Issue number'
+        required: false
+        type: number
+      task_prompt:
+        description: 'Task to execute'
+        required: true
+        type: string
+  repository_dispatch:
+    types: [run-task]
+
+env:
+  LINKED_ISSUE: ${{ inputs.issue_number || github.event.client_payload.issue_number }}
+  TASK_PROMPT: ${{ inputs.task_prompt || github.event.client_payload.task_prompt }}
+
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log start
+        run: |
+          echo "Fleet Worker started"
+          [ -n "$LINKED_ISSUE" ] && echo "Linked Issue: #$LINKED_ISSUE"
+          
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Execute task
+        run: |
+          echo "Task prompt: $TASK_PROMPT"
+          # Task execution logic goes here
+          echo "Task execution complete"
+
+      - name: Log completion
+        if: env.LINKED_ISSUE
+        run: |
+          echo "Task complete for issue #$LINKED_ISSUE"

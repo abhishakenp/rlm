@@ -441,3 +441,20 @@ function extractAssistantText(msg: any): string {
 	}
 	return JSON.stringify(content);
 }
+
+
+// Runner Label Resolver exports
+export {
+  resolveRunnerLabel,
+  emitRunnerLabel,
+  isValidLabel,
+  getValidLabels,
+  RunnerLabelResolutionError,
+} from "./runner-label-resolver.js";
+
+export type {
+  RunnerLabel,
+  TaskHints,
+  ResolutionResult,
+  ResolverConfig,
+} from "./runner-label-resolver.js";

@@ -1,0 +1,125 @@
+name: Fleet Queue Drain
+
+on:
+  schedule:
+    # Run every 2 minutes for responsive queue processing
+    - cron: '*/2 * * * *'
+  workflow_dispatch:
+  repository_dispatch:
+    types: [queue-check]
+  workflow_run:
+    types: [completed]
+
+env:
+  QUEUE_LABEL: rlm-task
+  IN_PROGRESS_LABEL: rlm-in-progress
+  MAX_CONCURRENCY: 5
+
+jobs:
+  # ============================================================
+  # STEP 1: Check available slots
+  # ============================================================
+  check-slots:
+    runs-on: ubuntu-latest
+    outputs:
+      active_runs: ${{ steps.count.outputs.active_runs }}
+      slots_available: ${{ steps.count.outputs.slots_available }}
+    steps:
+      - name: Count active runs
+        id: count
+        run: |
+          ACTIVE=$(gh run list --status in_progress --json id --jq 'length')
+          ACTIVE=${ACTIVE:-0}
+          MAX=${{ env.MAX_CONCURRENCY }}
+          SLOTS=$((MAX - ACTIVE))
+          [ $SLOTS -lt 0 ] && SLOTS=0
+          echo "active_runs=$ACTIVE" >> $GITHUB_OUTPUT
+          echo "slots_available=$SLOTS" >> $GITHUB_OUTPUT
+          echo "Active runs: $ACTIVE, Slots available: $SLOTS"
+
+  # ============================================================
+  # STEP 2: Read queued issues
+  # ============================================================
+  read-queue:
+    needs: check-slots
+    if: needs.check-slots.outputs.slots_available != '0'
+    runs-on: ubuntu-latest
+    outputs:
+      queue_count: ${{ steps.read.outputs.queue_count }}
+    steps:
+      - name: Get queued issues
+        id: read
+        run: |
+          ISSUES=$(gh issue list --label "${{ env.QUEUE_LABEL }}" --state open --json number,title --jq 'sort_by(.createdAt)')
+          if [ -z "$ISSUES" ]; then
+            echo "queue_count=0" >> $GITHUB_OUTPUT
+            echo "No queued issues"
+          else
+            echo "[$ISSUES]" > queue.json
+            COUNT=$(cat queue.json | jq 'length')
+            echo "queue_count=$COUNT" >> $GITHUB_OUTPUT
+            echo "Found $COUNT queued issues"
+          fi
+
+  # ============================================================
+  # STEP 3: Promote queued issues to runs
+  # ============================================================
+  promote:
+    needs: [check-slots, read-queue]
+    if: needs.check-slots.outputs.slots_available != '0' && needs.read-queue.outputs.queue_count != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        index: [0, 1, 2, 3, 4]
+    steps:
+      - name: Check if slot available
+        id: check-slot
+        run: |
+          IDX=${{ matrix.index }}
+          SLOT=${{ needs.check-slots.outputs.slots_available }}
+          [ $IDX -ge $SLOT ] && echo "SKIP=true" >> $GITHUB_OUTPUT || echo "SKIP=false" >> $GITHUB_OUTPUT
+
+      - name: Get issue to promote
+        if: steps.check-slot.outputs.SKIP != 'true'
+        id: get-issue
+        run: |
+          IDX=${{ matrix.index }}
+          CNT=$(cat queue.json 2>/dev/null | jq 'length' || echo 0)
+          if [ $CNT -le $IDX ]; then
+            echo "NO_ISSUE=true" >> $GITHUB_OUTPUT
+          else
+            ISSUE=$(cat queue.json | jq ".[$IDX]")
+            echo "NO_ISSUE=false" >> $GITHUB_OUTPUT
+            echo "NUM=$(echo $ISSUE | jq -r '.number')" >> $GITHUB_OUTPUT
+            echo "Processing issue #$(echo $ISSUE | jq -r '.number')"
+          fi
+
+      - name: Dispatch run
+        if: steps.get-issue.outputs.NO_ISSUE != 'true'
+        id: dispatch
+        run: |
+          NUM=${{ steps.get-issue.outputs.NUM }}
+          RUN_ID="run-$(date +%s)-$NUM"
+          echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
+          echo "Dispatching for issue #$NUM"
+          # In production: gh workflow run fleet-worker.yml --field issue_number=$NUM
+
+      - name: Update issue labels
+        if: steps.get-issue.outputs.NO_ISSUE != 'true'
+        run: |
+          gh issue edit ${{ steps.get-issue.outputs.NUM }} --add-label "${{ env.IN_PROGRESS_LABEL }}" --remove-label "${{ env.QUEUE_LABEL }}"
+
+      - name: Comment run link
+        if: steps.get-issue.outputs.NO_ISSUE != 'true'
+        run: |
+          gh issue comment ${{ steps.get-issue.outputs.NUM }} --body "## Promotion Status
+
+This issue has been promoted to an active run.
+
+| Field | Value |
+|-------|-------|
+| **Run ID** | \`${{ steps.dispatch.outputs.run_id }}\` |
+| **Promoted at** | $(date -u) |
+
+---
+*Promoted by Fleet Queue Drain scheduler (S2)*"
