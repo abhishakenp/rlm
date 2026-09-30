@@ -285,4 +285,18 @@ This issue has been promoted to an active run.
 The run will complete and link back to this issue when finished.
 `;
   }
+
+
+  /**
+   * Get active workflow runs
+   */
+  async getActiveRuns(): Promise<Array<{ id: number; status: string; name?: string }>> {
+    const runs = await this.request<Array<{ id: number; status: string; name: string }>>(
+      'GET',
+      `/repos/${this.config.repoOwner}/${this.config.repoName}/actions/runs`,
+      { status: 'in_progress' }
+    );
+    return runs;
+  }
+
 }

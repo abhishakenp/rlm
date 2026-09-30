@@ -1,23 +1,10 @@
 /**
- * @rlm/fleet-queue
+ * Fleet Queue Module
  * 
- * Fleet queue management with GitHub Issues as queue backend.
- * 
- * When fleet admission would exceed a concurrency ceiling, the system files
- * a GitHub Issue labeled with the queue label instead of dispatching a run.
- * A periodic workflow promotes queued issues to dispatched runs as slots
- * free up, closing the issue when the run completes and linking run↔issue.
+ * Exports the main Fleet Queue classes and utilities.
  */
 
 export { FleetQueue, createFleetQueue } from './queue.js';
-export { GitHubApiHandler } from './github-api.js';
-export type {
-  QueueConfig,
-  QueueEntry,
-  QueueAdmissionResult,
-  RunMetadata,
-  IssueState,
-  GitHubIssue,
-  GitHubComment,
-  PromotionResult,
-} from './types.js';
+export { QueueDrainScheduler, createQueueDrainScheduler } from './drain-scheduler.js';
+export type { QueueDrainConfig } from './drain-scheduler.js';
+export type * from './types.js';
