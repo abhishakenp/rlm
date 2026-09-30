@@ -1,0 +1,1 @@
+- Added opt-in cleanup of superseded GitHub Actions runs to the generated workflow: cancel via gh api and optionally delete the failed run record behind a `cleanup_failed` input (default false).
