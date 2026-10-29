@@ -1,0 +1,175 @@
+name: Concurrency Probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      probe_id:
+        description: 'Probe ID for grouping'
+        required: true
+        type: string
+
+concurrency:
+  group: probe-${{ inputs.probe_id }}
+  cancel-in-progress: false
+
+jobs:
+  # Linux workers - 16 jobs to test the ceiling
+  linux-worker-0:
+    runs-on: ubuntu-latest
+    steps: &probe-steps
+      - name: Record start time
+        run: echo "PROBE_STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_ENV
+      - name: Get run timing from API
+        run: |
+          RUN_DATA=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" | \
+            jq '.jobs[0] | {created_at: .created_at, started_at: .started_at, name: .name}')
+          echo "$RUN_DATA"
+          echo "$RUN_DATA" > /tmp/job_timing.json
+      - name: Summary
+        run: |
+          TIMING=$(cat /tmp/job_timing.json)
+          echo "## Job Timing" >> $GITHUB_STEP_SUMMARY
+          echo '```json' >> $GITHUB_STEP_SUMMARY
+          echo "$TIMING" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  linux-worker-1:
+    runs-on: ubuntu-latest
+    steps: *probe-steps
+
+  linux-worker-2:
+    runs-on: ubuntu-latest
+    steps: *probe-steps
+
+  linux-worker-3:
+    runs-on: ubuntu-latest
+    steps: *probe-steps
+
+  linux-worker-4:
+    runs-on: ubuntu-latest
+    steps: *probe-steps
+
+  linux-worker-5:
+    runs-on: ubuntu-latest
+    steps: *probe-steps
+
+  linux-worker-6:
+    runs-on: ubuntu-latest
+    steps: *probe-steps
+
+  linux-worker-7:
+    runs-on: ubuntu-latest
+    steps: *probe-steps
+
+  linux-worker-8:
+    runs-on: ubuntu-latest
+    steps: *probe-steps
+
+  linux-worker-9:
+    runs-on: ubuntu-latest
+    steps: *probe-steps
+
+  linux-worker-10:
+    runs-on: ubuntu-latest
+    steps: *probe-steps
+
+  linux-worker-11:
+    runs-on: ubuntu-latest
+    steps: *probe-steps
+
+  linux-worker-12:
+    runs-on: ubuntu-latest
+    steps: *probe-steps
+
+  linux-worker-13:
+    runs-on: ubuntu-latest
+    steps: *probe-steps
+
+  linux-worker-14:
+    runs-on: ubuntu-latest
+    steps: *probe-steps
+
+  linux-worker-15:
+    runs-on: ubuntu-latest
+    steps: *probe-steps
+
+  # macOS workers - 10 jobs
+  macos-worker-0:
+    runs-on: macos-latest
+    steps: *probe-steps
+
+  macos-worker-1:
+    runs-on: macos-latest
+    steps: *probe-steps
+
+  macos-worker-2:
+    runs-on: macos-latest
+    steps: *probe-steps
+
+  macos-worker-3:
+    runs-on: macos-latest
+    steps: *probe-steps
+
+  macos-worker-4:
+    runs-on: macos-latest
+    steps: *probe-steps
+
+  macos-worker-5:
+    runs-on: macos-latest
+    steps: *probe-steps
+
+  macos-worker-6:
+    runs-on: macos-latest
+    steps: *probe-steps
+
+  macos-worker-7:
+    runs-on: macos-latest
+    steps: *probe-steps
+
+  macos-worker-8:
+    runs-on: macos-latest
+    steps: *probe-steps
+
+  macos-worker-9:
+    runs-on: macos-latest
+    steps: *probe-steps
+
+  # Collector job - waits for all workers and aggregates
+  collect-results:
+    needs: [linux-worker-0, linux-worker-1, linux-worker-2, linux-worker-3, linux-worker-4, 
+             linux-worker-5, linux-worker-6, linux-worker-7, linux-worker-8, linux-worker-9,
+             linux-worker-10, linux-worker-11, linux-worker-12, linux-worker-13, linux-worker-14, 
+             linux-worker-15, macos-worker-0, macos-worker-1, macos-worker-2, macos-worker-3,
+             macos-worker-4, macos-worker-5, macos-worker-6, macos-worker-7, macos-worker-8, 
+             macos-worker-9]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get all job results
+        run: |
+          curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" | \
+            jq '[.jobs[] | select(.name | startswith("linux-worker") or startswith("macos-worker")) | 
+                 {name: .name, status: .status, created_at: .created_at, started_at: .started_at, completed_at: .completed_at}]' > /tmp/all_jobs.json
+          
+          echo "## Probe Results Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          LINUX_JOBS=$(cat /tmp/all_jobs.json | jq '[.[] | select(.name | startswith("linux-worker"))]')
+          MACOS_JOBS=$(cat /tmp/all_jobs.json | jq '[.[] | select(.name | startswith("macos-worker"))]')
+          
+          echo "Linux Jobs:" >> $GITHUB_STEP_SUMMARY
+          echo '```json' >> $GITHUB_STEP_SUMMARY
+          echo "$LINUX_JOBS" | jq '.[] | {name, created_at, started_at, queue_delay}' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "macOS Jobs:" >> $GITHUB_STEP_SUMMARY
+          echo '```json' >> $GITHUB_STEP_SUMMARY
+          echo "$MACOS_JOBS" | jq '.[] | {name, created_at, started_at, queue_delay}' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          
+          # Save for API access
+          echo "$LINUX_JOBS" > /tmp/linux_jobs.json
+          echo "$MACOS_JOBS" > /tmp/macos_jobs.json
+Tue Sep 29 23:57:29 UTC 2026

@@ -1,0 +1,53 @@
+name: Concurrency Probe - Linux Workers
+
+on:
+  workflow_dispatch:
+    inputs:
+      probe_id:
+        description: 'Probe ID for grouping'
+        required: true
+        type: string
+      job_index:
+        description: 'Job index (0-15)'
+        required: true
+        type: string
+
+jobs:
+  probe-worker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record job start
+        run: |
+          echo "PROBE_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_ENV
+          echo "PROBE_ID=${{ inputs.probe_id }}" >> $GITHUB_ENV
+          echo "JOB_INDEX=${{ inputs.job_index }}" >> $GITHUB_ENV
+          echo "RUNNER_OS=linux" >> $GITHUB_ENV
+
+      - name: Get queued time from GitHub API
+        run: |
+          curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" | \
+            jq '{created_at: .created_at, run_started_at: .run_started_at}'
+
+      - name: Record completion
+        run: |
+          echo "PROBE_COMPLETED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_ENV
+          echo "PROBE_ID=$PROBE_ID" > /tmp/probe_result.txt
+          echo "JOB_INDEX=$JOB_INDEX" >> /tmp/probe_result.txt
+          echo "RUNNER_OS=$RUNNER_OS" >> /tmp/probe_result.txt
+          echo "PROBE_STARTED_AT=$PROBE_STARTED_AT" >> /tmp/probe_result.txt
+          echo "PROBE_COMPLETED_AT=$PROBE_COMPLETED_AT" >> /tmp/probe_result.txt
+          echo "RUNNER_NAME=${{ runner.name }}" >> /tmp/probe_result.txt
+          
+      - name: Output result as step summary
+        run: |
+          echo "## Probe Result" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Probe ID | $PROBE_ID |" >> $GITHUB_STEP_SUMMARY
+          echo "| Job Index | $JOB_INDEX |" >> $GITHUB_STEP_SUMMARY
+          echo "| OS | $RUNNER_OS |" >> $GITHUB_STEP_SUMMARY
+          echo "| Started At | $PROBE_STARTED_AT |" >> $GITHUB_STEP_SUMMARY
+          echo "| Completed At | $PROBE_COMPLETED_AT |" >> $GITHUB_STEP_SUMMARY
+          echo "| Runner Name | $RUNNER_NAME |" >> $GITHUB_STEP_SUMMARY
