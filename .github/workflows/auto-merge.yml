@@ -1,0 +1,54 @@
+name: Auto-merge low-risk PRs
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check changed files
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+            const lowRisk = files.every(f =>
+              f.filename.match(/\.(md|mdx|txt|json|yaml|yml|toml|cfg|ini|lock)$/) ||
+              f.filename.startsWith('docs/') ||
+              f.filename.startsWith('test/') ||
+              f.filename.startsWith('__tests__/') ||
+              f.filename.includes('.test.') ||
+              f.filename.includes('.spec.') ||
+              f.filename.startsWith('.github/') ||
+              f.filename === 'README.md' ||
+              f.filename === 'CHANGELOG.md'
+            );
+            core.setOutput('low_risk', lowRisk);
+            core.setOutput('file_count', files.length);
+            if (lowRisk) {
+              console.log(`All ${files.length} files are low-risk. Auto-merging.`);
+            } else {
+              console.log(`Not all files are low-risk. Skipping auto-merge.`);
+            }
+
+      - name: Auto-merge
+        if: steps.check.outputs.low_risk == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.pulls.merge({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              merge_method: 'squash',
+            });
+            console.log('PR auto-merged successfully.');
