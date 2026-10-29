@@ -11,5 +11,6 @@
   },
   "dependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
+    "@octokit/rest": "^22.0.1"
   }
 }
