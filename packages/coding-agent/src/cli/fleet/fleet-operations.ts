@@ -22,6 +22,16 @@ import {
 	renameFleetHost,
 	updateFleetHostStatus,
 } from "./fleet-config.js";
+import {
+	recordTaskRun,
+	updateTaskRun,
+	getLatestRuns,
+	getRunsByHost,
+	getHostStatusSummary,
+	getFleetStatusSummary,
+	type TaskRun,
+	type RunConclusion,
+} from "./fleet-runs.js";
 
 export interface OperationResult {
 	success: boolean;
@@ -209,6 +219,86 @@ export async function sshIntoFleetHost(hostname: string): Promise<OperationResul
 		});
 	});
 }
+
+
+
+/**
+ * Record that a task has started on a host.
+ */
+export async function recordFleetRunStart(
+	taskName: string,
+	host: string,
+	generation: number,
+): Promise<TaskRun> {
+	const run: TaskRun = {
+		runId: crypto.randomUUID(),
+		host,
+		taskName,
+		generation,
+		conclusion: "running",
+		startedAt: Date.now(),
+		endedAt: 0,
+	};
+	await recordTaskRun(run);
+	return run;
+}
+
+/**
+ * Record that a task has completed.
+ */
+export async function recordFleetRunEnd(
+	runId: string,
+	taskName: string,
+	conclusion: RunConclusion,
+	error?: string,
+): Promise<void> {
+	const endedAt = Date.now();
+	await updateTaskRun(runId, taskName, {
+		conclusion,
+		endedAt,
+		durationMs: endedAt,
+		error,
+	});
+}
+
+/**
+ * Get the current status of all fleet runs.
+ */
+export async function getFleetRunsStatus(): Promise<
+	Array<{
+		host: string;
+		totalRuns: number;
+		running: number;
+		completed: number;
+		failed: number;
+		latestRun?: {
+			taskName: string;
+			generation: number;
+			conclusion: RunConclusion;
+			age: number;
+		};
+	}>
+> {
+	const summary = await getFleetStatusSummary();
+	const now = Date.now();
+	
+	return summary.map((s) => ({
+		host: s.host,
+		totalRuns: s.totalRuns,
+		running: s.running,
+		completed: s.completed,
+		failed: s.failed,
+		latestRun: s.latestRun
+			? {
+					taskName: s.latestRun.taskName,
+					generation: s.latestRun.generation,
+					conclusion: s.latestRun.conclusion,
+					age: Math.round((now - s.latestRun.startedAt) / 1000),
+				}
+			: undefined,
+	}));
+}
+
 
 // ─── Batch add/remove ──────────────────────────────────────────────
 
