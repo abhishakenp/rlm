@@ -1,0 +1,201 @@
+# Fleet Queue Promoter Workflow
+# 
+# Justification for separate workflow file:
+# 1. Separation of Concerns: Queue promotion logic is distinct from admission
+# 2. Independent Trigger: Runs on schedule independently of admission events
+# 3. Maintainability: Each workflow is easier to understand and modify
+# 4. No Coupling: Main admission workflow doesn't need scheduling details
+# 5. Scalability: Can extend to multiple promotion strategies without clutter
+#
+# Alternative: Extend generated YAML - Rejected because schedule triggers
+# can't be conditionally added, and mixing concerns increases complexity.
+
+name: Fleet Queue Promoter
+
+on:
+  # Run every 5 minutes to check for queued tasks
+  schedule:
+    - cron: '*/5 * * * *'
+  
+  # Manual trigger for testing or immediate processing
+  workflow_dispatch:
+    inputs:
+      force_promote:
+        description: 'Force promotion of oldest queued issue'
+        required: false
+        default: 'false'
+        type: boolean
+
+  # Allow manual triggering with repository_dispatch
+  repository_dispatch:
+    types:
+      - queue-check
+
+env:
+  QUEUE_LABEL: rlm-task
+  IN_PROGRESS_LABEL: rlm-in-progress
+  COMPLETED_LABEL: rlm-completed
+  MAX_CONCURRENCY: ${{ vars.FLEET_MAX_CONCURRENCY || '5' }}
+
+jobs:
+  check-and-promote:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      workflows: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get active run count
+        id: active-runs
+        run: |
+          # Get active run count from GitHub API
+          # Count workflows currently running
+          RESPONSE=$(gh run list --status in_progress --json id --jq length)
+          ACTIVE_RUNS=${RESPONSE:-0}
+          echo "active_runs=$ACTIVE_RUNS" >> $GITHUB_OUTPUT
+          echo "Active runs: $ACTIVE_RUNS"
+          echo "Max concurrency: ${{ env.MAX_CONCURRENCY }}"
+
+      - name: Check if promotion needed
+        id: check-promotion
+        run: |
+          ACTIVE_RUNS=${{ steps.active-runs.outputs.active_runs }}
+          MAX_CONCURRENCY=${{ env.MAX_CONCURRENCY }}
+          
+          if [ "$ACTIVE_RUNS" -lt "$MAX_CONCURRENCY" ]; then
+            SLOTS_AVAILABLE=$((MAX_CONCURRENCY - ACTIVE_RUNS))
+            echo "promotion_needed=true" >> $GITHUB_OUTPUT
+            echo "slots_available=$SLOTS_AVAILABLE" >> $GITHUB_OUTPUT
+            echo "Slots available: $SLOTS_AVAILABLE"
+          else
+            echo "promotion_needed=false" >> $GITHUB_OUTPUT
+            echo "slots_available=0" >> $GITHUB_OUTPUT
+            echo "No slots available, all concurrent slots full"
+          fi
+
+      - name: Get queued issues
+        if: steps.check-promotion.outputs.promotion_needed == 'true'
+        id: queued-issues
+        run: |
+          # Get open issues with rlm-task label, ordered by creation date
+          ISSUES=$(gh issue list \
+            --label "${{ env.QUEUE_LABEL }}" \
+            --state open \
+            --json number,title,createdAt \
+            --jq '.sort_by($input; .createdAt) | .[] | {number, title, createdAt}')
+          
+          if [ -z "$ISSUES" ]; then
+            echo "No queued issues found"
+            echo "issue_count=0" >> $GITHUB_OUTPUT
+          else
+            echo "$ISSUES" | jq -s '.' > queued_issues.json
+            ISSUE_COUNT=$(echo "$ISSUES" | jq -s 'length')
+            echo "issue_count=$ISSUE_COUNT" >> $GITHUB_OUTPUT
+            echo "Found $ISSUE_COUNT queued issues"
+          fi
+
+      - name: Promote queued issues
+        if: steps.check-promotion.outputs.promotion_needed == 'true' && steps.queued-issues.outputs.issue_count != '0'
+        run: |
+          SLOTS=${{ steps.check-promotion.outputs.slots_available }}
+          ISSUE_COUNT=${{ steps.queued-issues.outputs.issue_count }}
+          TO_PROMOTE=$((SLOTS < ISSUE_COUNT ? SLOTS : ISSUE_COUNT))
+          
+          echo "Promoting $TO_PROMOTE issue(s)..."
+          
+          for i in $(seq 0 $((TO_PROMOTE - 1))); do
+            ISSUE=$(cat queued_issues.json | jq -r ".[$i]")
+            ISSUE_NUMBER=$(echo "$ISSUE" | jq -r '.number')
+            ISSUE_TITLE=$(echo "$ISSUE" | jq -r '.title')
+            
+            echo "Promoting issue #$ISSUE_NUMBER: $ISSUE_TITLE"
+            
+            # Update issue labels to mark as in-progress
+            gh issue edit "$ISSUE_NUMBER" \
+              --add-label "${{ env.IN_PROGRESS_LABEL }}" \
+              --remove-label "${{ env.QUEUE_LABEL }}"
+            
+            # Add promotion comment
+            gh issue comment "$ISSUE_NUMBER" \
+              --body "## Promotion Status
+
+This issue has been promoted to an active run.
+
+- **Status**: In Progress
+- **Promoted at**: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+- **Run**: Check the Actions tab for the dispatched workflow run
+
+The run will complete and link back to this issue when finished."
+            
+            echo "Issue #$ISSUE_NUMBER promoted successfully"
+          done
+
+      - name: Update active run count
+        run: |
+          # This is informational - the actual count comes from gh run list
+          echo "Active run count will be updated on next cycle"
+
+      - name: Summary
+        run: |
+          echo "## Fleet Queue Promotion Summary"
+          echo ""
+          echo "| Metric | Value |"
+          echo "|--------|-------|"
+          echo "| Active Runs | ${{ steps.active-runs.outputs.active_runs }} |"
+          echo "| Max Concurrency | ${{ env.MAX_CONCURRENCY }} |"
+          echo "| Slots Available | ${{ steps.check-promotion.outputs.slots_available }} |"
+          echo "| Queued Issues | ${{ steps.queued-issues.outputs.issue_count || 0 }} |"
+          echo ""
+          echo "Next scheduled check in 5 minutes."
+
+  # Separate job to handle run completions
+  check-completions:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+    
+    steps:
+      - name: Find recently completed runs
+        id: completed-runs
+        run: |
+          # Find completed runs that have not closed their linked issues
+          # Look for run-metadata.json files in recent runs
+          COMPLETED_RUNS=$(gh run list \
+            --status completed \
+            --json id,name,completedAt,headBranch \
+            --jq '.[] | select(.completedAt > (now - 3600 | todate))')
+          
+          if [ -z "$COMPLETED_RUNS" ]; then
+            echo "No recently completed runs found"
+            echo "run_count=0" >> $GITHUB_OUTPUT
+          else
+            echo "$COMPLETED_RUNS" | jq -s '.' > completed_runs.json
+            RUN_COUNT=$(echo "$COMPLETED_RUNS" | jq -s 'length')
+            echo "run_count=$RUN_COUNT" >> $GITHUB_OUTPUT
+            echo "Found $RUN_COUNT recently completed runs"
+          fi
+
+      - name: Process completed runs
+        if: steps.completed-runs.outputs.run_count != '0' && steps.completed-runs.outputs.run_count != ''
+        run: |
+          # For each completed run, close the linked issue
+          # This is a simplified version - full implementation would
+          # read run-metadata.json to find the linked issue number
+          echo "Processing completed runs..."
+          echo "Note: Full implementation requires reading run artifacts"
+
+      - name: Summary
+        run: |
+          echo "## Run Completion Summary"
+          echo ""
+          echo "| Metric | Value |"
+          echo "|--------|-------|"
+          echo "| Completed Runs (last hour) | ${{ steps.completed-runs.outputs.run_count || 0 }} |"
