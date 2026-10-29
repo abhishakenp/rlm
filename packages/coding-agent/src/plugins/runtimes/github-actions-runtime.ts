@@ -109,7 +109,11 @@ export class GitHubActionsRuntime implements AgentRuntime {
 		const gistUrl = await this.uploadBundleGist(tarPath, agentId);
 
 		// Generate a small workflow YAML that downloads the bundle from the Gist
-		const workflowYaml = this.generateWorkflowYaml(identity, prompt, credentialKeys, settings, gistUrl, request);
+		const workflowYaml = this.generateWorkflowYaml(identity, prompt, credentialKeys, settings, gistUrl, request, {
+      agentName: request.name,
+      generation: request.depth,
+      parentId: request.parent?.agentId,
+    });
 
 		// Deploy the workflow and trigger it
 		// Multi-account: try config first, then provisioner pool, then gh CLI
@@ -139,7 +143,11 @@ export class GitHubActionsRuntime implements AgentRuntime {
 		await this.setRepositorySecrets(repo, token, credentialKeys);
 
 		const workDir = request.workDir ?? `.rlm/sessions/fleet/${agentId}`;
-		const runId = await this.triggerWorkflow(repo, token, workflowYaml, agentId, gistUrl, workDir);
+		const runId = await this.triggerWorkflow(repo, token, workflowYaml, agentId, gistUrl, workDir, {
+      agentName: request.name,
+      generation: request.depth,
+      parentId: request.parent?.agentId,
+    });
 
 		let currentStatus: AgentStatusInfo = { status: "running" };
 		const eventListeners = new Set<(event: AgentEvent) => void>();
@@ -219,6 +227,7 @@ export class GitHubActionsRuntime implements AgentRuntime {
 		_settings: Record<string, unknown>,
 		_gistUrl: string,
 		_request: SpawnRequest,
+		metadata: { agentName?: string; generation: number; parentId?: string },
 	): string {
 		const workDir = _request.workDir ?? `.rlm/sessions/fleet/${identity.agentId}`;
 		const lines: string[] = [
@@ -236,6 +245,15 @@ export class GitHubActionsRuntime implements AgentRuntime {
 			"        description: 'Work directory relative to HOME'",
 			"        required: true",
 			`        default: '${workDir}'`,
+			"      agent_name:",
+			"        description: 'Agent name'",
+			"        required: false",
+			"      generation:",
+			"        description: 'Agent generation (depth in recursion tree)'",
+			"        required: false",
+			"      parent_id:",
+			"        description: 'Parent agent ID'",
+			"        required: false",
 			"",
 			"jobs:",
 			"  agent:",
@@ -243,6 +261,9 @@ export class GitHubActionsRuntime implements AgentRuntime {
 			"    env:",
 			// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub Actions syntax
 			"      AGENT_ID: ${{ github.event.inputs.agent_id }}",
+			"      AGENT_NAME: ${{ github.event.inputs.agent_name }}",
+			"      AGENT_GENERATION: ${{ github.event.inputs.generation }}",
+			"      AGENT_PARENT_ID: ${{ github.event.inputs.parent_id }}",
 		];
 
 		for (const k of credentialKeys) {
@@ -251,6 +272,11 @@ export class GitHubActionsRuntime implements AgentRuntime {
 
 		lines.push(
 			"    steps:",
+			"      - name: Metadata",
+			"        run: |",
+			"          mkdir -p \$HOME/${workDir}",
+			"          node -e `const fs=require('fs');const s={task_id:process.env.AGENT_ID,name:process.env.AGENT_NAME||null,generation:parseInt(process.env.AGENT_GENERATION||'0',10),parent:process.env.AGENT_PARENT_ID||null,started_at:new Date().toISOString()};fs.writeFileSync('\$HOME/${workDir}/status.json',JSON.stringify(s,null,2));`",
+			"",
 			"      - name: Setup Node",
 			"        uses: actions/setup-node@v4",
 			"        with:",
@@ -357,6 +383,7 @@ export class GitHubActionsRuntime implements AgentRuntime {
 		agentId: string,
 		gistUrl: string,
 		workDir: string,
+		metadata: { agentName?: string; generation: number; parentId?: string },
 	): Promise<number> {
 		const workflowFile = ".github/workflows/prime-agent.yml";
 
@@ -394,7 +421,14 @@ export class GitHubActionsRuntime implements AgentRuntime {
 		const triggerUrl = `https://api.github.com/repos/${repo}/actions/workflows/prime-agent.yml/dispatches`;
 		const triggerBody = JSON.stringify({
 			ref: defaultBranch,
-			inputs: { agent_id: agentId, gist_url: gistUrl, work_dir: workDir },
+			inputs: {
+				agent_id: agentId,
+				gist_url: gistUrl,
+				work_dir: workDir,
+				agent_name: metadata.agentName ?? "",
+				generation: String(metadata.generation),
+				parent_id: metadata.parentId ?? "",
+			},
 		});
 		const triggerHeaders = { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" };
 
